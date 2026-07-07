@@ -40,6 +40,15 @@
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": true,
+    "publisher": "Pane",
+    "copyright": "© 2026 Pane contributors (MIT)",
+    "shortDescription": "AI usage limits in your system tray",
+    "longDescription": "Pane shows how much of your session and weekly limits each AI tool has left, directly from the Windows system tray.",
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico"
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
