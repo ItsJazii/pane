@@ -67,21 +67,24 @@ fn config_with_defaults(mut cfg: Value) -> Value {
         cfg = json!({});
     }
     let obj = cfg.as_object_mut().unwrap();
-    obj.entry("refreshMinutes").or_insert(json!(5));
+    // Out-of-the-box experience: 1-min refresh, pacing always visible,
+    // all three quota alerts on, dark + compact. (Autostart defaults on
+    // in setup; tray icon defaults to Auto via pinned = null.)
+    obj.entry("refreshMinutes").or_insert(json!(1));
     obj.entry("disabled").or_insert(json!([]));
     obj.entry("pinned").or_insert(Value::Null);
     obj.entry("trayProviders").or_insert(json!([]));
-    obj.entry("pacingAlways").or_insert(json!(false));
-    obj.entry("notifyAlmostOut").or_insert(json!(false));
-    obj.entry("notifyCuttingClose").or_insert(json!(false));
-    obj.entry("notifyWillRunOut").or_insert(json!(false));
+    obj.entry("pacingAlways").or_insert(json!(true));
+    obj.entry("notifyAlmostOut").or_insert(json!(true));
+    obj.entry("notifyCuttingClose").or_insert(json!(true));
+    obj.entry("notifyWillRunOut").or_insert(json!(true));
     obj.entry("spendTab").or_insert(json!("today"));
     obj.entry("showUsed").or_insert(json!(false));
     obj.entry("resetExact").or_insert(json!(false));
     obj.entry("timeFormat").or_insert(json!("auto"));
     obj.entry("layout").or_insert(Value::Null);
-    obj.entry("appearance").or_insert(json!("system"));
-    obj.entry("density").or_insert(json!("regular"));
+    obj.entry("appearance").or_insert(json!("dark"));
+    obj.entry("density").or_insert(json!("compact"));
     obj.entry("shortcut").or_insert(json!(""));
     obj.entry("proxy").or_insert(json!({ "enabled": false, "url": "" }));
     obj.entry("showTotalSpend").or_insert(json!(true));
