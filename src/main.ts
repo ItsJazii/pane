@@ -146,20 +146,10 @@ const ALL_PROVIDERS: [string, string][] = [
   ["deepseek", "DeepSeek"],
   ["moonshot", "Moonshot"],
   ["elevenlabs", "ElevenLabs"],
-  ["deepgram", "Deepgram"],
-  ["openai", "OpenAI"],
-  ["venice", "Venice"],
   ["ollama", "Ollama"],
   ["codebuff", "Codebuff"],
   ["kilo", "Kilo"],
   ["kiro", "Kiro"],
-  ["amp", "Amp"],
-  ["vertexai", "Vertex AI"],
-  ["bedrock", "AWS Bedrock"],
-  ["poe", "Poe"],
-  ["chutes", "Chutes"],
-  ["warp", "Warp"],
-  ["crof", "Crof"],
 ];
 
 // Same quick links the Mac app ships (status pages + vendor dashboards).
@@ -201,29 +191,10 @@ const PROVIDER_LINKS: Record<string, { label: string; url: string }[]> = {
     { label: "Status", url: "https://status.elevenlabs.io/" },
     { label: "Usage", url: "https://elevenlabs.io/app/usage" },
   ],
-  deepgram: [
-    { label: "Status", url: "https://status.deepgram.com/" },
-    { label: "Console", url: "https://console.deepgram.com/" },
-  ],
-  openai: [
-    { label: "Status", url: "https://status.openai.com/" },
-    { label: "Usage", url: "https://platform.openai.com/usage" },
-  ],
-  venice: [{ label: "Dashboard", url: "https://venice.ai/settings/api" }],
   ollama: [{ label: "Library", url: "https://ollama.com/library" }],
   codebuff: [{ label: "Dashboard", url: "https://www.codebuff.com/profile" }],
   kilo: [{ label: "Dashboard", url: "https://app.kilo.ai/" }],
   kiro: [{ label: "Dashboard", url: "https://kiro.dev/" }],
-  amp: [{ label: "Settings", url: "https://ampcode.com/settings" }],
-  vertexai: [{ label: "Console", url: "https://console.cloud.google.com/vertex-ai" }],
-  bedrock: [
-    { label: "Console", url: "https://console.aws.amazon.com/bedrock" },
-    { label: "Cost Explorer", url: "https://console.aws.amazon.com/costmanagement/home" },
-  ],
-  poe: [{ label: "API keys", url: "https://poe.com/api/keys" }],
-  chutes: [{ label: "Dashboard", url: "https://chutes.ai/" }],
-  warp: [{ label: "Settings", url: "https://app.warp.dev/settings" }],
-  crof: [{ label: "Dashboard", url: "https://crof.ai/" }],
 };
 
 // Brand palette for the Total Spend ring (Mac parity); unknown providers
