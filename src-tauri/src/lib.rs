@@ -101,6 +101,10 @@ fn get_config() -> Value {
 /// set_config drops anything else so a compromised frontend can't stash
 /// arbitrary data in the config file.
 const CONFIG_KEYS: &[&str] = &[
+    // Not seeded by config_with_defaults (the autostart plugin is the
+    // source of truth at runtime) but persisted here so setup() can apply
+    // the user's choice on launch.
+    "autostart",
     "refreshMinutes",
     "disabled",
     "pinned",
