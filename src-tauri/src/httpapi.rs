@@ -113,12 +113,13 @@ pub fn start() {
         for request in server.incoming_requests() {
             let (status, body) = route(request.method(), request.url());
             let mut response = tiny_http::Response::from_string(body).with_status_code(status);
-            for (k, v) in [
-                ("Access-Control-Allow-Origin", "*"),
-                ("Access-Control-Allow-Methods", "GET, OPTIONS"),
-                ("Access-Control-Allow-Headers", "Content-Type"),
-                ("Content-Type", "application/json"),
-            ] {
+            // Deliberately NO Access-Control-Allow-Origin header: with
+            // permissive CORS, any website the user visits could silently
+            // read their usage data from this port. Browsers now block
+            // cross-origin reads; scripts, widgets, and curl are unaffected
+            // (CORS only constrains browsers). The Mac app allows "*" and
+            // discloses it — we chose the stricter default.
+            for (k, v) in [("Content-Type", "application/json")] {
                 if let Ok(h) = tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()) {
                     response.add_header(h);
                 }

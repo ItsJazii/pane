@@ -167,23 +167,32 @@ whatever the community asks for loudest.
   sidebar and glass bars, magnetic minimap trail, circular day/night wipe.
 - **Share cards** — hover a card, click ⧉, paste the PNG anywhere.
 - **Quick links** — Status / Dashboard shortcuts on every card.
-- **Local HTTP API** — `GET http://127.0.0.1:6736/v1/usage` for scripts,
-  Rainmeter widgets, stream overlays; same wire format as the Mac app.
+- **[Local HTTP API](docs/local-http-api.md)** — `GET
+  http://127.0.0.1:6736/v1/usage` for scripts, Rainmeter widgets, stream
+  overlays; same wire format as the Mac app, but with no CORS headers so
+  web pages can't read it through your browser.
 - **Appearance** — System / Light / Dark, compact density, global shortcut
   (e.g. `Ctrl+Shift+U`), optional outbound proxy.
 
-## Privacy
+## Privacy & security
 
-- **Zero telemetry.** Pane phones home to nobody — there is no "home".
-- **Tokens never leave their lane.** Each vendor's credential is sent only
-  to that vendor's own API, over HTTPS, and nowhere else.
-- **Keys stay on this PC** in `%APPDATA%\Pane`, readable only by your
-  Windows user.
-- **Spend accounting is local.** Your usage logs are parsed on your
-  machine; only anonymous price-table downloads (LiteLLM/models.dev) touch
-  the network, and those are one-way.
-- The local HTTP API binds to `127.0.0.1` only — nothing on your network
-  can reach it.
+Pane reads credential files. You should not take our word for how it
+treats them — verify it:
+
+- **[docs/privacy.md](docs/privacy.md)** — the complete list of every
+  network call Pane can make. Zero telemetry: no analytics, no crash
+  reporting, no install pings, none of it exists in the codebase.
+- **[docs/providers.md](docs/providers.md)** — per provider: exactly which
+  files are read on your PC and exactly which endpoints they're sent to.
+- **[SECURITY.md](SECURITY.md)** — how to report vulnerabilities
+  privately, the security properties you can audit in source, and an
+  honest list of current limitations (unsigned installer, maintainer-built
+  releases).
+
+The short version: tokens are sent only to their own vendor's API over
+HTTPS; pasted keys live in `%APPDATA%\Pane`, readable only by your
+Windows user; spend accounting parses your local logs locally; the HTTP
+API is loopback-only with no CORS; updates are signature-verified.
 
 ## Settings (gear icon)
 
