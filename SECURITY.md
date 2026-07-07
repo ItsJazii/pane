@@ -33,10 +33,10 @@ All of this is auditable in the source — links go to the exact code.
   `Access-Control-Allow-Origin` header — so web pages you visit cannot
   read it from a browser ([`src-tauri/src/httpapi.rs`](src-tauri/src/httpapi.rs)).
 - **Updates are cryptographically verified.** The auto-updater accepts
-  only releases signed by the project's minisign key (held offline); the
-  public key is baked into the app. The install script verifies the
-  installer's SHA-256 against the release manifest and refuses to run on
-  mismatch ([`install.ps1`](install.ps1)).
+  only releases signed by the project's minisign key — passphrase-protected,
+  master copy held offline; the public key is baked into the app. The
+  install script verifies the installer's SHA-256 against the release
+  manifest and refuses to run on mismatch ([`install.ps1`](install.ps1)).
 - **Links are restricted.** The app can only open `http(s)://` URLs in
   your browser — nothing that could launch a program.
 - **API keys you paste** are stored in `%APPDATA%\Pane` on your PC,
@@ -52,12 +52,6 @@ All of this is auditable in the source — links go to the exact code.
   see [.github/workflows/release.yml](.github/workflows/release.yml);
   every release links public build logs proving the binary comes from
   the tagged source.
-- The updater signing key currently has **no passphrase**. In CI this is
-  not the weakness it sounds like — a passphrase would sit in the same
-  GitHub secret store as the key, so anything that leaks one leaks both.
-  It does matter for the offline master copy, and rotating to a
-  passphrase-protected key is planned while the install base is still
-  small enough to make rotation cheap.
 - Pane refreshes OAuth tokens and writes them back to the CLIs' own
   credential files (keeping your CLIs signed in). This means Pane has the
   same access to those accounts as the CLIs themselves — that's inherent

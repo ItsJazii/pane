@@ -12,6 +12,11 @@
   is an opt-in origin allowlist, not a permissive default.
 - Release binaries are now built and published by GitHub Actions from the
   pushed tag (public build logs), instead of on the maintainer's machine.
+- The updater signing key was rotated to a passphrase-protected key
+  (2026-07-08). Installs of 0.4.1 and earlier trust the old public key, so
+  their auto-updater will decline the first release signed with the new
+  key — reinstall once via `irm https://pane.jazii.dev/install.ps1 | iex`
+  (or the release installer) and updates resume normally.
 
 ### Added
 - SECURITY.md (private vulnerability reporting), docs/privacy.md (every
