@@ -536,10 +536,18 @@ function renderMetric(m: Metric): string {
 
     let resetHtml = "";
     if (m.resets_at !== null && m.resets_at > Date.now()) {
-      const countdown = `Resets in ${fmtDuration(m.resets_at - Date.now())}`;
-      const exact = `Resets ${fmtExact(m.resets_at)}`;
-      const [text, alt] = config.resetExact ? [exact, countdown] : [countdown, exact];
-      resetHtml = `<span class="clickable" data-flip="reset" title="${escapeHtml(alt)}">${escapeHtml(text)}</span>`;
+      // A rolling session window (≤6h period) at exactly 0% hasn't begun —
+      // its clock starts on the first message, so a countdown would lie.
+      const notStarted =
+        used <= 0 && m.period_ms !== null && m.period_ms <= 6 * 3_600_000;
+      if (notStarted) {
+        resetHtml = `<span title="Sessions start after you send your first message.">Not started</span>`;
+      } else {
+        const countdown = `Resets in ${fmtDuration(m.resets_at - Date.now())}`;
+        const exact = `Resets ${fmtExact(m.resets_at)}`;
+        const [text, alt] = config.resetExact ? [exact, countdown] : [countdown, exact];
+        resetHtml = `<span class="clickable" data-flip="reset" title="${escapeHtml(alt)}">${escapeHtml(text)}</span>`;
+      }
     }
     const detailHtml = [m.detail ? escapeHtml(m.detail) : "", resetHtml].filter(Boolean).join(" · ");
     return `
@@ -2005,6 +2013,16 @@ window.addEventListener("DOMContentLoaded", () => {
     if (e.ctrlKey && e.key.toLowerCase() === "z" && customizeOpen) {
       e.preventDefault();
       undoLayout();
+    }
+    // Esc backs out of Customize/Settings (Mac parity).
+    if (e.key === "Escape") {
+      setDrawer(false);
+      setSettings(false);
+    }
+    // Ctrl+R refreshes data — and must NOT reload the webview.
+    if (e.ctrlKey && e.key.toLowerCase() === "r") {
+      e.preventDefault();
+      void refresh(true);
     }
   });
   void getVersion().then((v) => {
