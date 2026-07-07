@@ -32,6 +32,15 @@ broader AI-workflow companion from there.
 
 ## Install
 
+### One-liner (PowerShell)
+
+```powershell
+irm https://pane.jazii.dev/install.ps1 | iex
+```
+
+Downloads the latest release, installs per-user (no admin), and launches
+Pane. Read [install.ps1](install.ps1) first if you like — it's one short, commented script.
+
 ### Installer (recommended)
 
 1. Grab **`Pane_x.y.z_x64-setup.exe`** from the
