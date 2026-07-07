@@ -702,7 +702,8 @@ function renderCard(s: Snapshot): string {
 
 function orderedSnapshots(): Snapshot[] {
   const order = config.layout?.providerOrder ?? [];
-  return [...lastSnapshots].sort((a, b) => {
+  // Disabled providers disappear immediately — not on the next fetch.
+  return lastSnapshots.filter((s) => !config.disabled.includes(s.id)).sort((a, b) => {
     const ia = order.indexOf(a.id);
     const ib = order.indexOf(b.id);
     if (ia !== -1 && ib !== -1) return ia - ib;
@@ -797,13 +798,17 @@ function renderTotalSpend(): string {
   if (!config.showTotalSpend) return "";
   const entries = donutEntries(spendTab);
   if (lastSpend.length === 0) {
-    if (spendLoaded) return "";
+    // Quiet state instead of a missing card — on a fresh PC the donut only
+    // appears after a CLI (Claude Code, Codex, Grok…) has logged some usage.
+    const note = spendLoaded
+      ? "No spend data yet — appears once Claude Code, Codex, or another CLI logs some usage on this PC."
+      : "Scanning session logs…";
     return `
       <article class="provider total-spend">
         <div class="provider-head">
           <span class="provider-name">Total Spend</span>
         </div>
-        <p class="placeholder" style="margin:8px 0 4px">Scanning session logs…</p>
+        <p class="placeholder" style="margin:8px 0 4px">${note}</p>
       </article>`;
   }
 
@@ -1529,8 +1534,14 @@ async function refresh(force = false): Promise<void> {
     // First launch ever (no layout yet): start with only the providers that
     // actually have credentials on this PC, like the Mac app's first-run
     // detection. The rest stay available in Customize.
-    if (config.layout === null && snapshots.some((s) => s.status === "ok")) {
-      const noCreds = snapshots.filter((s) => s.status === "no_credentials").map((s) => s.id);
+    if (config.layout === null && snapshots.length > 0) {
+      // Claude and Codex always start enabled — their "connect me" cards are
+      // the new-user onboarding. Everything else without credentials waits
+      // in Customize (a fresh PC with zero AI tools sees just those two).
+      const starters = new Set(["claude", "codex"]);
+      const noCreds = snapshots
+        .filter((s) => s.status === "no_credentials" && !starters.has(s.id))
+        .map((s) => s.id);
       if (noCreds.length) {
         snapshots = snapshots.filter((s) => !noCreds.includes(s.id));
         await patchConfig({ disabled: noCreds }).catch(() => {});
@@ -1762,13 +1773,34 @@ function handleCustomizeClick(target: HTMLElement): boolean {
   return false;
 }
 
+// Rapid toggles used to race: each one snapshotted config.disabled before
+// the previous save landed, so only the last toggle survived. Now the local
+// state updates synchronously and saves run through a serial queue.
+let disabledSaveQueue: Promise<unknown> = Promise.resolve();
+let latestDisabled: string[] = [];
+
 function handleCustomizeChange(target: HTMLInputElement): void {
   if (target.dataset.enable !== undefined) {
     const id = target.dataset.enable;
     const disabled = new Set(config.disabled);
     if (target.checked) disabled.delete(id);
     else disabled.add(id);
-    void patchConfig({ disabled: [...disabled] }).then(() => refresh(true));
+    config.disabled = [...disabled]; // optimistic — next toggle builds on it
+    latestDisabled = config.disabled;
+    renderAll(); // disabled cards vanish from the dashboard immediately
+    const want = config.disabled;
+    const enabling = target.checked;
+    disabledSaveQueue = disabledSaveQueue.then(() =>
+      patchConfig({ disabled: want })
+        .then(() => {
+          // patchConfig replaced `config` with the server echo of THIS save;
+          // re-assert any newer optimistic toggles made while it was in flight.
+          config.disabled = latestDisabled;
+          // Only an enable needs fresh data; a disable is purely local.
+          if (enabling) return refresh(true);
+        })
+        .catch(() => {})
+    );
     return;
   }
   if (target.dataset.visible !== undefined) {
