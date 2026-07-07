@@ -174,6 +174,40 @@ async fn fetch() -> Result<Snapshot, String> {
         rate_limits.get("secondary_window").or_else(|| rate_limits.get("secondary")),
         "Weekly",
     );
+    // Spark (a separate metered model family) lives in additional_rate_limits;
+    // only the spark entry is shown, matching the Mac app.
+    if let Some(extra_limits) = usage.get("additional_rate_limits").and_then(Value::as_array) {
+        let spark = extra_limits.iter().find(|e| {
+            ["limit_name", "metered_feature"].iter().any(|k| {
+                e.get(*k)
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| s.to_lowercase().contains("spark"))
+            })
+        });
+        if let Some(entry) = spark {
+            let rl = entry.get("rate_limit").unwrap_or(entry);
+            push_window_labeled(&mut metrics, rl.get("primary_window"), "Spark");
+            push_window_labeled(&mut metrics, rl.get("secondary_window"), "Spark Weekly");
+        }
+    }
+
+    // Extra Usage: pay-as-you-go credit balance ($0.04 per credit). A spent
+    // balance still reads "$0.00 · 0 credits" — that's information, not noise.
+    let credit_balance = usage
+        .pointer("/credits/balance")
+        .and_then(Value::as_f64)
+        .or_else(|| {
+            (usage.pointer("/credits/has_credits").and_then(Value::as_bool) == Some(false))
+                .then_some(0.0)
+        });
+    if let Some(balance) = credit_balance {
+        let credits = balance.floor().max(0.0);
+        metrics.push(Metric::text(
+            "Extra usage",
+            format!("${:.2} · {credits:.0} credits", credits * 0.04),
+        ));
+    }
+
     // Per-credit rows with exact expiry (and a Use button in the UI) from
     // the dedicated endpoint; fall back to the usage body's bare count.
     match fetch_reset_credits(&access, &account_id).await {
@@ -312,24 +346,54 @@ pub async fn redeem_credit(credit_id: &str) -> Result<String, String> {
 }
 
 fn push_window(metrics: &mut Vec<Metric>, node: Option<&Value>, fallback_label: &str) {
+    push_window_inner(metrics, node, fallback_label, false);
+}
+
+/// Like push_window but keeps the given label (Spark rows must not be
+/// auto-renamed to Session/Weekly by window length).
+fn push_window_labeled(metrics: &mut Vec<Metric>, node: Option<&Value>, label: &str) {
+    push_window_inner(metrics, node, label, true);
+}
+
+fn push_window_inner(metrics: &mut Vec<Metric>, node: Option<&Value>, label_in: &str, forced: bool) {
     let Some(node) = node else { return };
-    let Some(used) = node.get("used_percent").and_then(Value::as_f64) else { return };
+    let Some(mut used) = node.get("used_percent").and_then(Value::as_f64) else { return };
     let window_seconds = node
         .get("limit_window_seconds")
         .and_then(Value::as_i64)
         .or_else(|| node.get("window_minutes").and_then(Value::as_i64).map(|m| m * 60));
-    let label = match window_seconds {
-        Some(s) if s > 21_600 => "Weekly", // longer than 6 hours
-        Some(_) => "Session",
-        None => fallback_label,
+    let label = if forced {
+        label_in
+    } else {
+        match window_seconds {
+            Some(s) if s > 21_600 => "Weekly", // longer than 6 hours
+            Some(_) => "Session",
+            None => label_in,
+        }
     };
     let period_ms = window_seconds
         .map(|s| s * 1000)
-        .unwrap_or(if label == "Weekly" { 7 * 86_400_000 } else { 5 * 3_600_000 });
+        .unwrap_or(if label.contains("Weekly") { 7 * 86_400_000 } else { 5 * 3_600_000 });
+    let now_ms = Utc::now().timestamp_millis();
     let resets_at = node
-        .get("reset_after_seconds")
-        .or_else(|| node.get("resets_in_seconds"))
+        .get("reset_at")
         .and_then(Value::as_i64)
-        .map(|s| Utc::now().timestamp_millis() + s * 1000);
+        .map(|s| if s < 1_000_000_000_000 { s * 1000 } else { s })
+        .or_else(|| {
+            node.get("reset_after_seconds")
+                .or_else(|| node.get("resets_in_seconds"))
+                .and_then(Value::as_i64)
+                .map(|s| now_ms + s * 1000)
+        });
+    // Codex floors to whole percents and reports 1% on an untouched window.
+    // If the window is essentially full-length (fresh, with a grace for
+    // server-side reset_at staleness), normalize ≤1% to a true zero so the
+    // UI can say "Not started" (upstream issue #708).
+    if let Some(reset) = resets_at {
+        let grace = (period_ms / 100).max(60_000);
+        if used <= 1.0 && now_ms < reset && reset - now_ms >= period_ms - grace {
+            used = 0.0;
+        }
+    }
     metrics.push(Metric::progress(label, used, None).with_reset(resets_at, Some(period_ms)));
 }

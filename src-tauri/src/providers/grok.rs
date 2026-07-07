@@ -151,6 +151,17 @@ async fn fetch() -> Result<Snapshot, String> {
     }
     metrics.truncate(4);
 
+    // Pay-as-you-go cap badge. proto3-as-JSON omits zero fields, so a
+    // missing onDemandCap simply means overage is disabled.
+    let cap = billing
+        .pointer("/config/onDemandCap/val")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    metrics.push(Metric::text(
+        "Extra usage",
+        if cap > 0.0 { format!("{cap:.0} cap") } else { "Disabled".to_string() },
+    ));
+
     let mut plan = None;
     if let Ok(resp) = settings_resp {
         if resp.status().is_success() {

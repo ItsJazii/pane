@@ -82,6 +82,31 @@ fn collect_quota_metrics(node: &Value, metrics: &mut Vec<Metric>) {
             }
         }
         Value::Object(map) => {
+            // TIME_LIMIT is the monthly web-search quota, with inverted field
+            // roles vs the other entries: `currentValue` = used, `usage` = cap.
+            let type_name = ["type", "name"]
+                .iter()
+                .find_map(|k| map.get(*k).and_then(Value::as_str));
+            if type_name == Some("TIME_LIMIT") {
+                let used = map.get("currentValue").and_then(Value::as_f64).unwrap_or(0.0).max(0.0);
+                let cap = map.get("usage").and_then(Value::as_f64).unwrap_or(0.0).max(0.0);
+                if cap > 0.0 {
+                    let resets_at = map
+                        .get("nextResetTime")
+                        .and_then(Value::as_i64)
+                        .filter(|ms| *ms > 0);
+                    metrics.push(
+                        Metric::progress(
+                            "Web Searches",
+                            (used / cap * 100.0).clamp(0.0, 100.0),
+                            Some(format!("{used:.0} of {cap:.0} searches")),
+                        )
+                        .with_reset(resets_at, Some(30 * 86_400_000)),
+                    );
+                }
+                return;
+            }
+
             let label = ["type", "name", "unit", "quotaType"]
                 .iter()
                 .find_map(|k| map.get(*k).and_then(Value::as_str))

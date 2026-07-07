@@ -121,19 +121,73 @@ async fn fetch() -> Result<Snapshot, String> {
     push_window(&mut metrics, usage.get("seven_day"), "Weekly", 7 * DAY);
     push_window(&mut metrics, usage.get("seven_day_sonnet"), "Sonnet weekly", 7 * DAY);
     push_window(&mut metrics, usage.get("seven_day_opus"), "Opus weekly", 7 * DAY);
+
+    // Newer per-model weeklies (Fable era) live in a `limits` array instead of
+    // legacy `seven_day_<model>` keys. Add any we don't already show.
+    for entry in usage.get("limits").and_then(Value::as_array).unwrap_or(&vec![]) {
+        if entry.get("kind").and_then(Value::as_str) != Some("weekly_scoped") {
+            continue;
+        }
+        let Some(name) = entry.pointer("/scope/model/display_name").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(percent) = entry.get("percent").and_then(Value::as_f64) else { continue };
+        let label = format!("{name} weekly");
+        if metrics.iter().any(|m| m.label == label) {
+            continue;
+        }
+        let resets_at = parse_reset(entry.get("resets_at"));
+        metrics
+            .push(Metric::progress(&label, percent, None).with_reset(resets_at, Some(7 * DAY)));
+    }
+
+    // Extra Usage: pay-as-you-go overage spend, in cents. Bounded meter when
+    // a monthly cap is set, plain dollars when uncapped, absent when unused.
+    if let Some(extra) = usage.get("extra_usage") {
+        let enabled = extra.get("is_enabled").and_then(Value::as_bool).unwrap_or(false);
+        let used_cents = extra.get("used_credits").and_then(Value::as_f64);
+        if enabled {
+            if let Some(used_cents) = used_cents {
+                let used = (used_cents.round()) / 100.0;
+                let cap = extra
+                    .get("monthly_limit")
+                    .and_then(Value::as_f64)
+                    .map(|c| c.round() / 100.0)
+                    .filter(|c| *c > 0.0);
+                if let Some(cap) = cap {
+                    metrics.push(Metric::progress(
+                        "Extra usage",
+                        (used / cap * 100.0).clamp(0.0, 100.0),
+                        Some(format!("${used:.2} of ${cap:.2} limit")),
+                    ));
+                } else if used > 0.0 {
+                    metrics.push(Metric::text("Extra usage", format!("${used:.2} spent")));
+                }
+            }
+        }
+    }
+
     if metrics.is_empty() {
         return Err("usage response had no recognizable limit windows".into());
     }
     Ok(Snapshot::ok(ID, NAME, plan, metrics))
 }
 
+/// `resets_at` arrives as ISO-8601 or epoch (seconds when < 1e10, else ms).
+fn parse_reset(v: Option<&Value>) -> Option<i64> {
+    match v? {
+        Value::String(s) => DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.timestamp_millis()),
+        Value::Number(n) => {
+            let n = n.as_f64()?;
+            Some(if n.abs() < 1e10 { (n * 1000.0) as i64 } else { n as i64 })
+        }
+        _ => None,
+    }
+}
+
 fn push_window(metrics: &mut Vec<Metric>, node: Option<&Value>, label: &str, period_ms: i64) {
     let Some(node) = node else { return };
     let Some(used) = node.get("utilization").and_then(Value::as_f64) else { return };
-    let resets_at = node
-        .get("resets_at")
-        .and_then(Value::as_str)
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| dt.timestamp_millis());
+    let resets_at = parse_reset(node.get("resets_at"));
     metrics.push(Metric::progress(label, used, None).with_reset(resets_at, Some(period_ms)));
 }
