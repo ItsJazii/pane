@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — 2026-07-07
 
 ### New
 - **Three CLI-detected providers** (research credit: steipete/CodexBar, MIT):
