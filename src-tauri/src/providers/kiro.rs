@@ -34,12 +34,16 @@ fn strip_ansi(s: &str) -> String {
 }
 
 async fn fetch() -> Result<Snapshot, String> {
-    // Installed at all? (`where` beats spawning the CLI to find out.)
-    let found = tokio::process::Command::new("cmd")
-        .args(["/C", "where", "kiro-cli"])
-        .output()
-        .await
-        .map(|o| o.status.success())
+    // Installed at all? Scan PATH ourselves — spawning `where` via cmd
+    // flashed a console window on every refresh for everyone without Kiro.
+    let found = std::env::var_os("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths).any(|dir| {
+                ["kiro-cli.exe", "kiro-cli.cmd", "kiro-cli.bat"]
+                    .iter()
+                    .any(|name| dir.join(name).is_file())
+            })
+        })
         .unwrap_or(false);
     if !found {
         return Ok(Snapshot::no_credentials(ID, NAME, "Kiro CLI (kiro-cli) is not installed."));

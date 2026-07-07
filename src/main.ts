@@ -1544,6 +1544,23 @@ async function refresh(force = false): Promise<void> {
           layout: config.layout,
         }).catch(() => {});
       }
+
+      // Updates also RETIRE providers; saved layouts keep referencing their
+      // ids, which rendered ghost rows in Customize. Prune anything the app
+      // no longer knows.
+      const valid = new Set(ALL_PROVIDERS.map(([id]) => id));
+      const prunedOrder = config.layout.providerOrder.filter((id) => valid.has(id));
+      const staleLayout = Object.keys(config.layout.providers).filter((id) => !valid.has(id));
+      const prunedDisabled = config.disabled.filter((id) => valid.has(id));
+      if (
+        prunedOrder.length !== config.layout.providerOrder.length ||
+        staleLayout.length ||
+        prunedDisabled.length !== config.disabled.length
+      ) {
+        config.layout.providerOrder = prunedOrder;
+        for (const id of staleLayout) delete config.layout.providers[id];
+        await patchConfig({ layout: config.layout, disabled: prunedDisabled }).catch(() => {});
+      }
     }
     const firstData = lastSnapshots.length === 0;
     lastFetch = Date.now();
