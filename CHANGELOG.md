@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.1 — 2026-07-08
+
+First-run and Customize fixes from fresh-install testing.
+
+### Fixed
+- Fresh installs now start with just Claude + Codex enabled (their
+  "connect me" cards are the onboarding); a PC with zero detected AI
+  tools no longer enables all 18 providers.
+- Rapidly toggling several providers off kept only the last change —
+  toggles now apply instantly and save through a serial delta queue.
+- Disabled providers disappear immediately from the dashboard, the
+  Total Spend donut, and the tray strip (previously they lingered until
+  the next refresh).
+- Total Spend shows a quiet "No spend data yet" card on machines whose
+  CLIs haven't logged usage, instead of no card at all.
+
 ## 0.4.0 — 2026-07-07
 
 ### New
