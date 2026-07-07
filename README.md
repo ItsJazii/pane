@@ -46,14 +46,17 @@ broader AI-workflow companion from there.
 
 Silent install (for scripts): `Pane_x.y.z_x64-setup.exe /S`
 
-### winget *(coming soon)*
+### winget *(pending review)*
 
-Once Pane has its first public release, it will be submitted to the winget
-community repo so this works:
+Pane 0.4.0 is [submitted to the winget community repo](https://github.com/microsoft/winget-pkgs/pull/399096).
+Once Microsoft's review merges it, this works:
 
 ```
-winget install ItsJazii.Pane
+winget install pane
 ```
+
+Pane keeps itself current after that either way — every install checks for
+signed updates and offers a one-click restart when a new version ships.
 
 ### Build from source
 
@@ -145,6 +148,8 @@ whatever the community asks for loudest.
   breakdown and a 30-day trend, priced with live model rates.
 - **Codex reset credits** — see each banked credit's exact expiry and
   redeem it with one click.
+- **Signed auto-updates** — checks GitHub releases on launch and every 4
+  hours; one click downloads, verifies, and restarts.
 - **Live tray numbers** — star up to two metrics per provider and they
   render as logo + percentage pairs directly in the tray.
 - **Customize** (☰) — reorder providers and metrics by drag, hide rows,
