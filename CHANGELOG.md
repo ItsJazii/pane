@@ -10,6 +10,14 @@
 - **Auto-updater** — Pane checks GitHub releases on launch and every 4
   hours; a banner offers one-click download + restart. Updates are
   cryptographically signed and verified before install.
+- **Deeper metric rows** (Mac-parity polish): Claude per-model weeklies
+  from Anthropic's new `limits` API (Fable era) + Extra Usage overage
+  dollars; Codex Spark / Spark Weekly windows + Extra Usage credit
+  balance; Z.ai monthly Web Searches quota; Grok pay-as-you-go cap badge.
+- **"Not started"** — untouched 5-hour session windows say so (with an
+  explainer) instead of showing a countdown that hasn't begun; Codex's
+  floored 1%-on-fresh-window quirk is normalized to a true zero.
+- **Keyboard** — Esc backs out of Customize/Settings, Ctrl+R refreshes.
 
 ### Removed
 - Deepgram, OpenAI, Venice, Poe, Chutes, Warp, Crof, Amp, Vertex AI, and

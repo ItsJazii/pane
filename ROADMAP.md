@@ -1,9 +1,20 @@
 # Roadmap — full Mac parity (and beyond)
 
-Feature audit vs robinebers/openusage @ 4d75562 (2026-07-06). Waves are
-ordered by dependency: the pace engine (Wave 1) feeds notifications
-(Wave 2); structured metric data from Wave 1 also unlocks Wave 4's
-toggles. Each wave ends with a shipped, installed build.
+**Status (v0.4.0, 2026-07-07): every wave below is shipped.** Pane has
+full feature parity with the macOS original (re-audited at its HEAD
+4d75562) plus 18 providers, signed auto-updates, and Codex reset-credit
+redemption. What comes next is demand-driven — open an issue for the
+provider or feature you're missing. Candidates on deck: Windsurf and
+JetBrains AI providers, a Re-detect Tools button, tray "Bars" icon
+style, code signing.
+
+---
+
+Original plan below, kept for history. Feature audit vs
+robinebers/openusage @ 4d75562 (2026-07-06). Waves are ordered by
+dependency: the pace engine (Wave 1) feeds notifications (Wave 2);
+structured metric data from Wave 1 also unlocks Wave 4's toggles. Each
+wave ends with a shipped, installed build.
 
 ## Wave 1 — Pace engine (the brain)
 - [x] Structured metric data: add `resets_at` (ms) + `period_ms` to Metric,
