@@ -1,0 +1,860 @@
+mod alerts;
+mod httpapi;
+mod pricing;
+mod providers;
+mod spend;
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde_json::{json, Value};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Emitter, Manager, WindowEvent,
+};
+
+// ---------------------------------------------------------------------------
+// App settings, stored at %APPDATA%\Pane\config.json
+// ---------------------------------------------------------------------------
+
+fn config_path() -> PathBuf {
+    providers::config_dir().join("config.json")
+}
+
+/// A parse failure here once silently reset all settings to defaults, so
+/// failures are now logged durably and the last good copy is used instead.
+fn note_config_error(context: &str) {
+    let line = format!("{} {}\r\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), context);
+    let path = providers::config_dir().join("config-error.log");
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = f.write_all(line.as_bytes());
+    }
+    eprintln!("[pane] {context}");
+}
+
+fn parse_config_file(path: &PathBuf) -> Result<Value, String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("read: {e}"))?;
+    // Tolerate a UTF-8 BOM (Notepad and PowerShell 5.1 both write one).
+    serde_json::from_str(raw.trim_start_matches('\u{feff}')).map_err(|e| format!("parse: {e}"))
+}
+
+fn load_config() -> Value {
+    let path = config_path();
+    if !path.exists() {
+        return json!({});
+    }
+    match parse_config_file(&path) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            note_config_error(&format!("config.json unreadable ({e}) — trying backup"));
+            let backup = providers::config_dir().join("config.json.bak");
+            match parse_config_file(&backup) {
+                Ok(cfg) => cfg,
+                Err(e2) => {
+                    note_config_error(&format!("config.json.bak also failed ({e2}) — defaults"));
+                    json!({})
+                }
+            }
+        }
+    }
+}
+
+fn config_with_defaults(mut cfg: Value) -> Value {
+    if !cfg.is_object() {
+        cfg = json!({});
+    }
+    let obj = cfg.as_object_mut().unwrap();
+    obj.entry("refreshMinutes").or_insert(json!(5));
+    obj.entry("disabled").or_insert(json!([]));
+    obj.entry("pinned").or_insert(Value::Null);
+    obj.entry("trayProviders").or_insert(json!([]));
+    obj.entry("pacingAlways").or_insert(json!(false));
+    obj.entry("notifyAlmostOut").or_insert(json!(false));
+    obj.entry("notifyCuttingClose").or_insert(json!(false));
+    obj.entry("notifyWillRunOut").or_insert(json!(false));
+    obj.entry("spendTab").or_insert(json!("today"));
+    obj.entry("showUsed").or_insert(json!(false));
+    obj.entry("resetExact").or_insert(json!(false));
+    obj.entry("timeFormat").or_insert(json!("auto"));
+    obj.entry("layout").or_insert(Value::Null);
+    obj.entry("appearance").or_insert(json!("system"));
+    obj.entry("density").or_insert(json!("regular"));
+    obj.entry("shortcut").or_insert(json!(""));
+    obj.entry("proxy").or_insert(json!({ "enabled": false, "url": "" }));
+    obj.entry("showTotalSpend").or_insert(json!(true));
+    obj.entry("welcomeDismissed").or_insert(json!(false));
+    cfg
+}
+
+#[tauri::command]
+fn get_config() -> Value {
+    config_with_defaults(load_config())
+}
+
+#[tauri::command]
+fn set_config(patch: Value) -> Result<Value, String> {
+    let mut cfg = config_with_defaults(load_config());
+    if let (Some(target), Some(source)) = (cfg.as_object_mut(), patch.as_object()) {
+        for (k, v) in source {
+            target.insert(k.clone(), v.clone());
+        }
+    }
+    let dir = providers::config_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create config dir: {e}"))?;
+    let path = config_path();
+    // Keep the last good copy, then write atomically (temp file + rename) so
+    // a crash or kill mid-write can never leave a truncated config behind.
+    if path.exists() {
+        let _ = std::fs::copy(&path, dir.join("config.json.bak"));
+    }
+    let tmp = dir.join("config.json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&cfg).unwrap_or_default())
+        .map_err(|e| format!("write config: {e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("replace config: {e}"))?;
+    Ok(cfg)
+}
+
+// ---------------------------------------------------------------------------
+// Start with Windows
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn get_autostart(app: tauri::AppHandle) -> bool {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().unwrap_or(false)
+}
+
+#[tauri::command]
+fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    // Remember the choice so startup knows whether to re-assert it.
+    let _ = set_config(json!({ "autostart": enabled }));
+    let manager = app.autolaunch();
+    if enabled {
+        manager.enable().map_err(|e| e.to_string())
+    } else {
+        manager.disable().map_err(|e| e.to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tray icon with the pinned metric drawn onto it
+// ---------------------------------------------------------------------------
+
+// 4x6 pixel digit font, one nibble per row (bit 3 = leftmost pixel).
+const DIGIT_FONT: [[u8; 6]; 10] = [
+    [0x6, 0x9, 0x9, 0x9, 0x9, 0x6], // 0
+    [0x2, 0x6, 0x2, 0x2, 0x2, 0x7], // 1
+    [0x6, 0x9, 0x1, 0x2, 0x4, 0xF], // 2
+    [0xE, 0x1, 0x6, 0x1, 0x9, 0x6], // 3
+    [0x2, 0x6, 0xA, 0xF, 0x2, 0x2], // 4
+    [0xF, 0x8, 0xE, 0x1, 0x9, 0x6], // 5
+    [0x6, 0x8, 0xE, 0x9, 0x9, 0x6], // 6
+    [0xF, 0x1, 0x2, 0x2, 0x4, 0x4], // 7
+    [0x6, 0x9, 0x6, 0x9, 0x9, 0x6], // 8
+    [0x6, 0x9, 0x9, 0x7, 0x1, 0x6], // 9
+];
+
+/// Renders one or two numbers (0-100) stacked on a 32x32 RGBA tray icon —
+/// two rows mimic the Mac menu bar's "100% / 36%" pair. White digits with a
+/// black outline so they read on both light and dark taskbars.
+fn draw_tray_numbers(values: &[u32]) -> Vec<u8> {
+    const SIZE: usize = 32;
+    let scale = 2usize;
+    let glyph_w = 4 * scale;
+    let _glyph_h = 6 * scale;
+    let gap = scale;
+
+    let mut mask = [false; SIZE * SIZE];
+    let rows: &[usize] = if values.len() >= 2 { &[3, 17] } else { &[10] };
+
+    for (value, y0) in values.iter().zip(rows) {
+        let digits: Vec<usize> = value
+            .to_string()
+            .chars()
+            .filter_map(|c| c.to_digit(10).map(|d| d as usize))
+            .collect();
+        let text_w = digits.len() * glyph_w + digits.len().saturating_sub(1) * gap;
+        let x0 = (SIZE.saturating_sub(text_w)) / 2;
+
+        for (i, d) in digits.iter().enumerate() {
+            let gx = x0 + i * (glyph_w + gap);
+            for (row, bits) in DIGIT_FONT[*d].iter().enumerate() {
+                for col in 0..4 {
+                    if bits & (0x8 >> col) != 0 {
+                        for sy in 0..scale {
+                            for sx in 0..scale {
+                                let x = gx + col * scale + sx;
+                                let y = y0 + row * scale + sy;
+                                if x < SIZE && y < SIZE {
+                                    mask[y * SIZE + x] = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut rgba = vec![0u8; SIZE * SIZE * 4];
+    // Outline pass: black anywhere adjacent to a text pixel.
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            if mask[y * SIZE + x] {
+                continue;
+            }
+            let near = (-1i32..=1).any(|dy| {
+                (-1i32..=1).any(|dx| {
+                    let nx = x as i32 + dx;
+                    let ny = y as i32 + dy;
+                    nx >= 0
+                        && ny >= 0
+                        && (nx as usize) < SIZE
+                        && (ny as usize) < SIZE
+                        && mask[ny as usize * SIZE + nx as usize]
+                })
+            });
+            if near {
+                let p = (y * SIZE + x) * 4;
+                rgba[p..p + 4].copy_from_slice(&[0, 0, 0, 230]);
+            }
+        }
+    }
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            if mask[y * SIZE + x] {
+                let p = (y * SIZE + x) * 4;
+                rgba[p..p + 4].copy_from_slice(&[255, 255, 255, 255]);
+            }
+        }
+    }
+    rgba
+}
+
+/// Picks up to two metrics for the tray icon (like the Mac's stacked pair):
+/// the pinned provider's pinned metric first, then its next progress metric.
+fn pick_tray_metrics<'a>(
+    snapshots: &'a [providers::Snapshot],
+    pinned: &Value,
+) -> Vec<&'a providers::Metric> {
+    let pinned_provider = pinned.get("provider").and_then(Value::as_str);
+    let pinned_label = pinned.get("label").and_then(Value::as_str);
+
+    let provider = snapshots
+        .iter()
+        .find(|s| s.status == "ok" && Some(s.id.as_str()) == pinned_provider)
+        .or_else(|| {
+            snapshots
+                .iter()
+                .find(|s| s.status == "ok" && s.metrics.iter().any(|m| m.kind == "progress"))
+        });
+    let Some(provider) = provider else { return Vec::new() };
+
+    let mut metrics: Vec<&providers::Metric> =
+        provider.metrics.iter().filter(|m| m.kind == "progress").collect();
+    if let Some(label) = pinned_label {
+        if let Some(pos) = metrics.iter().position(|m| m.label == label) {
+            metrics.rotate_left(pos);
+        }
+    }
+    metrics.truncate(2);
+    metrics
+}
+
+fn update_tray(app: &tauri::AppHandle, snapshots: &[providers::Snapshot], cfg: &Value) {
+    let Some(tray) = app.tray_by_id("tray") else {
+        return;
+    };
+
+    let mut tooltip = String::from("Pane");
+    for s in snapshots.iter().filter(|s| s.status == "ok").take(6) {
+        if let Some(m) = s.metrics.iter().find(|m| m.kind == "progress") {
+            let left = (100.0 - m.used_percent.unwrap_or(0.0)).clamp(0.0, 100.0).round();
+            tooltip.push_str(&format!("\n{} {}: {left:.0}% left", s.name, m.label));
+        }
+    }
+    let _ = tray.set_tooltip(Some(&tooltip));
+
+    // When the Mac-style tray strip is active it carries the numbers, so the
+    // main icon stays the app logo (the strip icons are per-provider).
+    let strip_active = cfg
+        .get("trayProviders")
+        .and_then(Value::as_array)
+        .is_some_and(|a| !a.is_empty());
+    if strip_active {
+        if let Some(default) = app.default_window_icon() {
+            let _ = tray.set_icon(Some(default.clone()));
+        }
+        return;
+    }
+
+    let metrics = pick_tray_metrics(snapshots, cfg.get("pinned").unwrap_or(&Value::Null));
+    if !metrics.is_empty() {
+        let lefts: Vec<u32> = metrics
+            .iter()
+            .map(|m| (100.0 - m.used_percent.unwrap_or(0.0)).clamp(0.0, 100.0).round() as u32)
+            .collect();
+        let icon = tauri::image::Image::new_owned(draw_tray_numbers(&lefts), 32, 32);
+        let _ = tray.set_icon(Some(icon));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mac-style tray strip: a [provider logo][live numbers] icon pair per
+// selected provider. The UI rasterizes each SVG logo to 32x32 RGBA (the
+// webview already has the icons) and sends the pixels here.
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+struct StripEntry {
+    id: String,
+    logo: Vec<u8>, // 32x32 RGBA
+    values: Vec<u32>,
+    tooltip: String,
+}
+
+const STRIP_PROVIDER_IDS: [&str; 10] = [
+    "claude", "codex", "cursor", "opencode", "copilot", "grok", "devin", "openrouter", "zai",
+    "antigravity",
+];
+
+#[tauri::command]
+fn update_tray_strip(app: tauri::AppHandle, entries: Vec<StripEntry>) -> Result<(), String> {
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        // Remove strip icons for providers no longer selected.
+        for id in STRIP_PROVIDER_IDS {
+            if !entries.iter().any(|e| e.id == id) {
+                let _ = handle.remove_tray_by_id(&format!("strip-logo-{id}"));
+                let _ = handle.remove_tray_by_id(&format!("strip-num-{id}"));
+            }
+        }
+
+        for entry in &entries {
+            if entry.logo.len() != 32 * 32 * 4 {
+                continue;
+            }
+            let logo_id = format!("strip-logo-{}", entry.id);
+            let num_id = format!("strip-num-{}", entry.id);
+            let logo_icon = tauri::image::Image::new_owned(entry.logo.clone(), 32, 32);
+            let num_icon =
+                tauri::image::Image::new_owned(draw_tray_numbers(&entry.values), 32, 32);
+
+            if let Some(tray) = handle.tray_by_id(&num_id) {
+                let _ = tray.set_icon(Some(num_icon));
+                let _ = tray.set_tooltip(Some(&entry.tooltip));
+                if let Some(logo_tray) = handle.tray_by_id(&logo_id) {
+                    let _ = logo_tray.set_tooltip(Some(&entry.tooltip));
+                }
+                continue;
+            }
+
+            // New pair — logo first so it sits to the left of its numbers.
+            for (tray_id, icon) in [(logo_id, logo_icon), (num_id, num_icon)] {
+                let _ = TrayIconBuilder::with_id(tray_id)
+                    .icon(icon)
+                    .tooltip(&entry.tooltip)
+                    .show_menu_on_left_click(false)
+                    .on_tray_icon_event(|tray, event| {
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            position,
+                            ..
+                        } = event
+                        {
+                            toggle_popover(tray.app_handle(), position);
+                        }
+                    })
+                    .build(&handle);
+            }
+        }
+    })
+    .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Usage fetching
+// ---------------------------------------------------------------------------
+
+/// A provider that just failed gets benched briefly instead of being
+/// re-probed on every refresh: 60s for ordinary errors, 5 minutes for rate
+/// limits (hammering a 429 makes it worse — learned that the hard way).
+struct FailState {
+    until_ms: i64,
+    note: String,
+}
+
+fn fail_state() -> &'static std::sync::Mutex<std::collections::HashMap<String, FailState>> {
+    static STATE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, FailState>>,
+    > = std::sync::OnceLock::new();
+    STATE.get_or_init(Default::default)
+}
+
+async fn guarded<F>(id: &str, name: &str, fut: F) -> providers::Snapshot
+where
+    F: std::future::Future<Output = providers::Snapshot>,
+{
+    let now = now_ms() as i64;
+    let benched = {
+        let map = fail_state().lock().unwrap();
+        map.get(id).filter(|f| now < f.until_ms).map(|f| f.note.clone())
+    };
+    if let Some(note) = benched {
+        return providers::Snapshot::error(id, name, note);
+    }
+    let snap = fut.await;
+    let mut map = fail_state().lock().unwrap();
+    if snap.status == "error" {
+        let err = snap.error.clone().unwrap_or_default();
+        let rate_limited = err.contains("429");
+        map.insert(
+            id.to_string(),
+            FailState {
+                until_ms: now + if rate_limited { 300_000 } else { 60_000 },
+                note: if rate_limited {
+                    format!("rate limited — cooling down for a few minutes ({err})")
+                } else {
+                    err
+                },
+            },
+        );
+    } else {
+        map.remove(id);
+    }
+    snap
+}
+
+/// Called by the UI. Refreshes every enabled provider at the same time and
+/// returns whatever each one found — data, "not signed in", or an error.
+#[tauri::command]
+async fn fetch_usage(app: tauri::AppHandle) -> Vec<providers::Snapshot> {
+    let cfg = config_with_defaults(load_config());
+    let disabled: Vec<String> = cfg
+        .get("disabled")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+        .unwrap_or_default();
+
+    let (
+        claude,
+        codex,
+        cursor,
+        opencode,
+        copilot,
+        grok,
+        devin,
+        minimax,
+        openrouter,
+        zai,
+        antigravity,
+        deepseek,
+        moonshot,
+        elevenlabs,
+        deepgram,
+        openai,
+        venice,
+        ollama,
+    ) = tokio::join!(
+        guarded("claude", "Claude", providers::claude::snapshot()),
+        guarded("codex", "Codex", providers::codex::snapshot()),
+        guarded("cursor", "Cursor", providers::cursor::snapshot()),
+        guarded("opencode", "OpenCode", providers::opencode::snapshot()),
+        guarded("copilot", "Copilot", providers::copilot::snapshot()),
+        guarded("grok", "Grok", providers::grok::snapshot()),
+        guarded("devin", "Devin", providers::devin::snapshot()),
+        guarded("minimax", "MiniMax", providers::minimax::snapshot()),
+        guarded("openrouter", "OpenRouter", providers::openrouter::snapshot()),
+        guarded("zai", "Z.ai", providers::zai::snapshot()),
+        guarded("antigravity", "Antigravity", providers::antigravity::snapshot()),
+        guarded("deepseek", "DeepSeek", providers::deepseek::snapshot()),
+        guarded("moonshot", "Moonshot", providers::moonshot::snapshot()),
+        guarded("elevenlabs", "ElevenLabs", providers::elevenlabs::snapshot()),
+        guarded("deepgram", "Deepgram", providers::deepgram::snapshot()),
+        guarded("openai", "OpenAI", providers::openai::snapshot()),
+        guarded("venice", "Venice", providers::venice::snapshot()),
+        guarded("ollama", "Ollama", providers::ollama::snapshot()),
+    );
+    let mut all = vec![
+        claude, codex, cursor, opencode, copilot, grok, devin, minimax, openrouter, zai,
+        antigravity, deepseek, moonshot, elevenlabs, deepgram, openai, venice, ollama,
+    ];
+    all.retain(|s| !disabled.iter().any(|d| *d == s.id));
+
+    for s in &all {
+        eprintln!(
+            "[pane] {}: {} ({} metrics){}",
+            s.id,
+            s.status,
+            s.metrics.len(),
+            s.error.as_deref().map(|e| format!(" — {e}")).unwrap_or_default()
+        );
+    }
+
+    // Transient server errors (a 503, a timeout) shouldn't blank a card the
+    // user was just reading: fall back to the last good snapshot, marked
+    // stale so the UI can say "Outdated" with the real error on hover. The
+    // cache is persisted to disk so it survives app restarts; entries older
+    // than a day are too misleading to show and get skipped.
+    {
+        use std::collections::HashMap;
+        use std::sync::{Mutex, OnceLock};
+
+        #[derive(serde::Serialize, serde::Deserialize, Clone)]
+        struct CachedSnap {
+            at: i64,
+            snap: providers::Snapshot,
+        }
+        const MAX_STALE_MS: i64 = 24 * 60 * 60 * 1000;
+
+        static LAST_OK: OnceLock<Mutex<HashMap<String, CachedSnap>>> = OnceLock::new();
+        let cache_file = providers::config_dir().join("last_snapshots.json");
+        let cache = LAST_OK.get_or_init(|| {
+            let loaded: HashMap<String, CachedSnap> = std::fs::read_to_string(&cache_file)
+                .ok()
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+                .unwrap_or_default();
+            Mutex::new(loaded)
+        });
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        if let Ok(mut map) = cache.lock() {
+            let mut dirty = false;
+            for s in all.iter_mut() {
+                if s.status == "ok" {
+                    map.insert(s.id.clone(), CachedSnap { at: now_ms, snap: s.clone() });
+                    dirty = true;
+                } else if s.status == "error" {
+                    if let Some(previous) = map.get(&s.id) {
+                        if now_ms - previous.at <= MAX_STALE_MS {
+                            let warning = s.error.clone();
+                            *s = previous.snap.clone();
+                            s.stale = true;
+                            s.warning = warning;
+                        }
+                    }
+                }
+            }
+            if dirty {
+                if let Ok(serialized) = serde_json::to_string(&*map) {
+                    let _ = std::fs::create_dir_all(providers::config_dir());
+                    let _ = std::fs::write(&cache_file, serialized);
+                }
+            }
+        }
+    }
+
+    httpapi::publish(&all);
+    update_tray(&app, &all, &cfg);
+
+    for alert in alerts::evaluate(&all, &cfg) {
+        use tauri_plugin_notification::NotificationExt;
+        let _ = app
+            .notification()
+            .builder()
+            .title(&alert.title)
+            .body(&alert.body)
+            .show();
+    }
+
+    all
+}
+
+/// Computes local spend (Today / Yesterday / Last 30 Days) from the CLIs'
+/// own session logs. Heavy file IO, so it runs on a blocking thread.
+#[tauri::command]
+async fn fetch_spend() -> Vec<spend::ProviderSpend> {
+    eprintln!("[pane] spend: scan starting");
+    let started = std::time::Instant::now();
+    // Cursor's CSV export needs the async client; fetch it here and hand it
+    // to the blocking scan.
+    let cursor_csv = providers::cursor::fetch_usage_csv().await;
+    let result = tauri::async_runtime::spawn_blocking(move || spend::collect(cursor_csv))
+        .await
+        .unwrap_or_default();
+    eprintln!(
+        "[pane] spend: {} providers in {:?}",
+        result.len(),
+        started.elapsed()
+    );
+    result
+}
+
+/// Saves (or clears, when `key` is empty) a user-pasted API key to
+/// %APPDATA%\Pane\<provider>.json.
+#[tauri::command]
+fn set_api_key(provider: String, key: String) -> Result<(), String> {
+    if !matches!(
+        provider.as_str(),
+        "openrouter"
+            | "zai"
+            | "minimax"
+            | "deepseek"
+            | "moonshot"
+            | "elevenlabs"
+            | "deepgram"
+            | "openai"
+            | "venice"
+    ) {
+        return Err(format!("unknown provider: {provider}"));
+    }
+    let dir = providers::config_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create config dir: {e}"))?;
+    let path = dir.join(format!("{provider}.json"));
+    let key = key.trim();
+    if key.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        return Ok(());
+    }
+    std::fs::write(&path, serde_json::json!({ "apiKey": key }).to_string())
+        .map_err(|e| format!("write key file: {e}"))
+}
+
+/// Opens a provider quick link in the default browser. Only plain web URLs —
+/// nothing that could launch a program.
+#[tauri::command]
+fn open_link(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("only http(s) links allowed".into());
+    }
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| format!("open link: {e}"))
+}
+
+/// Puts a share-card PNG (rendered by the frontend on a canvas) onto the
+/// Windows clipboard as a real image.
+#[tauri::command]
+fn copy_share_image(png_base64: String) -> Result<(), String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(png_base64.trim())
+        .map_err(|e| format!("decode png: {e}"))?;
+    let img = tauri::image::Image::from_bytes(&bytes).map_err(|e| format!("parse png: {e}"))?;
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let rgba = img.rgba().to_vec();
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("clipboard: {e}"))?;
+    clipboard
+        .set_image(arboard::ImageData { width: w, height: h, bytes: rgba.into() })
+        .map_err(|e| format!("copy image: {e}"))
+}
+
+/// (Re-)registers the global toggle-popover shortcut. An empty string clears
+/// it. The accelerator uses Tauri syntax, e.g. "Ctrl+Shift+U".
+fn register_shortcut(app: &tauri::AppHandle, accel: &str) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+    let gs = app.global_shortcut();
+    let _ = gs.unregister_all();
+    let accel = accel.trim();
+    if accel.is_empty() {
+        return Ok(());
+    }
+    let shortcut: Shortcut = accel
+        .parse()
+        .map_err(|_| format!("could not parse shortcut \"{accel}\""))?;
+    gs.on_shortcut(shortcut, |app, _shortcut, event| {
+        if event.state() == ShortcutState::Pressed {
+            let pos = app
+                .cursor_position()
+                .unwrap_or(tauri::PhysicalPosition::new(1200.0, 700.0));
+            toggle_popover(app, pos);
+        }
+    })
+    .map_err(|e| format!("register shortcut: {e}"))
+}
+
+#[tauri::command]
+fn set_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<(), String> {
+    register_shortcut(&app, &shortcut)
+}
+
+/// Spends one banked Codex rate-limit reset credit. Irreversible — the
+/// frontend shows a confirm dialog before calling this.
+#[tauri::command]
+async fn codex_redeem_credit(credit_id: String) -> Result<String, String> {
+    providers::codex::redeem_credit(&credit_id).await
+}
+
+// ---------------------------------------------------------------------------
+// Tray + popover window plumbing
+// ---------------------------------------------------------------------------
+
+// Clicking the tray icon while the popover is open first steals focus
+// (which hides the window) and then delivers the click event. Without a
+// guard, that click would instantly re-open the window the user just
+// closed. We remember when the last auto-hide happened and ignore tray
+// clicks that arrive right after it.
+static LAST_AUTO_HIDE_MS: AtomicU64 = AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Tells WebView2 to release memory while the popover is hidden and return
+/// to normal when it shows. Tauri doesn't expose wry's setter for this, so
+/// we make the same COM calls wry does (SetMemoryUsageTargetLevel).
+fn set_webview_memory_level(window: &tauri::WebviewWindow, low: bool) {
+    let _ = window.with_webview(move |webview| unsafe {
+        use webview2_com::Microsoft::Web::WebView2::Win32::{
+            ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL,
+        };
+        use windows_core::Interface;
+        if let Ok(core) = webview.controller().CoreWebView2() {
+            if let Ok(wv19) = core.cast::<ICoreWebView2_19>() {
+                let level = COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL(if low { 1 } else { 0 });
+                let _ = wv19.SetMemoryUsageTargetLevel(level);
+            }
+        }
+    });
+}
+
+fn toggle_popover(app: &tauri::AppHandle, click: tauri::PhysicalPosition<f64>) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+
+    if window.is_visible().unwrap_or(false) {
+        let _ = window.hide();
+        set_webview_memory_level(&window, true);
+        return;
+    }
+
+    if now_ms().saturating_sub(LAST_AUTO_HIDE_MS.load(Ordering::Relaxed)) < 300 {
+        return;
+    }
+
+    set_webview_memory_level(&window, false);
+
+    // Anchor the popover's bottom-right corner near the tray click,
+    // which sits next to the clock on a standard bottom taskbar.
+    let size = window
+        .outer_size()
+        .unwrap_or(tauri::PhysicalSize::new(380, 600));
+    let x = (click.x - f64::from(size.width)).max(0.0);
+    let y = (click.y - f64::from(size.height) - 8.0).max(0.0);
+    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    let _ = window.show();
+    let _ = window.set_focus();
+    let _ = window.emit("popover-shown", ());
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        // Second launches just poke the existing instance's popover open
+        // instead of spawning a duplicate tray icon (Mac parity).
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            let pos = app
+                .cursor_position()
+                .unwrap_or(tauri::PhysicalPosition::new(1200.0, 700.0));
+            toggle_popover(app, pos);
+        }))
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .invoke_handler(tauri::generate_handler![
+            fetch_usage,
+            fetch_spend,
+            set_api_key,
+            get_config,
+            set_config,
+            get_autostart,
+            set_autostart,
+            update_tray_strip,
+            open_link,
+            copy_share_image,
+            set_shortcut,
+            codex_redeem_credit
+        ])
+        .setup(|app| {
+            let quit = MenuItem::with_id(app, "quit", "Quit Pane", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&quit])?;
+
+            TrayIconBuilder::with_id("tray")
+                .icon(app.default_window_icon().unwrap().clone())
+                .tooltip("Pane")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| {
+                    if event.id.as_ref() == "quit" {
+                        app.exit(0);
+                    }
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        position,
+                        ..
+                    } = event
+                    {
+                        toggle_popover(tray.app_handle(), position);
+                    }
+                })
+                .build(app)?;
+
+            // The popover starts hidden, so start the webview in low-memory
+            // mode too; it flips to normal the first time it is shown.
+            if let Some(wv) = app.get_webview_window("main") {
+                set_webview_memory_level(&wv, true);
+            }
+
+            httpapi::start();
+
+            let saved_shortcut = load_config()
+                .get("shortcut")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if let Err(e) = register_shortcut(app.handle(), &saved_shortcut) {
+                eprintln!("[pane] shortcut: {e}");
+            }
+
+            // Start with Windows is on by default (like the Mac app's
+            // launch-at-login) and re-asserted each launch so the registry
+            // entry follows the exe if it moves — e.g. loose exe → installed.
+            // Only an explicit "off" in Settings is respected. Skipped in dev
+            // builds so the debug exe never registers itself.
+            if !cfg!(debug_assertions) {
+                let wants_autostart = load_config()
+                    .get("autostart")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                if wants_autostart {
+                    use tauri_plugin_autostart::ManagerExt;
+                    let _ = app.autolaunch().enable();
+                }
+            }
+
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let WindowEvent::Focused(false) = event {
+                    if window.hide().is_ok() {
+                        LAST_AUTO_HIDE_MS.store(now_ms(), Ordering::Relaxed);
+                        if let Some(wv) = window.app_handle().get_webview_window("main") {
+                            set_webview_memory_level(&wv, true);
+                        }
+                    }
+                }
+            }
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}

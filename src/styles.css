@@ -1,0 +1,1626 @@
+/* Design tokens lifted from shadcn/ui's dark zinc theme (ui.shadcn.com) —
+   the palette and component treatments, hand-ported to plain CSS. */
+
+* {
+  box-sizing: border-box;
+}
+
+:root {
+  --background: #09090b;
+  --foreground: #fafafa;
+  --card: #18181b;
+  --border: #27272a;
+  --input: #27272a;
+  --muted: #27272a;
+  --muted-foreground: #a1a1aa;
+  --secondary-foreground: #d4d4d8;
+  --primary: #fafafa;
+  --primary-foreground: #09090b;
+  --accent: #27272a;
+  --destructive: #ef4444;
+  --chart-blue: #3b82f6;
+  --radius: 10px;
+
+  font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+  color-scheme: dark;
+}
+
+/* Light theme — shadcn's zinc palette, light side. Applied via
+   <html data-theme="light">; "System" follows prefers-color-scheme. */
+:root[data-theme="light"] {
+  --background: #ffffff;
+  --foreground: #09090b;
+  --card: #fafafa;
+  --border: #e4e4e7;
+  --input: #e4e4e7;
+  --muted: #f4f4f5;
+  --muted-foreground: #71717a;
+  --secondary-foreground: #3f3f46;
+  --primary: #18181b;
+  --primary-foreground: #fafafa;
+  --accent: #f4f4f5;
+  color-scheme: light;
+}
+
+/* Compact density: tighter rows, smaller type, thinner meters. */
+:root[data-density="compact"] {
+  font-size: 13px;
+}
+:root[data-density="compact"] .provider {
+  padding: 8px 12px;
+}
+:root[data-density="compact"] .metric {
+  margin: 4px 0;
+}
+:root[data-density="compact"] .bar {
+  height: 4px;
+}
+:root[data-density="compact"] .provider-head {
+  margin-bottom: 2px;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  user-select: none;
+  overflow: hidden;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3f3f46;
+}
+
+.popover {
+  display: flex;
+  height: 100vh;
+}
+
+/* ---------------------------------------------------------------- sidebar */
+/* Auto-hiding: a 4px sliver lives on the left edge; moving the cursor to
+   the edge slides the full sidebar out over the cards. */
+
+#side-zone {
+  position: fixed;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 10px;
+  z-index: 30;
+}
+
+/* Liquid glass, same recipe as jazii.dev's floating dock. */
+.sidebar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 42px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  /* Bottom padding clears the glass footer (z 55, ~34px tall) that floats
+     over the sidebar's lower edge — otherwise ⚙ sits under it, unclickable. */
+  padding: 12px 0 42px;
+  background: rgba(24, 24, 27, 0.4);
+  backdrop-filter: blur(20px) saturate(1.4) brightness(1.02);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4) brightness(1.02);
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    inset 0 1px 1.5px rgba(255, 255, 255, 0.4),
+    inset 0 -1px 1px rgba(255, 255, 255, 0.12),
+    inset 1.5px 0 1.5px rgba(255, 255, 255, 0.1),
+    inset -1.5px 0 1.5px rgba(255, 255, 255, 0.1);
+  transform: translateX(calc(-100% + 4px));
+  transition: transform 0.24s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.24s ease;
+}
+
+:root[data-theme="light"] .sidebar {
+  background: rgba(255, 255, 255, 0.55);
+  border-right: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: inset 0 1px 1.5px rgba(255, 255, 255, 0.6);
+}
+
+#side-zone:hover .sidebar,
+.sidebar:focus-within {
+  transform: none;
+  box-shadow:
+    8px 0 32px -8px rgba(0, 0, 0, 0.4),
+    inset 0 1px 1.5px rgba(255, 255, 255, 0.4),
+    inset 0 -1px 1px rgba(255, 255, 255, 0.12),
+    inset 1.5px 0 1.5px rgba(255, 255, 255, 0.1),
+    inset -1.5px 0 1.5px rgba(255, 255, 255, 0.1);
+}
+
+:root[data-theme="light"] #side-zone:hover .sidebar,
+:root[data-theme="light"] .sidebar:focus-within {
+  box-shadow:
+    8px 0 32px -8px rgba(0, 0, 0, 0.12),
+    inset 0 1px 1.5px rgba(255, 255, 255, 0.6),
+    inset 0 -0.5px 1px rgba(255, 255, 255, 0.2);
+}
+
+.main-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.sidebar-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.app-logo,
+.provider-icon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  color: var(--foreground);
+  flex: none;
+}
+
+.app-logo svg,
+.provider-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+/* Recolor the marks like macOS template icons: one tint, ours. */
+.app-logo svg path,
+.provider-icon svg path {
+  fill: currentColor;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.titlebar-buttons {
+  display: flex;
+  gap: 2px;
+}
+
+#refresh,
+#settings-btn,
+#customize-btn,
+#theme-btn {
+  background: none;
+  border: none;
+  color: var(--muted-foreground);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 3px 7px;
+  border-radius: 7px;
+  transition: background 0.15s, color 0.15s;
+}
+
+#refresh:hover,
+#settings-btn:hover,
+#customize-btn:hover,
+#customize-btn.active,
+#theme-btn:hover {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+/* ---------------------------------------------------------------- settings */
+/* Full-window panel sliding in from the right, sections as an accordion. */
+
+#settings {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: var(--background);
+  padding: 12px 14px;
+  overflow-y: auto;
+  transform: translateX(103%);
+  transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+  scrollbar-width: none;
+}
+
+#settings::-webkit-scrollbar {
+  display: none;
+}
+
+body.settings-open #settings {
+  transform: none;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.panel-title {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.acc-group {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--card);
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+
+.acc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--foreground);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  padding: 11px 13px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.acc-head:hover {
+  background: var(--accent);
+}
+
+.acc-head .chev {
+  color: var(--muted-foreground);
+  line-height: 0.4;
+  transition: transform 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.acc-group.open .acc-head .chev {
+  transform: rotate(180deg) translateY(-4px);
+}
+
+/* Animated open/close via the 0fr→1fr grid trick. */
+.acc-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.26s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.acc-group.open .acc-body {
+  grid-template-rows: 1fr;
+}
+
+.acc-inner {
+  overflow: hidden;
+  min-height: 0;
+  padding: 0 13px;
+}
+
+.acc-group.open .acc-inner {
+  padding-bottom: 10px;
+}
+
+.settings-note {
+  margin: 0 0 8px;
+  font-size: 11px;
+  color: var(--muted-foreground);
+  line-height: 1.45;
+}
+
+.setting-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 8px;
+  font-size: 12.5px;
+  color: var(--secondary-foreground);
+}
+
+input[type="number"],
+input[type="password"],
+select {
+  background: transparent;
+  border: 1px solid var(--input);
+  border-radius: 7px;
+  color: var(--foreground);
+  font-size: 12px;
+  font-family: inherit;
+  padding: 5px 9px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  outline: none;
+}
+
+input[type="number"]:focus-visible,
+input[type="password"]:focus-visible,
+select:focus-visible {
+  border-color: #52525b;
+  box-shadow: 0 0 0 3px rgb(212 212 216 / 0.12);
+}
+
+.setting-row input[type="number"] {
+  width: 56px;
+}
+
+.setting-row select {
+  flex: 1;
+  min-width: 0;
+  background: var(--background);
+}
+
+.unit {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+/* shadcn-style switch, applied to every toggle checkbox. */
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--secondary-foreground);
+  cursor: pointer;
+}
+
+.toggle input[type="checkbox"] {
+  appearance: none;
+  margin: 0;
+  width: 34px;
+  height: 19px;
+  flex: none;
+  border-radius: 999px;
+  background-color: var(--input);
+  background-image: radial-gradient(circle 7px at 10px 9.5px, #a1a1aa 98%, transparent);
+  cursor: pointer;
+  transition: background-color 0.18s;
+  outline: none;
+}
+
+.toggle input[type="checkbox"]:checked {
+  background-color: var(--primary);
+  background-image: radial-gradient(circle 7px at 24px 9.5px, var(--primary-foreground) 98%, transparent);
+}
+
+.toggle input[type="checkbox"]:focus-visible {
+  box-shadow: 0 0 0 3px rgb(212 212 216 / 0.2);
+}
+
+.toggles-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px 12px;
+}
+
+.key-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.key-row label {
+  width: 78px;
+  font-size: 12px;
+  color: var(--secondary-foreground);
+}
+
+.key-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.key-row button {
+  background: var(--muted);
+  border: none;
+  border-radius: 7px;
+  color: var(--foreground);
+  font-size: 11.5px;
+  font-family: inherit;
+  font-weight: 500;
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.key-row button:hover {
+  background: #3f3f46;
+}
+
+/* ---------------------------------------------------------------- cards */
+
+.content {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+/* Navigation trail: a Codex-style minimap rail. Tick widths follow card
+   heights; ticks near the cursor stretch and brighten (fisheye applied by
+   JS via inline transform/background). Click a tick to jump. */
+#trail {
+  margin: auto 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 0 6px 12px;
+  align-self: stretch;
+}
+
+.trail-tick {
+  width: 12px;
+  height: 2.5px;
+  border-radius: 999px;
+  background: #3f3f46;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  transform-origin: left center;
+  transition: transform 0.09s linear, background 0.12s ease;
+}
+
+:root[data-theme="light"] .trail-tick {
+  background: #d4d4d8;
+}
+
+.trail-tick.active {
+  background: var(--foreground);
+}
+
+#providers {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  overflow-y: auto;
+  padding: 10px 12px 44px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  scrollbar-width: none;
+}
+
+#providers::-webkit-scrollbar {
+  display: none;
+}
+
+.provider {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 11px 13px;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.provider:hover {
+  border-color: #3f3f46;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
+}
+
+:root[data-theme="light"] .provider:hover {
+  border-color: #d4d4d8;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.07);
+}
+
+.provider-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 9px;
+}
+
+.provider-name {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.stale {
+  font-size: 10.5px;
+  color: #eab308;
+  white-space: nowrap;
+  cursor: default;
+}
+
+/* Plain grey text beside the name — no pill — matching the Mac header. */
+.plan {
+  font-size: 11px;
+  color: var(--muted-foreground);
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.metric {
+  margin-bottom: 11px;
+}
+
+.metric:last-child {
+  margin-bottom: 2px;
+}
+
+.metric-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+
+.metric-label {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.pace-note {
+  font-size: 11px;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+}
+
+.pace-note.warn {
+  color: #eab308;
+}
+
+.pace-note.danger {
+  color: var(--destructive);
+}
+
+.detail {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.left-val {
+  font-size: 12px;
+  color: var(--foreground);
+}
+
+.clickable {
+  cursor: pointer;
+}
+
+.clickable:hover {
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+/* Quick links row (Status · Dashboard) at the bottom of a card. */
+.quick-links {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.quick-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 11px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.quick-link:hover {
+  color: var(--foreground);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.quick-sep {
+  color: var(--border);
+  font-size: 11px;
+}
+
+/* Share (copy as image) button — appears on card hover. */
+.share-btn {
+  background: none;
+  border: none;
+  padding: 0 2px;
+  font-size: 13px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.provider:hover .share-btn {
+  opacity: 1;
+}
+
+.share-btn:hover {
+  color: var(--foreground);
+}
+
+/* Codex reset-credit row: expiry text + a small Use pill. */
+.action-row .action-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.redeem-btn {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border: none;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  font-family: inherit;
+  padding: 2px 10px;
+  cursor: pointer;
+  transition: opacity 0.15s ease, transform 0.1s ease;
+}
+
+.redeem-btn:hover {
+  opacity: 0.85;
+}
+
+.redeem-btn:active {
+  transform: scale(0.94);
+}
+
+.bar {
+  position: relative;
+  height: 6px;
+  background: var(--muted);
+  border-radius: 999px;
+}
+
+.fill {
+  height: 100%;
+  background: var(--chart-blue);
+  border-radius: 999px;
+  transition: width 0.4s ease, background 0.3s ease;
+}
+
+.fill.warn {
+  background: #eab308;
+}
+
+.fill.low {
+  background: var(--destructive);
+}
+
+/* Even-pace marker: where usage would sit if burned evenly across the window. */
+.tick {
+  position: absolute;
+  top: -2px;
+  width: 2px;
+  height: 10px;
+  border-radius: 1px;
+  background: var(--foreground);
+  opacity: 0.55;
+  transform: translateX(-1px);
+}
+
+.metric-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-top: 4px;
+}
+
+.metric-text {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  padding: 3px 0;
+}
+
+.placeholder {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.placeholder.loading {
+  padding: 8px;
+}
+
+.provider.muted {
+  padding: 7px 13px;
+  opacity: 0.7;
+}
+
+.provider.muted .provider-head {
+  margin-bottom: 2px;
+}
+
+.provider.muted .placeholder {
+  font-size: 11px;
+}
+
+/* ---------------------------------------------------------------- spend */
+
+.tabs {
+  display: flex;
+  gap: 3px;
+  background: var(--muted);
+  border-radius: 9px;
+  padding: 3px;
+  margin-bottom: 4px;
+}
+
+.tab {
+  flex: 1;
+  text-align: center;
+  font-size: 11.5px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 7px;
+  background: none;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s, color 0.15s;
+}
+
+.tab.active {
+  background: var(--background);
+  color: var(--foreground);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.3);
+}
+
+.donut-wrap {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 10px;
+}
+
+.legend {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.legend-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.legend-name {
+  color: var(--secondary-foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.legend-val {
+  margin-left: auto;
+  color: var(--foreground);
+  font-weight: 500;
+}
+
+.info {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  cursor: default;
+}
+
+/* ---------------------------------------------------------------- customize */
+
+.card-caret {
+  display: block;
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 0 0;
+  border-radius: 6px;
+}
+
+.card-caret:hover {
+  color: var(--foreground);
+  background: var(--accent);
+}
+
+.on-demand {
+  border-top: 1px dashed var(--border);
+  margin-top: 6px;
+  padding-top: 8px;
+}
+
+.customize-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 2px 4px;
+}
+
+.mini-btn {
+  background: var(--muted);
+  border: none;
+  border-radius: 7px;
+  color: var(--foreground);
+  font-size: 11.5px;
+  font-family: inherit;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+.mini-btn:hover {
+  background: #3f3f46;
+}
+
+.mini-btn.danger:hover {
+  background: #7f1d1d;
+}
+
+.grip {
+  color: var(--muted-foreground);
+  cursor: grab;
+  font-size: 11px;
+  flex: none;
+  user-select: none;
+}
+
+/* Custom drag image: a full-width clone of the dragged card handed to
+   setDragImage() so Chromium never snapshots the glass layers behind the
+   real card (which smeared a ghost of the whole list across the screen).
+   Parked off-screen — the browser copies it into the drag image, the
+   element itself stays hidden. Opaque background is what kills the smear. */
+.drag-ghost {
+  position: fixed !important;
+  top: -1000px;
+  left: -1000px;
+  margin: 0;
+  background: var(--card);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.45);
+  pointer-events: none;
+  z-index: 200;
+}
+
+/* The card being dragged fades so the drop spot reads clearly. */
+.drag-src {
+  opacity: 0.35;
+  transition: opacity 0.15s ease;
+}
+
+.cust-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.cust-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 7px;
+  font-size: 12px;
+  background: var(--background);
+  border: 1px solid transparent;
+}
+
+.cust-row:hover {
+  border-color: var(--border);
+}
+
+.cust-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toggle.mini input[type="checkbox"] {
+  width: 28px;
+  height: 16px;
+  background-image: radial-gradient(circle 5.5px at 8px 8px, #a1a1aa 98%, transparent);
+}
+
+.toggle.mini input[type="checkbox"]:checked {
+  background-image: radial-gradient(circle 5.5px at 20px 8px, var(--primary-foreground) 98%, transparent);
+}
+
+.star {
+  background: none;
+  border: none;
+  color: var(--muted-foreground);
+  opacity: 0.45;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.star:hover {
+  opacity: 1;
+}
+
+.star.on {
+  color: #eab308;
+  opacity: 1;
+}
+
+.cust-divider {
+  text-align: center;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted-foreground);
+  border-top: 1px dashed var(--border);
+  margin: 4px 0 2px;
+  padding-top: 5px;
+}
+
+.customize-block .provider-head {
+  margin-bottom: 8px;
+}
+
+.trend-chart {
+  width: 100%;
+  height: 32px;
+  display: block;
+}
+
+.spend-row {
+  cursor: default;
+  border-radius: 6px;
+  margin: 0 -4px;
+  padding: 3px 4px;
+}
+
+.spend-row:hover {
+  background: var(--accent);
+}
+
+/* Floating per-model breakdown panel */
+#model-tip {
+  position: fixed;
+  z-index: 50;
+  width: 230px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.5);
+  padding: 9px 11px;
+  pointer-events: none;
+}
+
+.tip-model {
+  margin-bottom: 8px;
+}
+
+.tip-model:last-child {
+  margin-bottom: 0;
+}
+
+.tip-line {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11.5px;
+  gap: 8px;
+}
+
+.tip-line.detail {
+  color: var(--muted-foreground);
+  font-size: 10.5px;
+}
+
+.tip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tip-bar {
+  height: 3px;
+  background: var(--muted);
+  border-radius: 999px;
+  margin-top: 3px;
+  overflow: hidden;
+}
+
+.tip-bar div {
+  height: 100%;
+  background: var(--chart-blue);
+  border-radius: 999px;
+}
+
+/* ---------------------------------------------------------------- footer */
+
+/* Floats over the card list so content scrolls behind the glass,
+   like the jazii.dev dock. */
+/* Above the Customize/Settings panels (z 50) so the live status + build
+   stamp stays visible at the bottom of every screen. */
+footer {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 55;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  background: rgba(9, 9, 11, 0.4);
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    0 -8px 32px -8px rgba(0, 0, 0, 0.22),
+    inset 0 1px 1.5px rgba(255, 255, 255, 0.4),
+    inset 0 -1px 1px rgba(255, 255, 255, 0.12),
+    inset 1.5px 0 1.5px rgba(255, 255, 255, 0.1),
+    inset -1.5px 0 1.5px rgba(255, 255, 255, 0.1);
+}
+
+:root[data-theme="light"] footer {
+  background: rgba(255, 255, 255, 0.55);
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 -4px 24px -4px rgba(0, 0, 0, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+
+#build-info {
+  font-size: 10px;
+  opacity: 0.75;
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------- motion */
+/* Entrance animations play only when the popover opens (the .reveal class
+   is added for one pass), never on background re-renders or 30s ticks. */
+
+@keyframes card-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes fill-in {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes shimmer {
+  from {
+    background-position: -200% 0;
+  }
+  to {
+    background-position: 200% 0;
+  }
+}
+
+#providers.reveal > article {
+  animation: card-in 0.34s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+#providers.reveal > article:nth-child(2)  { animation-delay: 0.04s; }
+#providers.reveal > article:nth-child(3)  { animation-delay: 0.08s; }
+#providers.reveal > article:nth-child(4)  { animation-delay: 0.12s; }
+#providers.reveal > article:nth-child(5)  { animation-delay: 0.16s; }
+#providers.reveal > article:nth-child(6)  { animation-delay: 0.20s; }
+#providers.reveal > article:nth-child(7)  { animation-delay: 0.24s; }
+#providers.reveal > article:nth-child(8)  { animation-delay: 0.28s; }
+#providers.reveal > article:nth-child(9)  { animation-delay: 0.32s; }
+#providers.reveal > article:nth-child(10) { animation-delay: 0.36s; }
+#providers.reveal > article:nth-child(n + 11) { animation-delay: 0.4s; }
+
+#providers.reveal .fill {
+  transform-origin: left;
+  animation: fill-in 0.55s cubic-bezier(0.16, 1, 0.3, 1) 0.18s both;
+}
+
+#providers.reveal .donut-wrap,
+#providers.reveal .trend-chart {
+  animation: fade-in 0.45s ease 0.2s both;
+}
+
+/* Animates only when the caret was just clicked (.anim set for one render)
+   so 30s background re-renders don't flicker. */
+.on-demand.anim {
+  animation: rise-in 0.18s ease both;
+}
+
+#model-tip {
+  animation: fade-in 0.14s ease both;
+}
+
+.sidebar-buttons button {
+  transition: color 0.15s ease, background 0.15s ease, transform 0.1s ease;
+}
+
+.sidebar-buttons button:active {
+  transform: scale(0.88);
+}
+
+.share-btn:active,
+.card-caret:active,
+.quick-link:active {
+  transform: scale(0.9);
+}
+
+.tabs .tab {
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.trail-tick {
+  transition: background 0.2s ease, transform 0.2s ease;
+}
+
+/* Usage Trend hover: brighten the day's bar under the cursor. */
+.trend-hit {
+  cursor: pointer;
+}
+
+.trend-day:hover rect:first-child {
+  fill: #60a5fa;
+}
+
+/* Skeleton cards shown before the first data arrives. */
+.skeleton-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 11px 13px;
+  animation: card-in 0.34s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.skeleton-card:nth-child(2) { animation-delay: 0.05s; }
+.skeleton-card:nth-child(3) { animation-delay: 0.1s; }
+
+.skeleton-line {
+  height: 10px;
+  border-radius: 999px;
+  margin: 10px 0;
+  background: linear-gradient(90deg, var(--muted) 25%, var(--border) 50%, var(--muted) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s linear infinite;
+}
+
+.skeleton-line.title {
+  width: 40%;
+  height: 12px;
+  margin-top: 2px;
+}
+
+.skeleton-line.bar {
+  width: 100%;
+}
+
+.skeleton-line.short {
+  width: 65%;
+}
+
+/* Respect Windows' "show animations" accessibility setting. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* -------------------------------------------------------- customize drawer */
+
+#drawer {
+  position: fixed;
+  inset: 0;
+  background: var(--background);
+  z-index: 50;
+  transform: translateX(-103%);
+  transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+  overflow-y: auto;
+  padding: 12px 14px;
+  scrollbar-width: none;
+}
+
+#drawer::-webkit-scrollbar {
+  display: none;
+}
+
+body.drawer-open #drawer {
+  transform: none;
+}
+
+/* ------------------------------------------------ theme wipe + light audit */
+
+/* The circular wipe drives the whole transition; disable the default
+   cross-fade so the circle edge stays crisp (same setup as jazii.dev). */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+
+/* Chart colors routed through theme variables so light mode reads right. */
+.donut-track {
+  stroke: var(--muted);
+}
+
+.donut-total {
+  fill: var(--foreground);
+}
+
+.trend-bar {
+  fill: var(--chart-blue);
+}
+
+.trend-zero {
+  fill: var(--muted);
+}
+
+/* Light-mode versions of the few remaining hardcoded dark greys. */
+:root[data-theme="light"] ::-webkit-scrollbar-thumb:hover {
+  background: #a1a1aa;
+}
+
+:root[data-theme="light"] .key-row button:hover {
+  background: #e4e4e7;
+}
+
+:root[data-theme="light"] #side-zone:hover .sidebar,
+:root[data-theme="light"] .sidebar:focus-within {
+  box-shadow: 6px 0 24px rgba(0, 0, 0, 0.12);
+}
+
+:root[data-theme="light"] .skeleton-line {
+  background: linear-gradient(90deg, var(--muted) 25%, #e9e9ec 50%, var(--muted) 75%);
+  background-size: 200% 100%;
+}
+
+/* ------------------------------------------------------------- wave 10 */
+
+/* Tooltip bubble replacing native titles: 400ms dwell, balanced wrap. */
+#hover-tip {
+  position: fixed;
+  z-index: 90;
+  max-width: 240px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 9px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--secondary-foreground);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.35);
+  pointer-events: none;
+  text-wrap: balance;
+  animation: fade-in 0.12s ease both;
+}
+
+:root[data-theme="light"] #hover-tip {
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.12);
+}
+
+/* Reset credit expiring within 24h. */
+.warn-dot {
+  color: #eab308;
+  font-size: 8px;
+  vertical-align: 1px;
+  cursor: default;
+}
+
+/* Donut arcs morph between spend tabs. */
+.total-spend circle.seg {
+  transition:
+    stroke-dasharray 0.5s cubic-bezier(0.16, 1, 0.3, 1),
+    stroke-dashoffset 0.5s cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 0.3s ease;
+}
+
+/* First-run welcome card. */
+.welcome-card {
+  border-color: #3f3f46;
+}
+
+.welcome-card .welcome-close {
+  opacity: 0.7;
+}
+
+/* Party mode 🎉 (Konami code). Cosmetic only; respects reduced motion via
+   the global override at the bottom of this sheet. */
+@keyframes party-hue {
+  to {
+    filter: hue-rotate(360deg);
+  }
+}
+
+@keyframes party-slide {
+  to {
+    background-position: 300% 0;
+  }
+}
+
+@keyframes party-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+body.party .provider {
+  animation: party-hue 6s linear infinite;
+}
+
+body.party .fill {
+  background: linear-gradient(90deg, #f472b6, #60a5fa, #facc15, #f472b6);
+  background-size: 300% 100%;
+  animation: party-slide 2s linear infinite;
+}
+
+body.party .app-logo {
+  animation: party-spin 2.5s linear infinite;
+}
+
+body.party .trail-tick.active {
+  animation: party-hue 3s linear infinite;
+}
+
+/* --------------------------------------------- customize dock + accordion */
+
+/* Floating liquid-glass dock: appears when the Customize panel is scrolled,
+   keeping "← Done" reachable from anywhere in the list. */
+.cust-dock {
+  position: fixed;
+  top: 10px;
+  left: 50%;
+  transform: translate(-50%, -16px) scale(0.96);
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 4px;
+  border-radius: 999px;
+  background: rgba(24, 24, 27, 0.55);
+  backdrop-filter: blur(20px) saturate(1.4) brightness(1.02);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4) brightness(1.02);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow:
+    0 8px 32px -8px rgba(0, 0, 0, 0.45),
+    inset 0 1px 1.5px rgba(255, 255, 255, 0.35),
+    inset 0 -0.5px 1px rgba(255, 255, 255, 0.08);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.22s ease, transform 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.cust-dock.visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(-50%, 0) scale(1);
+}
+
+.dock-btn {
+  background: none;
+  border: none;
+  border-radius: 999px;
+  padding: 6px 13px;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  color: var(--foreground);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.dock-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.dock-btn.danger {
+  color: #f0a5a5;
+}
+
+.dock-btn.danger:hover {
+  background: rgba(239, 68, 68, 0.22);
+  color: #fecaca;
+}
+
+.dock-sep {
+  width: 1px;
+  height: 16px;
+  flex: none;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+:root[data-theme="light"] .cust-dock {
+  background: rgba(255, 255, 255, 0.65);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow:
+    0 8px 32px -8px rgba(0, 0, 0, 0.14),
+    inset 0 1px 1.5px rgba(255, 255, 255, 0.6);
+}
+
+:root[data-theme="light"] .dock-btn:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+:root[data-theme="light"] .dock-btn.danger {
+  color: #b91c1c;
+}
+
+:root[data-theme="light"] .dock-btn.danger:hover {
+  background: rgba(239, 68, 68, 0.12);
+}
+
+:root[data-theme="light"] .dock-sep {
+  background: rgba(0, 0, 0, 0.12);
+}
+
+/* Collapsed provider blocks: name + chevron; rows unfold on demand. */
+.cust-expand {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: none;
+  border: none;
+  padding: 2px 4px;
+  cursor: pointer;
+  font-family: inherit;
+  color: var(--foreground);
+  border-radius: 6px;
+}
+
+.cust-expand:hover {
+  background: var(--accent);
+}
+
+.cust-expand .chev {
+  color: var(--muted-foreground);
+  line-height: 0.4;
+  font-size: 13px;
+  transition: transform 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.customize-block.open .cust-expand .chev {
+  transform: rotate(180deg) translateY(-4px);
+}
+
+.customize-block .acc-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.26s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.customize-block.open .acc-body {
+  grid-template-rows: 1fr;
+}
+
+.customize-block .acc-inner {
+  overflow: hidden;
+  min-height: 0;
+  padding: 0;
+}
+
+.customize-block.open .acc-inner {
+  padding-top: 6px;
+}
+
+.customize-block .provider-head {
+  margin-bottom: 0;
+}
+
+/* ------------------------------------------------------ panel glass bars */
+/* Customize and Settings each pin a liquid-glass header bar; the panel
+   content scrolls underneath it, same material as the main footer. */
+
+:root {
+  --bar-filter: blur(20px) saturate(1.4) brightness(1.02);
+}
+
+.glass-bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  margin: 0;
+  background: rgba(9, 9, 11, 0.4);
+  backdrop-filter: var(--bar-filter);
+  -webkit-backdrop-filter: var(--bar-filter);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    0 8px 32px -8px rgba(0, 0, 0, 0.22),
+    inset 0 1px 1.5px rgba(255, 255, 255, 0.35),
+    inset 0 -0.5px 1px rgba(255, 255, 255, 0.08);
+}
+
+:root[data-theme="light"] .glass-bar {
+  background: rgba(255, 255, 255, 0.55);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow:
+    0 8px 32px -8px rgba(0, 0, 0, 0.1),
+    inset 0 1px 1.5px rgba(255, 255, 255, 0.6);
+}
+
+.customize-bar.glass-bar {
+  justify-content: space-between;
+}
+
+.customize-bar.glass-bar .detail {
+  white-space: nowrap;
+}
+
+.panel-head.glass-bar .panel-title {
+  flex: 1;
+  text-align: center;
+  /* optically balance the Done button on the left */
+  margin-right: 64px;
+}
+
+/* Content clears the pinned bars and the footer. */
+#drawer {
+  padding-top: 56px;
+  padding-bottom: 48px;
+}
+
+#settings {
+  padding-top: 56px;
+  padding-bottom: 48px;
+}
