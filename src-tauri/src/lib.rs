@@ -441,70 +441,48 @@ async fn fetch_usage(app: tauri::AppHandle) -> Vec<providers::Snapshot> {
         .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
         .unwrap_or_default();
 
-    let (
-        claude,
-        codex,
-        cursor,
-        opencode,
-        copilot,
-        grok,
-        devin,
-        minimax,
-        openrouter,
-        zai,
-        antigravity,
-        deepseek,
-        moonshot,
-        elevenlabs,
-        deepgram,
-        openai,
-        venice,
-        ollama,
-        codebuff,
-        kilo,
-        kiro,
-        amp,
-        vertexai,
-        bedrock,
-        poe,
-        chutes,
-        warp,
-        crof,
-    ) = tokio::join!(
-        guarded("claude", "Claude", providers::claude::snapshot()),
-        guarded("codex", "Codex", providers::codex::snapshot()),
-        guarded("cursor", "Cursor", providers::cursor::snapshot()),
-        guarded("opencode", "OpenCode", providers::opencode::snapshot()),
-        guarded("copilot", "Copilot", providers::copilot::snapshot()),
-        guarded("grok", "Grok", providers::grok::snapshot()),
-        guarded("devin", "Devin", providers::devin::snapshot()),
-        guarded("minimax", "MiniMax", providers::minimax::snapshot()),
-        guarded("openrouter", "OpenRouter", providers::openrouter::snapshot()),
-        guarded("zai", "Z.ai", providers::zai::snapshot()),
-        guarded("antigravity", "Antigravity", providers::antigravity::snapshot()),
-        guarded("deepseek", "DeepSeek", providers::deepseek::snapshot()),
-        guarded("moonshot", "Moonshot", providers::moonshot::snapshot()),
-        guarded("elevenlabs", "ElevenLabs", providers::elevenlabs::snapshot()),
-        guarded("deepgram", "Deepgram", providers::deepgram::snapshot()),
-        guarded("openai", "OpenAI", providers::openai::snapshot()),
-        guarded("venice", "Venice", providers::venice::snapshot()),
-        guarded("ollama", "Ollama", providers::ollama::snapshot()),
-        guarded("codebuff", "Codebuff", providers::codebuff::snapshot()),
-        guarded("kilo", "Kilo", providers::kilo::snapshot()),
-        guarded("kiro", "Kiro", providers::kiro::snapshot()),
-        guarded("amp", "Amp", providers::amp::snapshot()),
-        guarded("vertexai", "Vertex AI", providers::vertexai::snapshot()),
-        guarded("bedrock", "AWS Bedrock", providers::bedrock::snapshot()),
-        guarded("poe", "Poe", providers::poe::snapshot()),
-        guarded("chutes", "Chutes", providers::chutes::snapshot()),
-        guarded("warp", "Warp", providers::warp::snapshot()),
-        guarded("crof", "Crof", providers::crof::snapshot()),
-    );
-    let mut all = vec![
-        claude, codex, cursor, opencode, copilot, grok, devin, minimax, openrouter, zai,
-        antigravity, deepseek, moonshot, elevenlabs, deepgram, openai, venice, ollama, codebuff,
-        kilo, kiro, amp, vertexai, bedrock, poe, chutes, warp, crof,
+    // Each provider future is boxed onto the heap and spawned as its own
+    // task. A single tokio::join! over 28 inlined futures builds one huge
+    // combined state machine on the calling thread's stack — at 28 providers
+    // that overflowed the main thread's 1 MB stack and killed the app.
+    type BoxedSnap = std::pin::Pin<Box<dyn std::future::Future<Output = providers::Snapshot> + Send>>;
+    let futs: Vec<BoxedSnap> = vec![
+        Box::pin(guarded("claude", "Claude", providers::claude::snapshot())),
+        Box::pin(guarded("codex", "Codex", providers::codex::snapshot())),
+        Box::pin(guarded("cursor", "Cursor", providers::cursor::snapshot())),
+        Box::pin(guarded("opencode", "OpenCode", providers::opencode::snapshot())),
+        Box::pin(guarded("copilot", "Copilot", providers::copilot::snapshot())),
+        Box::pin(guarded("grok", "Grok", providers::grok::snapshot())),
+        Box::pin(guarded("devin", "Devin", providers::devin::snapshot())),
+        Box::pin(guarded("minimax", "MiniMax", providers::minimax::snapshot())),
+        Box::pin(guarded("openrouter", "OpenRouter", providers::openrouter::snapshot())),
+        Box::pin(guarded("zai", "Z.ai", providers::zai::snapshot())),
+        Box::pin(guarded("antigravity", "Antigravity", providers::antigravity::snapshot())),
+        Box::pin(guarded("deepseek", "DeepSeek", providers::deepseek::snapshot())),
+        Box::pin(guarded("moonshot", "Moonshot", providers::moonshot::snapshot())),
+        Box::pin(guarded("elevenlabs", "ElevenLabs", providers::elevenlabs::snapshot())),
+        Box::pin(guarded("deepgram", "Deepgram", providers::deepgram::snapshot())),
+        Box::pin(guarded("openai", "OpenAI", providers::openai::snapshot())),
+        Box::pin(guarded("venice", "Venice", providers::venice::snapshot())),
+        Box::pin(guarded("ollama", "Ollama", providers::ollama::snapshot())),
+        Box::pin(guarded("codebuff", "Codebuff", providers::codebuff::snapshot())),
+        Box::pin(guarded("kilo", "Kilo", providers::kilo::snapshot())),
+        Box::pin(guarded("kiro", "Kiro", providers::kiro::snapshot())),
+        Box::pin(guarded("amp", "Amp", providers::amp::snapshot())),
+        Box::pin(guarded("vertexai", "Vertex AI", providers::vertexai::snapshot())),
+        Box::pin(guarded("bedrock", "AWS Bedrock", providers::bedrock::snapshot())),
+        Box::pin(guarded("poe", "Poe", providers::poe::snapshot())),
+        Box::pin(guarded("chutes", "Chutes", providers::chutes::snapshot())),
+        Box::pin(guarded("warp", "Warp", providers::warp::snapshot())),
+        Box::pin(guarded("crof", "Crof", providers::crof::snapshot())),
     ];
+    let handles: Vec<_> = futs.into_iter().map(tauri::async_runtime::spawn).collect();
+    let mut all = Vec::with_capacity(handles.len());
+    for h in handles {
+        if let Ok(snap) = h.await {
+            all.push(snap);
+        }
+    }
     all.retain(|s| !disabled.iter().any(|d| *d == s.id));
 
     for s in &all {
