@@ -35,7 +35,7 @@ broader AI-workflow companion from there.
 ### One-liner (PowerShell)
 
 ```powershell
-irm https://raw.githubusercontent.com/ItsJazii/pane/main/install.ps1 | iex
+irm https://pane.jazii.dev/install.ps1 | iex
 ```
 
 Downloads the latest release, installs per-user (no admin), and launches
