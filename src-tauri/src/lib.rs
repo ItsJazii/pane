@@ -97,12 +97,41 @@ fn get_config() -> Value {
     config_with_defaults(load_config())
 }
 
+/// Every key config.json may hold — the same set config_with_defaults seeds.
+/// set_config drops anything else so a compromised frontend can't stash
+/// arbitrary data in the config file.
+const CONFIG_KEYS: &[&str] = &[
+    "refreshMinutes",
+    "disabled",
+    "pinned",
+    "trayProviders",
+    "pacingAlways",
+    "notifyAlmostOut",
+    "notifyCuttingClose",
+    "notifyWillRunOut",
+    "spendTab",
+    "showUsed",
+    "resetExact",
+    "timeFormat",
+    "layout",
+    "appearance",
+    "density",
+    "shortcut",
+    "proxy",
+    "showTotalSpend",
+    "welcomeDismissed",
+];
+
 #[tauri::command]
 fn set_config(patch: Value) -> Result<Value, String> {
     let mut cfg = config_with_defaults(load_config());
     if let (Some(target), Some(source)) = (cfg.as_object_mut(), patch.as_object()) {
         for (k, v) in source {
-            target.insert(k.clone(), v.clone());
+            if CONFIG_KEYS.contains(&k.as_str()) {
+                target.insert(k.clone(), v.clone());
+            } else {
+                eprintln!("[pane] set_config: ignoring unknown key '{k}'");
+            }
         }
     }
     let dir = providers::config_dir();
@@ -320,9 +349,29 @@ struct StripEntry {
     tooltip: String,
 }
 
-const STRIP_PROVIDER_IDS: [&str; 10] = [
-    "claude", "codex", "cursor", "opencode", "copilot", "grok", "devin", "openrouter", "zai",
+/// Every provider id that may appear in the tray strip. Doubles as the
+/// allowlist for update_tray_strip: ids from the frontend are validated
+/// against this before being spliced into tray icon ids, and stale strip
+/// icons are removed for exactly this set.
+const STRIP_PROVIDER_IDS: [&str; 18] = [
+    "claude",
+    "codex",
+    "cursor",
+    "opencode",
+    "copilot",
+    "grok",
+    "devin",
+    "minimax",
+    "openrouter",
+    "zai",
     "antigravity",
+    "deepseek",
+    "moonshot",
+    "elevenlabs",
+    "ollama",
+    "codebuff",
+    "kilo",
+    "kiro",
 ];
 
 #[tauri::command]
@@ -338,6 +387,10 @@ fn update_tray_strip(app: tauri::AppHandle, entries: Vec<StripEntry>) -> Result<
         }
 
         for entry in &entries {
+            // Only known provider ids may reach the tray icon namespace.
+            if !STRIP_PROVIDER_IDS.contains(&entry.id.as_str()) {
+                continue;
+            }
             if entry.logo.len() != 32 * 32 * 4 {
                 continue;
             }

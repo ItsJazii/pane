@@ -39,5 +39,11 @@ Wire format (compatible with the macOS OpenUsage API):
   read your usage), Pane sends no CORS headers — so browsers block web
   pages from reading this API. PowerShell, curl, Rainmeter, and native
   apps are unaffected; CORS only constrains browsers.
+- **No authentication.** Any program running as your Windows user can
+  read this API — that is what makes zero-config widgets and scripts
+  possible, and it is a deliberate trade-off. What such a program gets is
+  usage percentages and reset times; your credentials are never served.
+  (A local process that could steal anything meaningful could also read
+  the CLIs' credential files directly — the API adds no new exposure.)
 - If port 6736 is already taken, the API is silently unavailable for that
   session; everything else works normally.

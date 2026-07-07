@@ -111,6 +111,9 @@ async fn fetch() -> Result<Snapshot, String> {
                 e["refresh_token"] = Value::from(r);
             }
             e["expires_at"] = Value::from((Utc::now() + Duration::seconds(expires_in)).to_rfc3339());
+            // Keep a copy of the CLI's own file before touching it, so a bad
+            // write can never cost the user their login.
+            let _ = std::fs::copy(&path, path.with_extension("json.pane-bak"));
             let tmp = path.with_extension("json.tmp");
             std::fs::write(&tmp, serde_json::to_string_pretty(&doc).unwrap_or(raw))
                 .and_then(|_| std::fs::rename(&tmp, &path))

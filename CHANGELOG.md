@@ -17,6 +17,17 @@
   their auto-updater will decline the first release signed with the new
   key — reinstall once via `irm https://pane.jazii.dev/install.ps1 | iex`
   (or the release installer) and updates resume normally.
+- **Webview hardening pass** (from a community security review): a strict
+  Content-Security-Policy replaces the previous `csp: null`; the Tauri
+  capability set is trimmed to core IPC only (the UI never used the
+  opener/updater/process plugin APIs); `withGlobalTauri` is off; the
+  pinned-metric dropdown is built via DOM instead of HTML strings.
+- **Rust-side input validation:** `set_config` only accepts known config
+  keys; tray-strip updates only accept known provider ids (also fixes
+  unstarred tray icons of newer providers not being removed); pricing
+  supplement alias rules are size- and count-capped.
+- **Credential safety:** CLI credential files are copied to `*.pane-bak`
+  before Pane writes a refreshed token back.
 
 ### Added
 - SECURITY.md (private vulnerability reporting), docs/privacy.md (every
