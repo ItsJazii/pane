@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### New
+- **Wave 12 provider pack** — ten providers whose CLIs/tools leave tokens on
+  disk or take an API key (provider research credit: steipete/CodexBar, MIT):
+  Codebuff (credits + weekly, CLI login or key), Kilo (credit blocks +
+  Kilo Pass, CLI login or key), Kiro (experimental CLI scrape of
+  `kiro-cli /usage`), Amp (CLI `amp usage`, or API token — free-tier
+  replenish ETA), Vertex AI (gcloud ADC identity + project), AWS Bedrock
+  (native SigV4 → Cost Explorer monthly spend, optional PANE_BEDROCK_BUDGET
+  progress bar, env keys or AWS_PROFILE via the AWS CLI), Poe (point
+  balance), Chutes (4-hour + monthly quotas), Warp (request credits +
+  bonus grants), Crof (daily requests + credit balance). 28 providers total.
+
 ## 0.3.0
 
 ### Renamed to Pane
