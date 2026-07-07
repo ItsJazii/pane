@@ -3,16 +3,26 @@
 ## Unreleased
 
 ### New
-- **Wave 12 provider pack** — ten providers whose CLIs/tools leave tokens on
-  disk or take an API key (provider research credit: steipete/CodexBar, MIT):
-  Codebuff (credits + weekly, CLI login or key), Kilo (credit blocks +
-  Kilo Pass, CLI login or key), Kiro (experimental CLI scrape of
-  `kiro-cli /usage`), Amp (CLI `amp usage`, or API token — free-tier
-  replenish ETA), Vertex AI (gcloud ADC identity + project), AWS Bedrock
-  (native SigV4 → Cost Explorer monthly spend, optional PANE_BEDROCK_BUDGET
-  progress bar, env keys or AWS_PROFILE via the AWS CLI), Poe (point
-  balance), Chutes (4-hour + monthly quotas), Warp (request credits +
-  bonus grants), Crof (daily requests + credit balance). 28 providers total.
+- **Three CLI-detected providers** (research credit: steipete/CodexBar, MIT):
+  Codebuff (credits + weekly limit, `codebuff login` file or key), Kilo
+  (credit blocks + Kilo Pass, CLI login file or key), and Kiro
+  (experimental — reads `kiro-cli /usage`). **18 providers total.**
+- **Auto-updater** — Pane checks GitHub releases on launch and every 4
+  hours; a banner offers one-click download + restart. Updates are
+  cryptographically signed and verified before install.
+
+### Removed
+- Deepgram, OpenAI, Venice, Poe, Chutes, Warp, Crof, Amp, Vertex AI, and
+  AWS Bedrock providers — cut to keep the lineup focused on the AI coding
+  tools people actually track. Saved layouts self-clean any retired ids.
+
+### Fixed
+- Terminal windows no longer flash during refreshes (provider CLI checks
+  now run windowless or scan the filesystem instead of spawning `cmd`).
+- Retired providers no longer linger as ghost rows in Customize.
+- Startup crash at higher provider counts (fetch futures now heap-boxed).
+- Clicking the tray icon always reopens on the main page, even if the app
+  was left on Settings or Customize.
 
 ## 0.3.0
 
