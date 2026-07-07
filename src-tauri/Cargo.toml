@@ -1,0 +1,42 @@
+[package]
+name = "pane"
+version = "0.3.0"
+description = "AI subscription usage in the Windows tray"
+authors = ["jazii"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "pane_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-opener = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "socks"] }
+tiny_http = "0.12"
+arboard = "3"
+tokio = { version = "1", features = ["macros"] }
+chrono = "0.4"
+base64 = "0.22"
+dirs = "6"
+rusqlite = { version = "0.32", features = ["bundled"] }
+toml = "0.8"
+regex = "1"
+webview2-com = "0.38"
+windows-core = "0.61"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
+

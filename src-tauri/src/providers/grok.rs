@@ -1,0 +1,199 @@
+use super::{http, Metric, Snapshot};
+use chrono::{DateTime, Duration, Utc};
+use serde_json::Value;
+use std::path::PathBuf;
+
+const ID: &str = "grok";
+const NAME: &str = "Grok";
+
+fn auth_path() -> PathBuf {
+    dirs::home_dir().unwrap_or_default().join(".grok").join("auth.json")
+}
+
+pub async fn snapshot() -> Snapshot {
+    match fetch().await {
+        Ok(s) => s,
+        Err(e) => Snapshot::error(ID, NAME, e),
+    }
+}
+
+async fn fetch() -> Result<Snapshot, String> {
+    let path = auth_path();
+    if !path.exists() {
+        return Ok(Snapshot::no_credentials(
+            ID,
+            NAME,
+            "Grok CLI sign-in not found (~\\.grok\\auth.json).",
+        ));
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|e| format!("read auth.json: {e}"))?;
+    let mut doc: Value = serde_json::from_str(&raw).map_err(|e| format!("parse auth.json: {e}"))?;
+
+    // auth.json maps "<issuer>::<account-uuid>" to the account entry.
+    let entry_key = doc
+        .as_object()
+        .and_then(|m| m.keys().next().cloned())
+        .ok_or("auth.json is empty")?;
+    let entry = doc.get(&entry_key).cloned().unwrap_or(Value::Null);
+
+    let mut token = entry
+        .get("key")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let refresh_token = entry
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let issuer = entry
+        .get("oidc_issuer")
+        .and_then(Value::as_str)
+        .unwrap_or("https://auth.x.ai")
+        .trim_end_matches('/')
+        .to_string();
+    let client_id = entry
+        .get("oidc_client_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let expired = entry
+        .get("expires_at")
+        .and_then(Value::as_str)
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| t.with_timezone(&Utc) <= Utc::now() + Duration::seconds(60))
+        .unwrap_or(false);
+
+    if token.is_empty() || expired {
+        if refresh_token.is_empty() || client_id.is_empty() {
+            return Err("Grok token expired — run the Grok CLI once to sign in again".into());
+        }
+        let form = [
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token.as_str()),
+            ("client_id", client_id.as_str()),
+        ];
+        let mut resp = http()
+            .post(format!("{issuer}/oauth2/token"))
+            .form(&form)
+            .send()
+            .await
+            .map_err(|e| format!("token refresh: {e}"))?;
+        if resp.status().as_u16() == 404 {
+            resp = http()
+                .post(format!("{issuer}/oauth/token"))
+                .form(&form)
+                .send()
+                .await
+                .map_err(|e| format!("token refresh: {e}"))?;
+        }
+        if !resp.status().is_success() {
+            return Err(format!(
+                "token refresh failed (HTTP {}) — run the Grok CLI once to sign in again",
+                resp.status()
+            ));
+        }
+        let tok: Value = resp.json().await.map_err(|e| format!("token refresh parse: {e}"))?;
+        let new_access = tok
+            .get("access_token")
+            .and_then(Value::as_str)
+            .ok_or("refresh response missing access_token")?
+            .to_string();
+        let expires_in = tok.get("expires_in").and_then(Value::as_i64).unwrap_or(3600);
+
+        token = new_access.clone();
+
+        // Refresh tokens rotate — write the new pair back so the Grok CLI
+        // itself stays signed in.
+        if let Some(e) = doc.get_mut(&entry_key).filter(|v| v.is_object()) {
+            e["key"] = Value::from(new_access);
+            if let Some(r) = tok.get("refresh_token").and_then(Value::as_str) {
+                e["refresh_token"] = Value::from(r);
+            }
+            e["expires_at"] = Value::from((Utc::now() + Duration::seconds(expires_in)).to_rfc3339());
+            let tmp = path.with_extension("json.tmp");
+            std::fs::write(&tmp, serde_json::to_string_pretty(&doc).unwrap_or(raw))
+                .and_then(|_| std::fs::rename(&tmp, &path))
+                .map_err(|e| format!("write refreshed auth.json: {e}"))?;
+        }
+    }
+
+    let billing_req = http()
+        .get("https://cli-chat-proxy.grok.com/v1/billing?format=credits")
+        .bearer_auth(&token)
+        .send();
+    let settings_req = http()
+        .get("https://cli-chat-proxy.grok.com/v1/settings")
+        .bearer_auth(&token)
+        .send();
+    let (billing_resp, settings_resp) = tokio::join!(billing_req, settings_req);
+
+    let billing_resp = billing_resp.map_err(|e| format!("billing request: {e}"))?;
+    if billing_resp.status().as_u16() == 401 || billing_resp.status().as_u16() == 403 {
+        return Err("Grok session expired — run the Grok CLI once to refresh it".into());
+    }
+    if !billing_resp.status().is_success() {
+        return Err(format!("billing endpoint: HTTP {}", billing_resp.status()));
+    }
+    let billing: Value = billing_resp.json().await.map_err(|e| format!("billing parse: {e}"))?;
+
+    let mut metrics = Vec::new();
+    collect_billing_metrics(&billing, "", &mut metrics);
+    if metrics.is_empty() {
+        // Log field names (never values) so unknown shapes are debuggable.
+        if let Some(map) = billing.as_object() {
+            eprintln!(
+                "[pane] grok billing keys: {:?}",
+                map.keys().collect::<Vec<_>>()
+            );
+        }
+        return Err("unexpected billing response shape".into());
+    }
+    metrics.truncate(4);
+
+    let mut plan = None;
+    if let Ok(resp) = settings_resp {
+        if resp.status().is_success() {
+            if let Ok(doc) = resp.json::<Value>().await {
+                plan = ["plan", "tier", "subscription", "plan_name"]
+                    .iter()
+                    .find_map(|k| doc.get(*k).and_then(Value::as_str))
+                    .map(str::to_string);
+            }
+        }
+    }
+
+    Ok(Snapshot::ok(ID, NAME, plan, metrics))
+}
+
+/// Undocumented endpoint — collect anything that looks like a usage percent
+/// or a credit balance.
+fn collect_billing_metrics(node: &Value, parent_key: &str, metrics: &mut Vec<Metric>) {
+    match node {
+        Value::Array(items) => {
+            for item in items {
+                collect_billing_metrics(item, parent_key, metrics);
+            }
+        }
+        Value::Object(map) => {
+            for (key, value) in map {
+                let lower = key.to_lowercase();
+                if let Some(n) = value.as_f64() {
+                    if lower.contains("percent") {
+                        let label = if lower.contains("week") || parent_key.to_lowercase().contains("week") {
+                            "Weekly"
+                        } else {
+                            "Usage"
+                        };
+                        metrics.push(Metric::progress(label, n, None));
+                    } else if lower.contains("credit") || lower.contains("balance") {
+                        metrics.push(Metric::text(key, format!("{n:.2}")));
+                    }
+                } else {
+                    collect_billing_metrics(value, key, metrics);
+                }
+            }
+        }
+        _ => {}
+    }
+}
