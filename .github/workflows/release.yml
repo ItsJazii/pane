@@ -1,0 +1,88 @@
+# Release pipeline: pushing a v* tag builds the installer on GitHub's own
+# runners from that exact source — public logs prove the binary matches
+# the code. Manual runs (workflow_dispatch) build and upload artifacts
+# without creating a release, for dry-run verification.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend deps
+        run: npm ci
+
+      - name: Build (signed)
+        run: npm run tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+
+      - name: Generate latest.json (with sha256 — install.ps1 requires it)
+        shell: pwsh
+        run: |
+          $ver = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          # The release is created under the git tag, so the download URL
+          # must use the tag too. A tag that disagrees with the config
+          # version is always a mistake — fail loudly instead of shipping
+          # an updater manifest that would 404.
+          $tag = if ($env:GITHUB_REF -like 'refs/tags/*') { $env:GITHUB_REF_NAME } else { "v$ver" }
+          if ($tag -ne "v$ver") {
+            Write-Error "Tag '$tag' does not match tauri.conf.json version 'v$ver' — bump the version before tagging."
+            exit 1
+          }
+          $exe = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          $sig = (Get-Content "$($exe.FullName).sig" -Raw).Trim()
+          $hash = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
+          $manifest = @{
+            version  = $ver
+            notes    = "https://github.com/ItsJazii/pane/blob/main/CHANGELOG.md"
+            pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            sha256   = $hash
+            platforms = @{ "windows-x86_64" = @{
+              signature = $sig
+              url = "https://github.com/ItsJazii/pane/releases/download/$tag/$($exe.Name)"
+            } }
+          } | ConvertTo-Json -Depth 4
+          [System.IO.File]::WriteAllText("latest.json", $manifest, (New-Object System.Text.UTF8Encoding($false)))
+          Get-Content latest.json
+
+      - name: Upload artifacts (dry run only)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pane-installer
+          path: |
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/nsis/*-setup.exe.sig
+            latest.json
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          gh release create $env:GITHUB_REF_NAME `
+            --title "Pane $($env:GITHUB_REF_NAME.TrimStart('v'))" `
+            --generate-notes `
+            $exe.FullName "$($exe.FullName).sig" latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
