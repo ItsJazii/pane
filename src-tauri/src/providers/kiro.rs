@@ -11,11 +11,16 @@ pub async fn snapshot() -> Snapshot {
 }
 
 async fn run_cli(args: &[&str], secs: u64) -> Option<String> {
+    // CREATE_NO_WINDOW: this runs on every refresh once kiro-cli is
+    // installed — without it, a console flashes over whatever the user is
+    // doing every five minutes.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let out = tokio::time::timeout(
         std::time::Duration::from_secs(secs),
         tokio::process::Command::new("cmd")
             .args(["/C", "kiro-cli"])
             .args(args)
+            .creation_flags(CREATE_NO_WINDOW)
             .output(),
     )
     .await
