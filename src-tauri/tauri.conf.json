@@ -30,9 +30,16 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": ["https://github.com/ItsJazii/pane/releases/latest/download/latest.json"],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDcxNDFDOUE4REE0QjI1RUMKUldUc0pVdmFxTWxCY1RwQmdpNXlKNFNrbmpDbDB5REFDSVlQSFNLSkJSbEpaUXZKQ2tSblZrSVcK"
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

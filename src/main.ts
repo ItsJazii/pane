@@ -2142,6 +2142,23 @@ window.addEventListener("DOMContentLoaded", () => {
     card?.scrollIntoView({ behavior: "smooth", block: "start" });
   });
 
+  // Update banner: shows once the background checker finds a newer release.
+  void listen<string>("update-available", (e) => {
+    if (document.querySelector("#update-banner")) return;
+    const banner = document.createElement("button");
+    banner.id = "update-banner";
+    banner.textContent = `⬆ Update to v${e.payload} — restart`;
+    banner.addEventListener("click", () => {
+      banner.textContent = "Downloading update…";
+      banner.disabled = true;
+      invoke("install_update").catch((err) => {
+        banner.textContent = `Update failed: ${err}`;
+        banner.disabled = false;
+      });
+    });
+    document.body.appendChild(banner);
+  });
+
   void listen("popover-shown", () => {
     // Always reopen on the main page, at the top — leftover Customize/
     // Settings panels or a stale scroll position from the previous visit
