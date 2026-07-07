@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Changed (security)
+- **Breaking for browser-page consumers:** the local HTTP API no longer
+  sends CORS headers, so web pages can no longer read
+  `127.0.0.1:6736` through a browser — previously any website you visited
+  could silently read your usage data. PowerShell, curl, Rainmeter, and
+  native apps are unaffected (CORS only constrains browsers). If a
+  legitimate browser integration needs access, open an issue — the plan
+  is an opt-in origin allowlist, not a permissive default.
+- Release binaries are now built and published by GitHub Actions from the
+  pushed tag (public build logs), instead of on the maintainer's machine.
+
+### Added
+- SECURITY.md (private vulnerability reporting), docs/privacy.md (every
+  network call), docs/providers.md (per-provider: files read + endpoints
+  called), docs/local-http-api.md, CONTRIBUTING.md.
+
 ## 0.4.1 — 2026-07-08
 
 First-run and Customize fixes from fresh-install testing.

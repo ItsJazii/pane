@@ -40,6 +40,15 @@ jobs:
         shell: pwsh
         run: |
           $ver = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          # The release is created under the git tag, so the download URL
+          # must use the tag too. A tag that disagrees with the config
+          # version is always a mistake — fail loudly instead of shipping
+          # an updater manifest that would 404.
+          $tag = if ($env:GITHUB_REF -like 'refs/tags/*') { $env:GITHUB_REF_NAME } else { "v$ver" }
+          if ($tag -ne "v$ver") {
+            Write-Error "Tag '$tag' does not match tauri.conf.json version 'v$ver' — bump the version before tagging."
+            exit 1
+          }
           $exe = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           $sig = (Get-Content "$($exe.FullName).sig" -Raw).Trim()
           $hash = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
@@ -50,7 +59,7 @@ jobs:
             sha256   = $hash
             platforms = @{ "windows-x86_64" = @{
               signature = $sig
-              url = "https://github.com/ItsJazii/pane/releases/download/v$ver/$($exe.Name)"
+              url = "https://github.com/ItsJazii/pane/releases/download/$tag/$($exe.Name)"
             } }
           } | ConvertTo-Json -Depth 4
           [System.IO.File]::WriteAllText("latest.json", $manifest, (New-Object System.Text.UTF8Encoding($false)))
