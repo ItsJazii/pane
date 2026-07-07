@@ -46,10 +46,12 @@ All of this is auditable in the source — links go to the exact code.
 
 - The installer is **not yet Authenticode-signed**, so SmartScreen warns
   on first run. Updates are minisign-verified regardless. A code-signing
-  certificate is planned.
-- Release binaries are currently built by the maintainer, not by public
-  CI. Moving release builds to GitHub Actions (public build logs from the
-  tagged source) is on the roadmap.
+  certificate is planned. (The `irm pane.jazii.dev/install.ps1 | iex`
+  install path and winget don't trigger SmartScreen.)
+- Release binaries are built by GitHub Actions from the pushed tag —
+  see [.github/workflows/release.yml](.github/workflows/release.yml);
+  every release links public build logs proving the binary comes from
+  the tagged source.
 - Pane refreshes OAuth tokens and writes them back to the CLIs' own
   credential files (keeping your CLIs signed in). This means Pane has the
   same access to those accounts as the CLIs themselves — that's inherent
