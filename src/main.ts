@@ -702,7 +702,8 @@ function renderCard(s: Snapshot): string {
 
 function orderedSnapshots(): Snapshot[] {
   const order = config.layout?.providerOrder ?? [];
-  return [...lastSnapshots].sort((a, b) => {
+  // Disabled providers disappear immediately — not on the next fetch.
+  return lastSnapshots.filter((s) => !config.disabled.includes(s.id)).sort((a, b) => {
     const ia = order.indexOf(a.id);
     const ib = order.indexOf(b.id);
     if (ia !== -1 && ib !== -1) return ia - ib;
@@ -717,6 +718,7 @@ type DonutEntry = { s: ProviderSpend; w: SpendWindow };
 
 function donutEntries(tab: SpendTab): DonutEntry[] {
   return lastSpend
+    .filter((s) => !config.disabled.includes(s.id)) // disabled = gone everywhere
     .map((s) => ({ s, w: s[tab] }))
     .filter((e) => e.w.cost > 0.005 || e.w.tokens > 0)
     .sort((a, b) => b.w.cost - a.w.cost);
@@ -797,13 +799,17 @@ function renderTotalSpend(): string {
   if (!config.showTotalSpend) return "";
   const entries = donutEntries(spendTab);
   if (lastSpend.length === 0) {
-    if (spendLoaded) return "";
+    // Quiet state instead of a missing card — on a fresh PC the donut only
+    // appears after a CLI (Claude Code, Codex, Grok…) has logged some usage.
+    const note = spendLoaded
+      ? "No spend data yet — appears once Claude Code, Codex, or another CLI logs some usage on this PC."
+      : "Scanning session logs…";
     return `
       <article class="provider total-spend">
         <div class="provider-head">
           <span class="provider-name">Total Spend</span>
         </div>
-        <p class="placeholder" style="margin:8px 0 4px">Scanning session logs…</p>
+        <p class="placeholder" style="margin:8px 0 4px">${note}</p>
       </article>`;
   }
 
@@ -1529,8 +1535,14 @@ async function refresh(force = false): Promise<void> {
     // First launch ever (no layout yet): start with only the providers that
     // actually have credentials on this PC, like the Mac app's first-run
     // detection. The rest stay available in Customize.
-    if (config.layout === null && snapshots.some((s) => s.status === "ok")) {
-      const noCreds = snapshots.filter((s) => s.status === "no_credentials").map((s) => s.id);
+    if (config.layout === null && snapshots.length > 0) {
+      // Claude and Codex always start enabled — their "connect me" cards are
+      // the new-user onboarding. Everything else without credentials waits
+      // in Customize (a fresh PC with zero AI tools sees just those two).
+      const starters = new Set(["claude", "codex"]);
+      const noCreds = snapshots
+        .filter((s) => s.status === "no_credentials" && !starters.has(s.id))
+        .map((s) => s.id);
       if (noCreds.length) {
         snapshots = snapshots.filter((s) => !noCreds.includes(s.id));
         await patchConfig({ disabled: noCreds }).catch(() => {});
@@ -1643,6 +1655,7 @@ async function updateTrayStrip(): Promise<void> {
   const order = config.layout?.providerOrder ?? [];
   for (const id of order) {
     if (entries.length >= 4) break;
+    if (config.disabled.includes(id)) continue; // no tray icons for disabled providers
     const L = providerLayout(id);
     if (!L.starred.length) continue;
     const snap = lastSnapshots.find((s) => s.id === id && s.status === "ok");
@@ -1762,13 +1775,46 @@ function handleCustomizeClick(target: HTMLElement): boolean {
   return false;
 }
 
+// Rapid toggles used to race: each one snapshotted config.disabled before
+// the previous save landed, so only the last toggle survived. Toggles are
+// kept as a ledger of pending deltas merged onto whatever config.disabled
+// currently is — so changes made by refresh() in the meantime (auto-disable
+// of new providers, pruning) survive instead of being overwritten.
+let disabledSaveQueue: Promise<unknown> = Promise.resolve();
+const pendingToggles: Array<{ id: string; enable: boolean }> = [];
+
+function withPendingToggles(base: string[]): string[] {
+  const s = new Set(base);
+  for (const t of pendingToggles) {
+    if (t.enable) s.delete(t.id);
+    else s.add(t.id);
+  }
+  return [...s];
+}
+
 function handleCustomizeChange(target: HTMLInputElement): void {
   if (target.dataset.enable !== undefined) {
     const id = target.dataset.enable;
-    const disabled = new Set(config.disabled);
-    if (target.checked) disabled.delete(id);
-    else disabled.add(id);
-    void patchConfig({ disabled: [...disabled] }).then(() => refresh(true));
+    const enable = target.checked;
+    pendingToggles.push({ id, enable });
+    config.disabled = withPendingToggles(config.disabled); // optimistic
+    renderAll(); // disabled cards vanish from the dashboard immediately
+    disabledSaveQueue = disabledSaveQueue.then(async () => {
+      // Fresh base at save time: includes server truth plus anything
+      // refresh() changed while earlier saves were in flight.
+      const want = withPendingToggles(config.disabled);
+      try {
+        await patchConfig({ disabled: want });
+      } catch {
+        // keep going — the delta stays applied locally
+      }
+      pendingToggles.shift(); // this task's toggle is now persisted
+      // patchConfig replaced config with the server echo; merge any newer
+      // still-pending toggles back on top of it.
+      config.disabled = withPendingToggles(config.disabled);
+      // Only an enable needs fresh data; a disable is purely local.
+      if (enable) await refresh(true).catch(() => {});
+    });
     return;
   }
   if (target.dataset.visible !== undefined) {
