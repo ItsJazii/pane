@@ -148,15 +148,26 @@ fn apply_supplement(store: &mut Store, doc: &Value) {
             }
         }
     }
+    // The supplement is fetched from a third-party URL, so cap what it can
+    // feed us: at most 64 alias rules of at most 256 chars each, compiled
+    // with a bounded size. (Rust's regex engine is linear-time by design,
+    // so ReDoS-style backtracking blowups aren't possible; the caps bound
+    // memory and compile cost.)
     if let Some(rules) = doc.get("alias_rules").and_then(Value::as_array) {
-        for rule in rules {
+        for rule in rules.iter().take(64) {
             let (Some(pattern), Some(canonical)) = (
                 rule.get("pattern").and_then(Value::as_str),
                 rule.get("canonical").and_then(Value::as_str),
             ) else {
                 continue;
             };
-            if let Ok(re) = regex::Regex::new(pattern) {
+            if pattern.len() > 256 || canonical.len() > 128 {
+                continue;
+            }
+            if let Ok(re) = regex::RegexBuilder::new(pattern)
+                .size_limit(1 << 20)
+                .build()
+            {
                 store.alias_rules.push((re, canonical.to_string()));
             }
         }

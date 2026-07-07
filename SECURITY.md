@@ -39,6 +39,16 @@ All of this is auditable in the source — links go to the exact code.
   manifest and refuses to run on mismatch ([`install.ps1`](install.ps1)).
 - **Links are restricted.** The app can only open `http(s)://` URLs in
   your browser — nothing that could launch a program.
+- **The webview is locked down.** A strict Content-Security-Policy (no
+  remote scripts, no eval, no frames) plus a minimal Tauri capability set
+  — the UI can reach only Pane's own commands, no plugin APIs
+  ([`src-tauri/tauri.conf.json`](src-tauri/tauri.conf.json),
+  [`src-tauri/capabilities/default.json`](src-tauri/capabilities/default.json)).
+- **Config writes are schema-bound.** The UI can only write known config
+  keys; anything else is dropped and logged.
+- **Credential files are backed up before write.** When Pane writes a
+  refreshed OAuth token back to a CLI's credential file, it first copies
+  the original to `*.pane-bak` — a bad write can never cost you a login.
 - **API keys you paste** are stored in `%APPDATA%\Pane` on your PC,
   readable only by your Windows user, and sent only to their own vendor.
 
@@ -56,6 +66,17 @@ All of this is auditable in the source — links go to the exact code.
   credential files (keeping your CLIs signed in). This means Pane has the
   same access to those accounts as the CLIs themselves — that's inherent
   to what the app does.
+- The install script's SHA-256 check verifies the download against
+  `latest.json` **from the same GitHub release** — it defends against
+  corrupted or swapped downloads, not against a fully compromised release
+  (an attacker who can replace the installer can replace the manifest,
+  and the script itself, too). The cryptographic guarantee is the
+  auto-updater's minisign verification once installed; the first install
+  ultimately trusts GitHub.
+- Model prices (LiteLLM, models.dev, the OpenUsage supplement) are
+  fetched without signatures — tampered pricing data could at worst show
+  wrong *display* dollars. Inputs are size-capped and never touch
+  credentials or spend logs.
 
 ## Supported versions
 

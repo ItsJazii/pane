@@ -69,7 +69,6 @@ fn iso8601(epoch_ms: i64) -> String {
 fn route(method: &tiny_http::Method, url: &str) -> (u16, String) {
     let path = url.split('?').next().unwrap_or(url);
     match method {
-        tiny_http::Method::Options => (204, String::new()),
         tiny_http::Method::Get => {
             if path == "/v1/usage" {
                 let body = latest()

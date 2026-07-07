@@ -1927,17 +1927,15 @@ async function saveApiKey(provider: string): Promise<void> {
 function populatePinnedOptions(): void {
   const select = document.querySelector<HTMLSelectElement>("#pinned")!;
   const current = config.pinned ? `${config.pinned.provider}::${config.pinned.label}` : "";
-  const options = ['<option value="">Auto (first live metric)</option>'];
+  select.replaceChildren(new Option("Auto (first live metric)", ""));
   for (const s of lastSnapshots) {
     if (s.status !== "ok") continue;
     for (const m of s.metrics) {
       if (m.kind !== "progress") continue;
       const value = `${s.id}::${m.label}`;
-      const selected = value === current ? " selected" : "";
-      options.push(`<option value="${value}"${selected}>${escapeHtml(`${s.name} — ${m.label}`)}</option>`);
+      select.add(new Option(`${s.name} — ${m.label}`, value, false, value === current));
     }
   }
-  select.innerHTML = options.join("");
 }
 
 async function initSettings(): Promise<void> {
