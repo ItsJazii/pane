@@ -461,20 +461,10 @@ async fn fetch_usage(app: tauri::AppHandle) -> Vec<providers::Snapshot> {
         Box::pin(guarded("deepseek", "DeepSeek", providers::deepseek::snapshot())),
         Box::pin(guarded("moonshot", "Moonshot", providers::moonshot::snapshot())),
         Box::pin(guarded("elevenlabs", "ElevenLabs", providers::elevenlabs::snapshot())),
-        Box::pin(guarded("deepgram", "Deepgram", providers::deepgram::snapshot())),
-        Box::pin(guarded("openai", "OpenAI", providers::openai::snapshot())),
-        Box::pin(guarded("venice", "Venice", providers::venice::snapshot())),
         Box::pin(guarded("ollama", "Ollama", providers::ollama::snapshot())),
         Box::pin(guarded("codebuff", "Codebuff", providers::codebuff::snapshot())),
         Box::pin(guarded("kilo", "Kilo", providers::kilo::snapshot())),
         Box::pin(guarded("kiro", "Kiro", providers::kiro::snapshot())),
-        Box::pin(guarded("amp", "Amp", providers::amp::snapshot())),
-        Box::pin(guarded("vertexai", "Vertex AI", providers::vertexai::snapshot())),
-        Box::pin(guarded("bedrock", "AWS Bedrock", providers::bedrock::snapshot())),
-        Box::pin(guarded("poe", "Poe", providers::poe::snapshot())),
-        Box::pin(guarded("chutes", "Chutes", providers::chutes::snapshot())),
-        Box::pin(guarded("warp", "Warp", providers::warp::snapshot())),
-        Box::pin(guarded("crof", "Crof", providers::crof::snapshot())),
     ];
     let handles: Vec<_> = futs.into_iter().map(tauri::async_runtime::spawn).collect();
     let mut all = Vec::with_capacity(handles.len());
@@ -598,16 +588,8 @@ fn set_api_key(provider: String, key: String) -> Result<(), String> {
             | "deepseek"
             | "moonshot"
             | "elevenlabs"
-            | "deepgram"
-            | "openai"
-            | "venice"
             | "codebuff"
             | "kilo"
-            | "amp"
-            | "poe"
-            | "chutes"
-            | "warp"
-            | "crof"
     ) {
         return Err(format!("unknown provider: {provider}"));
     }
