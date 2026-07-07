@@ -2143,8 +2143,11 @@ window.addEventListener("DOMContentLoaded", () => {
   });
 
   void listen("popover-shown", () => {
-    // Always reopen at the top — a stale scroll position from the previous
-    // visit feels like the app is stuck mid-page.
+    // Always reopen on the main page, at the top — leftover Customize/
+    // Settings panels or a stale scroll position from the previous visit
+    // feel like the app is stuck mid-page.
+    setDrawer(false);
+    setSettings(false);
     providersEl.scrollTop = 0;
     updateTrailActive();
     if (lastSnapshots.length && !customizeOpen) playReveal();
