@@ -460,6 +460,16 @@ async fn fetch_usage(app: tauri::AppHandle) -> Vec<providers::Snapshot> {
         openai,
         venice,
         ollama,
+        codebuff,
+        kilo,
+        kiro,
+        amp,
+        vertexai,
+        bedrock,
+        poe,
+        chutes,
+        warp,
+        crof,
     ) = tokio::join!(
         guarded("claude", "Claude", providers::claude::snapshot()),
         guarded("codex", "Codex", providers::codex::snapshot()),
@@ -479,10 +489,21 @@ async fn fetch_usage(app: tauri::AppHandle) -> Vec<providers::Snapshot> {
         guarded("openai", "OpenAI", providers::openai::snapshot()),
         guarded("venice", "Venice", providers::venice::snapshot()),
         guarded("ollama", "Ollama", providers::ollama::snapshot()),
+        guarded("codebuff", "Codebuff", providers::codebuff::snapshot()),
+        guarded("kilo", "Kilo", providers::kilo::snapshot()),
+        guarded("kiro", "Kiro", providers::kiro::snapshot()),
+        guarded("amp", "Amp", providers::amp::snapshot()),
+        guarded("vertexai", "Vertex AI", providers::vertexai::snapshot()),
+        guarded("bedrock", "AWS Bedrock", providers::bedrock::snapshot()),
+        guarded("poe", "Poe", providers::poe::snapshot()),
+        guarded("chutes", "Chutes", providers::chutes::snapshot()),
+        guarded("warp", "Warp", providers::warp::snapshot()),
+        guarded("crof", "Crof", providers::crof::snapshot()),
     );
     let mut all = vec![
         claude, codex, cursor, opencode, copilot, grok, devin, minimax, openrouter, zai,
-        antigravity, deepseek, moonshot, elevenlabs, deepgram, openai, venice, ollama,
+        antigravity, deepseek, moonshot, elevenlabs, deepgram, openai, venice, ollama, codebuff,
+        kilo, kiro, amp, vertexai, bedrock, poe, chutes, warp, crof,
     ];
     all.retain(|s| !disabled.iter().any(|d| *d == s.id));
 
@@ -602,6 +623,13 @@ fn set_api_key(provider: String, key: String) -> Result<(), String> {
             | "deepgram"
             | "openai"
             | "venice"
+            | "codebuff"
+            | "kilo"
+            | "amp"
+            | "poe"
+            | "chutes"
+            | "warp"
+            | "crof"
     ) {
         return Err(format!("unknown provider: {provider}"));
     }
