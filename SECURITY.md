@@ -52,6 +52,12 @@ All of this is auditable in the source — links go to the exact code.
   see [.github/workflows/release.yml](.github/workflows/release.yml);
   every release links public build logs proving the binary comes from
   the tagged source.
+- The updater signing key currently has **no passphrase**. In CI this is
+  not the weakness it sounds like — a passphrase would sit in the same
+  GitHub secret store as the key, so anything that leaks one leaks both.
+  It does matter for the offline master copy, and rotating to a
+  passphrase-protected key is planned while the install base is still
+  small enough to make rotation cheap.
 - Pane refreshes OAuth tokens and writes them back to the CLIs' own
   credential files (keeping your CLIs signed in). This means Pane has the
   same access to those accounts as the CLIs themselves — that's inherent

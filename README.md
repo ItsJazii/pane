@@ -186,8 +186,9 @@ treats them — verify it:
   files are read on your PC and exactly which endpoints they're sent to.
 - **[SECURITY.md](SECURITY.md)** — how to report vulnerabilities
   privately, the security properties you can audit in source, and an
-  honest list of current limitations (unsigned installer, maintainer-built
-  releases).
+  honest list of current limitations (unsigned installer — the release
+  binaries themselves are built by GitHub Actions from the tagged source,
+  with public build logs).
 
 The short version: tokens are sent only to their own vendor's API over
 HTTPS; pasted keys live in `%APPDATA%\Pane`, readable only by your
