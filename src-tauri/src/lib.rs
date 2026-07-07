@@ -683,6 +683,44 @@ async fn codex_redeem_credit(credit_id: String) -> Result<String, String> {
     providers::codex::redeem_credit(&credit_id).await
 }
 
+/// Downloads and installs a pending update, then restarts the app. Only
+/// called from the frontend banner after check_for_update announced one.
+#[tauri::command]
+async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    if let Some(update) = updater.check().await.map_err(|e| e.to_string())? {
+        update
+            .download_and_install(|_, _| {}, || {})
+            .await
+            .map_err(|e| e.to_string())?;
+        app.restart();
+    }
+    Ok(())
+}
+
+/// Startup + every 4 h: quiet update check; a hit emits "update-available"
+/// with the new version so the frontend can show its banner. 404 (no
+/// releases yet) and offline are non-events.
+fn spawn_update_checker(app: &tauri::AppHandle) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        use tauri_plugin_updater::UpdaterExt;
+        loop {
+            if let Ok(updater) = handle.updater() {
+                match updater.check().await {
+                    Ok(Some(update)) => {
+                        let _ = handle.emit("update-available", update.version.clone());
+                    }
+                    Ok(None) => {}
+                    Err(e) => eprintln!("[pane] update check: {e}"),
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(4 * 3600)).await;
+        }
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Tray + popover window plumbing
 // ---------------------------------------------------------------------------
@@ -767,6 +805,8 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             fetch_usage,
             fetch_spend,
@@ -779,9 +819,11 @@ pub fn run() {
             open_link,
             copy_share_image,
             set_shortcut,
-            codex_redeem_credit
+            codex_redeem_credit,
+            install_update
         ])
         .setup(|app| {
+            spawn_update_checker(app.handle());
             let quit = MenuItem::with_id(app, "quit", "Quit Pane", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&quit])?;
 
