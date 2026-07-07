@@ -718,6 +718,7 @@ type DonutEntry = { s: ProviderSpend; w: SpendWindow };
 
 function donutEntries(tab: SpendTab): DonutEntry[] {
   return lastSpend
+    .filter((s) => !config.disabled.includes(s.id)) // disabled = gone everywhere
     .map((s) => ({ s, w: s[tab] }))
     .filter((e) => e.w.cost > 0.005 || e.w.tokens > 0)
     .sort((a, b) => b.w.cost - a.w.cost);
@@ -1654,6 +1655,7 @@ async function updateTrayStrip(): Promise<void> {
   const order = config.layout?.providerOrder ?? [];
   for (const id of order) {
     if (entries.length >= 4) break;
+    if (config.disabled.includes(id)) continue; // no tray icons for disabled providers
     const L = providerLayout(id);
     if (!L.starred.length) continue;
     const snap = lastSnapshots.find((s) => s.id === id && s.status === "ok");
@@ -1774,33 +1776,45 @@ function handleCustomizeClick(target: HTMLElement): boolean {
 }
 
 // Rapid toggles used to race: each one snapshotted config.disabled before
-// the previous save landed, so only the last toggle survived. Now the local
-// state updates synchronously and saves run through a serial queue.
+// the previous save landed, so only the last toggle survived. Toggles are
+// kept as a ledger of pending deltas merged onto whatever config.disabled
+// currently is — so changes made by refresh() in the meantime (auto-disable
+// of new providers, pruning) survive instead of being overwritten.
 let disabledSaveQueue: Promise<unknown> = Promise.resolve();
-let latestDisabled: string[] = [];
+const pendingToggles: Array<{ id: string; enable: boolean }> = [];
+
+function withPendingToggles(base: string[]): string[] {
+  const s = new Set(base);
+  for (const t of pendingToggles) {
+    if (t.enable) s.delete(t.id);
+    else s.add(t.id);
+  }
+  return [...s];
+}
 
 function handleCustomizeChange(target: HTMLInputElement): void {
   if (target.dataset.enable !== undefined) {
     const id = target.dataset.enable;
-    const disabled = new Set(config.disabled);
-    if (target.checked) disabled.delete(id);
-    else disabled.add(id);
-    config.disabled = [...disabled]; // optimistic — next toggle builds on it
-    latestDisabled = config.disabled;
+    const enable = target.checked;
+    pendingToggles.push({ id, enable });
+    config.disabled = withPendingToggles(config.disabled); // optimistic
     renderAll(); // disabled cards vanish from the dashboard immediately
-    const want = config.disabled;
-    const enabling = target.checked;
-    disabledSaveQueue = disabledSaveQueue.then(() =>
-      patchConfig({ disabled: want })
-        .then(() => {
-          // patchConfig replaced `config` with the server echo of THIS save;
-          // re-assert any newer optimistic toggles made while it was in flight.
-          config.disabled = latestDisabled;
-          // Only an enable needs fresh data; a disable is purely local.
-          if (enabling) return refresh(true);
-        })
-        .catch(() => {})
-    );
+    disabledSaveQueue = disabledSaveQueue.then(async () => {
+      // Fresh base at save time: includes server truth plus anything
+      // refresh() changed while earlier saves were in flight.
+      const want = withPendingToggles(config.disabled);
+      try {
+        await patchConfig({ disabled: want });
+      } catch {
+        // keep going — the delta stays applied locally
+      }
+      pendingToggles.shift(); // this task's toggle is now persisted
+      // patchConfig replaced config with the server echo; merge any newer
+      // still-pending toggles back on top of it.
+      config.disabled = withPendingToggles(config.disabled);
+      // Only an enable needs fresh data; a disable is purely local.
+      if (enable) await refresh(true).catch(() => {});
+    });
     return;
   }
   if (target.dataset.visible !== undefined) {
