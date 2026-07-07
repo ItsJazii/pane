@@ -10,7 +10,7 @@ reset? What did today actually cost me?*
 
 [Install](#install) · [How it works](#how-it-works) · [Providers](#providers-18-and-counting) · [Features](#features) · [Privacy](#privacy) · [Credits](#credits)
 
-<!-- TODO: screenshot — dark popover with Claude/Codex/Copilot cards -->
+<img src="docs/screenshot.png" width="420" alt="Pane popover — Total Spend donut, Claude and Codex usage cards with pace bars" />
 
 </div>
 
