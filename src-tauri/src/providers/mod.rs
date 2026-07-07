@@ -1,14 +1,9 @@
-pub mod amp;
 pub mod antigravity;
-pub mod bedrock;
-pub mod chutes;
 pub mod claude;
 pub mod codebuff;
 pub mod codex;
 pub mod copilot;
-pub mod crof;
 pub mod cursor;
-pub mod deepgram;
 pub mod deepseek;
 pub mod devin;
 pub mod elevenlabs;
@@ -18,13 +13,8 @@ pub mod kiro;
 pub mod minimax;
 pub mod moonshot;
 pub mod ollama;
-pub mod openai;
 pub mod opencode;
 pub mod openrouter;
-pub mod poe;
-pub mod venice;
-pub mod vertexai;
-pub mod warp;
 pub mod zai;
 
 use serde::{Deserialize, Serialize};
