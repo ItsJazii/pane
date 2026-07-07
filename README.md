@@ -124,19 +124,18 @@ Pane server, no account, and no telemetry — see [Privacy](#privacy).
 | DeepSeek | API key (Settings) → balance |
 | Moonshot (Kimi) | API key (Settings) → balance (global + CN endpoints) |
 | ElevenLabs | API key (Settings) → character quota with reset pacing |
-| Deepgram | API key (Settings) → project balances |
-| OpenAI | Admin API key (Settings) → org costs (Today / 30 days) |
-| Venice | API key (Settings) → USD/DIEM/VCU balances |
 | Ollama | Local server on :11434 — installed + loaded models, no key |
+| Codebuff | `codebuff login` credentials file or API key → credits + weekly limit |
+| Kilo | Kilo CLI login file or API key → credit blocks + Kilo Pass |
+| Kiro *(experimental)* | Reads `kiro-cli /usage` output → credits + bonus credits |
 
 *OpenCode has no public usage API yet
 ([anomalyco/opencode#10448](https://github.com/anomalyco/opencode/issues/10448));
 usage is computed locally from this machine's OpenCode history, the same
 data `opencode stats` uses.
 
-More on the way: CLI-token providers (Codebuff, Amp, Kilo, Kiro, Vertex AI,
-AWS Bedrock…), IDE-database providers (Windsurf, JetBrains AI, Zed…), and
-self-hosted proxies (LiteLLM & friends).
+More on the way: IDE-database providers (Windsurf, JetBrains AI…) and
+whatever the community asks for loudest.
 
 ## Features
 
