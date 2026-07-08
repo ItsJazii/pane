@@ -1075,9 +1075,16 @@ function applyLens(el: HTMLElement | null, filterId: string, imgId: string): voi
 /// run — the fix for laptops where the popover animates below 60 fps.
 function applyGlass(): void {
   document.body.classList.toggle("no-glass", config.glassEffects === false);
+  // Lens init is skipped entirely while glass is off — build the maps the
+  // first time the user turns it on.
+  if (config.glassEffects !== false && !lensReady) initLiquidLens();
 }
 
+let lensReady = false;
+
 function initLiquidLens(): void {
+  if (config.glassEffects === false || lensReady) return;
+  lensReady = true;
   const surfaces: [string, string, HTMLElement | null][] = [
     ["lens-side", "lens-map-side", document.querySelector(".sidebar")],
     ["lens-footer", "lens-map-footer", document.querySelector(".main-col footer")],
@@ -2294,7 +2301,9 @@ window.addEventListener("DOMContentLoaded", () => {
     void refresh(true);
   });
 
+  // Countdown texts ("Resets in 3h 41m") tick every 30 s — but only for
+  // eyes that can see them; hidden ticks fold into the deferred render.
   setInterval(() => {
-    if (lastSnapshots.length && !customizeOpen) renderAll();
+    if (lastSnapshots.length && !customizeOpen) renderIfVisible();
   }, 30_000);
 });
