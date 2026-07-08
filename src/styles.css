@@ -1647,3 +1647,23 @@ body.party .trail-tick.active {
   opacity: 0.7;
   cursor: wait;
 }
+
+/* ---------------------------------------------------------------------------
+   Reduced effects ("Liquid glass effects" off): flat, opaque surfaces and no
+   displacement/blur filters. !important beats the inline backdrop-filter
+   applyLens() sets, so toggling needs no JS style cleanup. The win is real
+   on iGPU laptops — the SDF lens runs 9 displacement passes per paint.
+--------------------------------------------------------------------------- */
+body.no-glass .sidebar,
+body.no-glass .main-col footer,
+body.no-glass .glass-bar,
+body.no-glass .cust-dock {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+body.no-glass .sidebar,
+body.no-glass .main-col footer,
+body.no-glass .glass-bar,
+body.no-glass .cust-dock {
+  background: var(--background) !important;
+}

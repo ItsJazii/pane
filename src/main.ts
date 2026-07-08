@@ -127,6 +127,7 @@ interface Config {
   layout: Layout | null;
   appearance: "system" | "light" | "dark";
   density: "regular" | "compact";
+  glassEffects: boolean;
   shortcut: string;
   proxy: { enabled: boolean; url: string };
   showTotalSpend: boolean;
@@ -246,6 +247,7 @@ let config: Config = {
   layout: null,
   appearance: "system",
   density: "regular",
+  glassEffects: true,
   shortcut: "",
   proxy: { enabled: false, url: "" },
   showTotalSpend: true,
@@ -1067,7 +1069,22 @@ function applyLens(el: HTMLElement | null, filterId: string, imgId: string): voi
   (el.style as unknown as Record<string, string>).webkitBackdropFilter = f;
 }
 
+/// "Liquid glass effects" off swaps the SDF refraction + backdrop blurs
+/// for flat surfaces (body.no-glass CSS overrides win over the inline
+/// styles applyLens sets). The expensive displacement filters then never
+/// run — the fix for laptops where the popover animates below 60 fps.
+function applyGlass(): void {
+  document.body.classList.toggle("no-glass", config.glassEffects === false);
+  // Lens init is skipped entirely while glass is off — build the maps the
+  // first time the user turns it on.
+  if (config.glassEffects !== false && !lensReady) initLiquidLens();
+}
+
+let lensReady = false;
+
 function initLiquidLens(): void {
+  if (config.glassEffects === false || lensReady) return;
+  lensReady = true;
   const surfaces: [string, string, HTMLElement | null][] = [
     ["lens-side", "lens-map-side", document.querySelector(".sidebar")],
     ["lens-footer", "lens-map-footer", document.querySelector(".main-col footer")],
@@ -1524,6 +1541,21 @@ function showModelTip(row: HTMLElement): void {
 // Refresh + tray strip
 // ---------------------------------------------------------------------------
 
+/// Background refreshes must not pay DOM costs nobody can see: while the
+/// popover is hidden (99% of the time), rendering is deferred to the next
+/// open instead of rebuilding a filter-heavy DOM every refresh interval.
+let pendingRender = false;
+
+function renderIfVisible(): void {
+  if (document.hidden) {
+    pendingRender = true;
+    return;
+  }
+  pendingRender = false;
+  renderAll();
+  populatePinnedOptions();
+}
+
 async function refresh(force = false): Promise<void> {
   if (refreshing) return;
   if (!force && Date.now() - lastFetch < STALE_MS) return;
@@ -1593,9 +1625,8 @@ async function refresh(force = false): Promise<void> {
     if (!lastLayoutSnapshot && config.layout) {
       lastLayoutSnapshot = JSON.stringify(config.layout);
     }
-    renderAll();
-    if (firstData && !customizeOpen) playReveal();
-    populatePinnedOptions();
+    renderIfVisible();
+    if (firstData && !customizeOpen && !document.hidden) playReveal();
     void updateTrayStrip();
     const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     status.textContent = `Updated ${time}`;
@@ -1605,7 +1636,7 @@ async function refresh(force = false): Promise<void> {
   const spend = await spendPromise;
   spendLoaded = true;
   if (spend) lastSpend = spend;
-  if (!customizeOpen && lastSnapshots.length) renderAll();
+  if (!customizeOpen && lastSnapshots.length) renderIfVisible();
   refreshing = false;
 }
 
@@ -2016,6 +2047,13 @@ async function initSettings(): Promise<void> {
     void patchConfig({ density: density.checked ? "compact" : "regular" }).then(applyAppearance);
   });
 
+  const glass = document.querySelector<HTMLInputElement>("#glass")!;
+  glass.checked = config.glassEffects !== false;
+  glass.addEventListener("change", () => {
+    void patchConfig({ glassEffects: glass.checked }).then(applyGlass);
+  });
+  applyGlass();
+
   const shortcut = document.querySelector<HTMLInputElement>("#shortcut")!;
   shortcut.value = config.shortcut;
   shortcut.addEventListener("change", async () => {
@@ -2069,7 +2107,9 @@ window.addEventListener("DOMContentLoaded", () => {
   document.querySelector("#theme-btn")!.addEventListener("click", toggleTheme);
   setupTrailFisheye();
   setupTooltips();
-  window.setTimeout(initLiquidLens, 150);
+  // No lens init here: applyGlass() (via initSettings, after the saved
+  // config arrives) owns it — a fixed timer raced the config load and
+  // built the maps even for users who turned glass off.
   window.addEventListener("keydown", (e) => {
     konamiListen(e);
     if (e.ctrlKey && e.key.toLowerCase() === "z" && customizeOpen) {
@@ -2247,6 +2287,12 @@ window.addEventListener("DOMContentLoaded", () => {
     // feel like the app is stuck mid-page.
     setDrawer(false);
     setSettings(false);
+    // Replay any renders skipped while hidden, before the reveal plays.
+    if (pendingRender) {
+      pendingRender = false;
+      renderAll();
+      populatePinnedOptions();
+    }
     providersEl.scrollTop = 0;
     updateTrailActive();
     if (lastSnapshots.length && !customizeOpen) playReveal();
@@ -2257,7 +2303,9 @@ window.addEventListener("DOMContentLoaded", () => {
     void refresh(true);
   });
 
+  // Countdown texts ("Resets in 3h 41m") tick every 30 s — but only for
+  // eyes that can see them; hidden ticks fold into the deferred render.
   setInterval(() => {
-    if (lastSnapshots.length && !customizeOpen) renderAll();
+    if (lastSnapshots.length && !customizeOpen) renderIfVisible();
   }, 30_000);
 });
