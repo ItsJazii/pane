@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Cursor Pro/Pro+/Ultra/Teams accounts now show real usage** — percent
+  of the plan's included usage, Auto/API usage, on-demand spend, and
+  credits, with the actual billing-cycle reset date, via the same API
+  Cursor's own dashboard uses. Previously modern accounts showed only a
+  meaningless "Requests this cycle: 0" from the legacy request-counter
+  era (old request-based plans still fall back to it). Session tokens
+  are auto-refreshed in memory when stale, and reading Cursor's login
+  no longer fails when Cursor briefly holds a lock on its database.
+
 ## 0.4.4 — 2026-07-08
 
 ### Performance
