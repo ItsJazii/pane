@@ -895,7 +895,10 @@ async function checkForUpdate(): Promise<void> {
   checkingUpdate = true;
   renderBuildInfo();
   try {
-    updateVersion = await invoke<string | null>("check_update");
+    // Only ever upgrade knowledge: a null result must not erase a version
+    // the background checker announced while this check was in flight.
+    const v = await invoke<string | null>("check_update");
+    if (v) updateVersion = v;
   } catch {
     // Offline or GitHub unreachable — the stamp just returns; the
     // 4-hourly background checker will try again anyway.
