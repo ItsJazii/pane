@@ -367,11 +367,12 @@ async fn fetch() -> Result<Snapshot, String> {
         .unwrap_or(0.0);
 
     if is_team {
-        // Team-shaped accounts sometimes omit the plan limit; the legacy
-        // request endpoint is what still describes them (same fallback
-        // upstream uses for this shape).
-        let Some(limit_cents) = limit else {
-            return legacy_fetch(&token).await;
+        // Team-shaped accounts sometimes omit the plan limit (or report
+        // zero, which would divide to NaN); the legacy request endpoint
+        // is what still describes them (same fallback upstream uses).
+        let limit_cents = match limit {
+            Some(l) if l > 0.0 => l,
+            _ => return legacy_fetch(&token).await,
         };
         metrics.push(
             Metric::progress(
