@@ -858,6 +858,58 @@ function renderTotalSpend(): string {
 }
 
 // ---------------------------------------------------------------------------
+// Footer update flow — every popover open re-checks; the version stamp
+// becomes "Checking for updates…" and then an Update button on a hit.
+// ---------------------------------------------------------------------------
+
+let buildText = "";
+let updateVersion: string | null = null;
+let checkingUpdate = false;
+
+function renderBuildInfo(): void {
+  const el = document.querySelector<HTMLElement>("#build-info");
+  if (!el) return;
+  if (updateVersion) {
+    if (document.querySelector("#update-btn")) return;
+    const btn = document.createElement("button");
+    btn.id = "update-btn";
+    btn.textContent = `⬆ Update to v${updateVersion}`;
+    btn.addEventListener("click", () => {
+      btn.textContent = "Installing…";
+      btn.disabled = true;
+      // On success the app restarts, so only the failure path matters:
+      // re-enable the button and surface the reason.
+      invoke("install_update").catch((err) => {
+        btn.textContent = `⬆ Update to v${updateVersion} — retry`;
+        btn.disabled = false;
+        const status = document.querySelector("#status");
+        if (status) status.textContent = `Update failed: ${err}`;
+      });
+    });
+    el.replaceChildren(btn);
+  } else {
+    el.textContent = checkingUpdate ? "Checking for updates…" : buildText;
+  }
+}
+
+async function checkForUpdate(): Promise<void> {
+  if (checkingUpdate || updateVersion) return;
+  checkingUpdate = true;
+  renderBuildInfo();
+  try {
+    // Only ever upgrade knowledge: a null result must not erase a version
+    // the background checker announced while this check was in flight.
+    const v = await invoke<string | null>("check_update");
+    if (v) updateVersion = v;
+  } catch {
+    // Offline or GitHub unreachable — the stamp just returns; the
+    // 4-hourly background checker will try again anyway.
+  }
+  checkingUpdate = false;
+  renderBuildInfo();
+}
+
+// ---------------------------------------------------------------------------
 // Share cards — the live card element rasterized to PNG on the clipboard
 // ---------------------------------------------------------------------------
 
@@ -2016,8 +2068,9 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
   void getVersion().then((v) => {
-    const el = document.querySelector("#build-info");
-    if (el) el.textContent = `v${v} · build ${__BUILD_STAMP__}`;
+    buildText = `v${v} · build ${__BUILD_STAMP__}`;
+    renderBuildInfo();
+    void checkForUpdate();
   });
   document.querySelector("#refresh")!.addEventListener("click", () => void refresh(true));
 
@@ -2161,24 +2214,14 @@ window.addEventListener("DOMContentLoaded", () => {
     card?.scrollIntoView({ behavior: "smooth", block: "start" });
   });
 
-  // Update banner: shows once the background checker finds a newer release.
+  // The 4-hourly background checker feeds the same footer button.
   void listen<string>("update-available", (e) => {
-    if (document.querySelector("#update-banner")) return;
-    const banner = document.createElement("button");
-    banner.id = "update-banner";
-    banner.textContent = `⬆ Update to v${e.payload} — restart`;
-    banner.addEventListener("click", () => {
-      banner.textContent = "Downloading update…";
-      banner.disabled = true;
-      invoke("install_update").catch((err) => {
-        banner.textContent = `Update failed: ${err}`;
-        banner.disabled = false;
-      });
-    });
-    document.body.appendChild(banner);
+    updateVersion = e.payload;
+    renderBuildInfo();
   });
 
   void listen("popover-shown", () => {
+    void checkForUpdate();
     // Always reopen on the main page, at the top — leftover Customize/
     // Settings panels or a stale scroll position from the previous visit
     // feel like the app is stuck mid-page.

@@ -1625,30 +1625,24 @@ body.party .trail-tick.active {
   padding-bottom: 48px;
 }
 
-/* Update banner: glass pill above the footer, appears only when the
-   background checker finds a newer release. */
-#update-banner {
-  position: fixed;
-  left: 50%;
-  bottom: 44px;
-  transform: translateX(-50%);
-  z-index: 80;
-  padding: 7px 16px;
+/* Update button: replaces the version stamp in the footer when a newer
+   release exists — blue so it reads as the one actionable thing there. */
+#update-btn {
+  padding: 2px 10px;
   border-radius: 999px;
-  border: 1px solid rgba(59, 130, 246, 0.4);
-  background: rgba(24, 24, 27, 0.75);
-  backdrop-filter: blur(20px) saturate(1.4);
-  -webkit-backdrop-filter: blur(20px) saturate(1.4);
-  color: var(--foreground);
-  font-size: 12px;
+  border: none;
+  background: var(--chart-blue);
+  color: #fff;
+  font-size: 11px;
   font-weight: 600;
+  line-height: 16px;
   cursor: pointer;
-  box-shadow: 0 8px 24px rgb(0 0 0 / 0.4), inset 0 1px 1.5px rgba(255, 255, 255, 0.3);
+  transition: filter 0.15s ease;
 }
-#update-banner:disabled {
+#update-btn:hover {
+  filter: brightness(1.15);
+}
+#update-btn:disabled {
   opacity: 0.7;
   cursor: wait;
-}
-:root[data-theme="light"] #update-banner {
-  background: rgba(255, 255, 255, 0.8);
 }
