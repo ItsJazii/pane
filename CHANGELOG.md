@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.3 — 2026-07-08
+
+### New
+- **Pane's new logo** 🎯 — the ring, everywhere: installer, app and
+  taskbar icons, tray, popover sidebar, and share-card footers.
+- **Update checks on every open** — the footer version stamp re-checks
+  each time you open Pane and becomes a blue **⬆ Update** button when a
+  new release is out; one click installs and restarts. (Replaces the
+  floating update banner.)
+- Party mode is now a triple-click on the sidebar logo away. 🎉
+
+### Fixed
+- Tray strip pairs now render logo-then-numbers, left to right, like
+  the macOS original (Windows inserts new tray icons leftward).
+- The update flow can no longer freeze at "Installing…" if a release
+  disappears mid-install — it fails visibly with a retry button.
+
 ## 0.4.2 — 2026-07-08
 
 **⚠ Installs of 0.4.1 and earlier: this release is signed with a new
