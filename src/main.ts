@@ -858,142 +858,88 @@ function renderTotalSpend(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Share cards — a canvas replica of the card, copied to the clipboard as PNG
+// Share cards — the live card element rasterized to PNG on the clipboard
 // ---------------------------------------------------------------------------
 
-function themeColors() {
-  const light = document.documentElement.dataset.theme === "light";
-  return light
-    ? { bg: "#fafafa", text: "#09090b", muted: "#71717a", track: "#e4e4e7", card: "#ffffff" }
-    : { bg: "#18181b", text: "#fafafa", muted: "#a1a1aa", track: "#27272a", card: "#18181b" };
-}
-
-function paceColor(m: Metric): string {
-  const cls = computePace(m).cls;
-  if (cls === "low") return "#ef4444";
-  if (cls === "warn") return "#f59e0b";
-  return "#3b82f6";
-}
-
-/// Draws at 2x of the Mac's 360pt design width and copies the PNG.
+/// Copy a card exactly as it appears on screen: serialize the live card
+/// element plus the app stylesheet into an SVG <foreignObject> and
+/// rasterize it at 2x. Whatever the card renders — donut, tabs, trend
+/// bars, future rows — the copied image matches automatically, instead
+/// of a hand-drawn approximation that drifts from the real UI.
 async function shareCard(id: string): Promise<void> {
   const status = document.querySelector("#status")!;
   try {
+    const el =
+      id === "__total__"
+        ? document.querySelector<HTMLElement>("article.total-spend")
+        : document.querySelector<HTMLElement>(`article.provider[data-provider="${id}"]`);
+    if (!el) return;
+
+    const rect = el.getBoundingClientRect();
+    const W = Math.ceil(rect.width);
+    const H = Math.ceil(rect.height);
     const S = 2;
-    const W = 360 * S;
-    const PAD = 18 * S;
-    const C = themeColors();
+    const PAD = 20; // frame around the card, like the Mac share cards
+    const FOOT = 30; // logo + tagline row
+    const W2 = W + PAD * 2;
+    const H2 = H + PAD * 2 + FOOT;
 
-    type Row =
-      | { kind: "bar"; label: string; right: string; used: number; color: string }
-      | { kind: "text"; label: string; right: string }
-      | { kind: "legend"; label: string; right: string; dot: string };
-    let title = "";
-    let subtitle = "";
-    const rows: Row[] = [];
-
-    if (id === "__total__") {
-      title = "Total Spend";
-      subtitle = SPEND_KEYS.find(([, k]) => k === spendTab)?.[0] ?? "";
-      const entries = lastSpend
-        .map((s) => ({ s, w: s[spendTab] }))
-        .filter((e) => e.w.cost > 0.005 || e.w.tokens > 0)
-        .sort((a, b) => b.w.cost - a.w.cost);
-      const total = entries.reduce((sum, e) => sum + e.w.cost, 0);
-      rows.push({ kind: "text", label: "Total", right: fmtMoney(total) });
-      for (const e of entries) {
-        rows.push({
-          kind: "legend",
-          label: e.s.name,
-          right: fmtMoney(e.w.cost),
-          dot: SPEND_COLORS[e.s.id] ?? "#4c8dff",
-        });
+    let css = "";
+    for (const sheet of Array.from(document.styleSheets)) {
+      try {
+        for (const rule of Array.from(sheet.cssRules)) css += rule.cssText + "\n";
+      } catch {
+        // Inaccessible sheet (shouldn't happen — all styles are bundled).
       }
-    } else {
-      const s = lastSnapshots.find((x) => x.id === id);
-      if (!s || s.status !== "ok") return;
-      title = s.name;
-      subtitle = s.plan ?? "";
-      const L = providerLayout(id);
-      const visible = L.metricOrder.filter((k) => !L.hidden.includes(k));
-      const shown = visible.filter((k) => !L.onDemand.includes(k) || L.expanded);
-      for (const key of shown) {
-        const m = s.metrics.find((x) => x.label === key);
-        if (!m) continue;
-        if (m.kind === "progress") {
-          const used = clampPercent(m.used_percent ?? 0);
-          rows.push({
-            kind: "bar",
-            label: m.label,
-            right: `${Math.round(100 - used)}% left`,
-            used,
-            color: paceColor(m),
-          });
-        } else if (m.value) {
-          rows.push({ kind: "text", label: m.label, right: m.value });
-        }
-      }
-      if (!rows.length) return;
     }
+    // Static rasterization renders CSS animations at time zero, which for
+    // the entrance animations means an invisible card. Freeze final state.
+    // The body's inherited text styles are re-declared on the wrapper since
+    // the snapshot document has no <body>.
+    const bodyStyle = getComputedStyle(document.body);
+    css +=
+      "*{animation:none!important;transition:none!important}" +
+      `#snap-root{font-family:${bodyStyle.fontFamily};font-size:${bodyStyle.fontSize};` +
+      `color:${bodyStyle.color};letter-spacing:${bodyStyle.letterSpacing};` +
+      `background:var(--background);padding:${PAD}px;box-sizing:border-box;` +
+      `width:${W2}px;height:${H2}px}` +
+      "#snap-root .share-btn{display:none!important}" +
+      `#snap-foot{display:flex;align-items:center;justify-content:center;gap:6px;` +
+      `height:${FOOT}px;color:var(--muted-foreground);font-size:12px}` +
+      "#snap-foot svg{width:14px;height:14px}#snap-foot svg path{fill:currentColor}";
 
-    const rowH = (r: Row) => (r.kind === "bar" ? 34 * S : 24 * S);
-    const headH = 46 * S;
-    const footH = 34 * S;
-    const H = headH + rows.reduce((sum, r) => sum + rowH(r), 0) + footH + PAD;
+    const clone = el.cloneNode(true) as HTMLElement;
+    clone.style.margin = "0";
+    clone.style.width = `${W}px`;
+    clone.style.boxSizing = "border-box";
+
+    // data-theme / data-density live on <html>; :root of the snapshot
+    // document is the <svg>, so the attributes are mirrored there for the
+    // :root[data-…] rules to keep matching.
+    const root = document.documentElement;
+    const svgMarkup =
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${W2 * S}" height="${H2 * S}" ` +
+      `viewBox="0 0 ${W2} ${H2}" data-theme="${root.dataset.theme ?? ""}" ` +
+      `data-density="${root.dataset.density ?? ""}">` +
+      `<foreignObject width="${W2}" height="${H2}">` +
+      `<div xmlns="http://www.w3.org/1999/xhtml" id="snap-root">` +
+      // CDATA so CSS containing XML-special characters (`<`, `&` — e.g. in
+      // a content: string) can never malform the snapshot document. A
+      // literal "]]>" inside CSS would end the section early, so split it.
+      `<style><![CDATA[${css.split("]]>").join("]]]]><![CDATA[>")}]]></style>` +
+      new XMLSerializer().serializeToString(clone) +
+      `<div id="snap-foot">${openusageIcon}<span>Monitor Your AI Subs with Pane</span></div>` +
+      `</div></foreignObject></svg>`;
+
+    const img = new Image();
+    img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgMarkup)}`;
+    await img.decode();
 
     const canvas = document.createElement("canvas");
-    canvas.width = W;
-    canvas.height = H;
+    canvas.width = W2 * S;
+    canvas.height = H2 * S;
     const ctx = canvas.getContext("2d")!;
-    ctx.fillStyle = C.card;
-    ctx.fillRect(0, 0, W, H);
-
-    ctx.fillStyle = C.text;
-    ctx.font = `600 ${15 * S}px "Segoe UI", sans-serif`;
-    ctx.fillText(title, PAD, PAD + 15 * S);
-    if (subtitle) {
-      ctx.fillStyle = C.muted;
-      ctx.font = `400 ${12 * S}px "Segoe UI", sans-serif`;
-      ctx.fillText(subtitle, PAD + ctx.measureText(title).width + 46 * S, PAD + 15 * S);
-    }
-
-    let y = headH + PAD / 2;
-    const rr = (x: number, ry: number, w: number, h: number, r: number) => {
-      ctx.beginPath();
-      ctx.roundRect(x, ry, Math.max(w, h), h, r);
-      ctx.fill();
-    };
-    for (const r of rows) {
-      ctx.font = `500 ${12 * S}px "Segoe UI", sans-serif`;
-      ctx.fillStyle = C.text;
-      let labelX = PAD;
-      if (r.kind === "legend") {
-        ctx.fillStyle = r.dot;
-        ctx.beginPath();
-        ctx.arc(PAD + 4 * S, y + 8 * S, 4 * S, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = C.text;
-        labelX = PAD + 14 * S;
-      }
-      ctx.fillText(r.label, labelX, y + 11 * S);
-      ctx.fillStyle = r.kind === "bar" ? C.text : C.muted;
-      const rightW = ctx.measureText(r.right).width;
-      ctx.fillText(r.right, W - PAD - rightW, y + 11 * S);
-      if (r.kind === "bar") {
-        const barY = y + 18 * S;
-        ctx.fillStyle = C.track;
-        rr(PAD, barY, W - 2 * PAD, 5 * S, 2.5 * S);
-        if (r.used > 0.5) {
-          ctx.fillStyle = r.color;
-          rr(PAD, barY, (W - 2 * PAD) * (r.used / 100), 5 * S, 2.5 * S);
-        }
-      }
-      y += rowH(r);
-    }
-
-    ctx.fillStyle = C.muted;
-    ctx.font = `400 ${11 * S}px "Segoe UI", sans-serif`;
-    ctx.fillText("Monitor Your AI Subscriptions with Pane", PAD, H - PAD);
+    ctx.drawImage(img, 0, 0);
 
     const dataUrl = canvas.toDataURL("image/png");
     const pngBase64 = dataUrl.slice(dataUrl.indexOf(",") + 1);

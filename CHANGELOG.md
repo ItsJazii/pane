@@ -34,6 +34,11 @@
   network call), docs/providers.md (per-provider: files read + endpoints
   called), docs/local-http-api.md, CONTRIBUTING.md.
 
+### Fixed
+- Share cards (⧉) now copy the card exactly as it looks on screen —
+  donut, tabs, theme and all — framed with a Pane logo footer, instead
+  of a simplified redrawn version that didn't match the UI.
+
 ## 0.4.1 — 2026-07-08
 
 First-run and Customize fixes from fresh-install testing.
