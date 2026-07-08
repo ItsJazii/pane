@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.4.2 — 2026-07-08
+
+**⚠ Installs of 0.4.1 and earlier: this release is signed with a new
+key, so the in-app updater will decline it. Reinstall once via
+`irm https://pane.jazii.dev/install.ps1 | iex` — updates then resume
+normally.**
 
 ### Changed (security)
 - **Breaking for browser-page consumers:** the local HTTP API no longer
