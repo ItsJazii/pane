@@ -923,7 +923,10 @@ async function shareCard(id: string): Promise<void> {
       `data-density="${root.dataset.density ?? ""}">` +
       `<foreignObject width="${W2}" height="${H2}">` +
       `<div xmlns="http://www.w3.org/1999/xhtml" id="snap-root">` +
-      `<style>${css}</style>` +
+      // CDATA so CSS containing XML-special characters (`<`, `&` — e.g. in
+      // a content: string) can never malform the snapshot document. A
+      // literal "]]>" inside CSS would end the section early, so split it.
+      `<style><![CDATA[${css.split("]]>").join("]]]]><![CDATA[>")}]]></style>` +
       new XMLSerializer().serializeToString(clone) +
       `<div id="snap-foot">${openusageIcon}<span>Monitor Your AI Subs with Pane</span></div>` +
       `</div></foreignObject></svg>`;
