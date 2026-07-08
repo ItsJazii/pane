@@ -179,6 +179,7 @@ body {
 }
 
 .app-logo svg,
+.app-logo img,
 .provider-icon svg {
   width: 100%;
   height: 100%;

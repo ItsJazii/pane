@@ -17,7 +17,9 @@ import grokIcon from "./assets/providers/grok.svg?raw";
 import minimaxIcon from "./assets/providers/minimax.svg?raw";
 import opencodeIcon from "./assets/providers/opencode.svg?raw";
 import openrouterIcon from "./assets/providers/openrouter.svg?raw";
-import openusageIcon from "./assets/providers/openusage.svg?raw";
+// Inlined as a data URI (not a URL) so the share-card SVG snapshot can
+// embed it — rasterized SVG images can't load external resources.
+import paneLogo from "./assets/pane-logo.png?inline";
 import zaiIcon from "./assets/providers/zai.svg?raw";
 
 const PROVIDER_ICONS: Record<string, string> = {
@@ -958,7 +960,7 @@ async function shareCard(id: string): Promise<void> {
       "#snap-root .share-btn{display:none!important}" +
       `#snap-foot{display:flex;align-items:center;justify-content:center;gap:6px;` +
       `height:${FOOT}px;color:var(--muted-foreground);font-size:12px}` +
-      "#snap-foot svg{width:14px;height:14px}#snap-foot svg path{fill:currentColor}";
+      "#snap-foot img{width:14px;height:14px}";
 
     const clone = el.cloneNode(true) as HTMLElement;
     clone.style.margin = "0";
@@ -980,7 +982,7 @@ async function shareCard(id: string): Promise<void> {
       // literal "]]>" inside CSS would end the section early, so split it.
       `<style><![CDATA[${css.split("]]>").join("]]]]><![CDATA[>")}]]></style>` +
       new XMLSerializer().serializeToString(clone) +
-      `<div id="snap-foot">${openusageIcon}<span>Monitor Your AI Subs with Pane</span></div>` +
+      `<div id="snap-foot"><img src="${paneLogo}" alt="" /><span>Monitor Your AI Subs with Pane</span></div>` +
       `</div></foreignObject></svg>`;
 
     const img = new Image();
@@ -1182,13 +1184,17 @@ const KONAMI = [
 ];
 let konamiAt = 0;
 
+function toggleParty(): void {
+  const on = document.body.classList.toggle("party");
+  document.querySelector("#status")!.textContent = on ? "🎉 Party mode!" : "Party's over.";
+}
+
 function konamiListen(e: KeyboardEvent): void {
   const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
   konamiAt = key === KONAMI[konamiAt] ? konamiAt + 1 : key === KONAMI[0] ? 1 : 0;
   if (konamiAt === KONAMI.length) {
     konamiAt = 0;
-    const on = document.body.classList.toggle("party");
-    document.querySelector("#status")!.textContent = on ? "🎉 Party mode!" : "Party's over.";
+    toggleParty();
   }
 }
 
@@ -2045,7 +2051,21 @@ async function initSettings(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 window.addEventListener("DOMContentLoaded", () => {
-  document.querySelector("#app-logo")!.innerHTML = openusageIcon;
+  const appLogo = document.querySelector<HTMLElement>("#app-logo")!;
+  appLogo.innerHTML = `<img src="${paneLogo}" alt="Pane" />`;
+  // Party mode, the easy way: triple-click the logo. (The Konami code
+  // still works, for the culture.)
+  let logoClicks = 0;
+  let logoClickReset: number | undefined;
+  appLogo.addEventListener("click", () => {
+    logoClicks += 1;
+    window.clearTimeout(logoClickReset);
+    logoClickReset = window.setTimeout(() => (logoClicks = 0), 1200);
+    if (logoClicks >= 3) {
+      logoClicks = 0;
+      toggleParty();
+    }
+  });
   document.querySelector("#theme-btn")!.addEventListener("click", toggleTheme);
   setupTrailFisheye();
   setupTooltips();

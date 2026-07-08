@@ -413,8 +413,10 @@ fn update_tray_strip(app: tauri::AppHandle, entries: Vec<StripEntry>) -> Result<
                 continue;
             }
 
-            // New pair — logo first so it sits to the left of its numbers.
-            for (tray_id, icon) in [(logo_id, logo_icon), (num_id, num_icon)] {
+            // New pair — numbers first: Windows inserts each new tray icon
+            // to the LEFT of the previous one, so creating numbers → logo
+            // lands as "logo | numbers" left-to-right, like the Mac strip.
+            for (tray_id, icon) in [(num_id, num_icon), (logo_id, logo_icon)] {
                 let _ = TrayIconBuilder::with_id(tray_id)
                     .icon(icon)
                     .tooltip(&entry.tooltip)
