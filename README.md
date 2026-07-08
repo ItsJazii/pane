@@ -120,7 +120,7 @@ API prices — the best ad for your subscription you'll ever see. Events for
 models without a known price are excluded and flagged, never guessed.
 
 **5. Staying local.** All of the above happens on your machine. There is no
-Pane server, no account, and no telemetry — see [Privacy](#privacy).
+Pane server, no account, and no telemetry — see [Privacy](#privacy--security).
 
 ## Providers (18 and counting)
 
