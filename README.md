@@ -8,7 +8,7 @@ One click on the tray icon answers the questions every AI power user keeps
 asking: *How much of my Claude session is left? When does my Codex weekly
 reset? What did today actually cost me?*
 
-[Install](#install) · [How it works](#how-it-works) · [Providers](#providers-18-and-counting) · [Features](#features) · [Privacy](#privacy) · [Credits](#credits)
+**[pane.jazii.dev](https://pane.jazii.dev)** · [Install](#install) · [How it works](#how-it-works) · [Providers](#providers-18-and-counting) · [Features](#features) · [Privacy](#privacy--security) · [Credits](#credits)
 
 <img src="docs/screenshot.png" width="380" alt="Pane in dark mode — Total Spend donut, Claude and Codex usage cards with pace bars" />&nbsp;&nbsp;<img src="docs/screenshot-light.png" width="380" alt="Pane in light mode — same popover with the light theme" />
 
@@ -32,16 +32,20 @@ broader AI-workflow companion from there.
 
 ## Install
 
-### One-liner (PowerShell)
+Every release binary is built and published by GitHub Actions straight
+from the tagged source — public build logs, verifiable provenance.
+
+### One-liner (PowerShell — recommended)
 
 ```powershell
 irm https://pane.jazii.dev/install.ps1 | iex
 ```
 
-Downloads the latest release, installs per-user (no admin), and launches
-Pane. Read [install.ps1](install.ps1) first if you like — it's one short, commented script.
+Downloads the latest release, verifies its SHA-256, installs per-user
+(no admin), and launches Pane. No SmartScreen prompt. Read
+[install.ps1](install.ps1) first if you like — it's one short, commented script.
 
-### Installer (recommended)
+### Installer (.exe)
 
 1. Grab **`Pane_x.y.z_x64-setup.exe`** from the
    [latest release](https://github.com/ItsJazii/pane/releases/latest).
@@ -157,15 +161,19 @@ whatever the community asks for loudest.
   breakdown and a 30-day trend, priced with live model rates.
 - **Codex reset credits** — see each banked credit's exact expiry and
   redeem it with one click.
-- **Signed auto-updates** — checks GitHub releases on launch and every 4
-  hours; one click downloads, verifies, and restarts.
+- **Signed auto-updates** — Pane checks for updates every time you open
+  it (and every 4 hours in the background); when a release is out, the
+  footer version stamp becomes an Update button — one click downloads,
+  verifies the signature, and restarts.
 - **Live tray numbers** — star up to two metrics per provider and they
   render as logo + percentage pairs directly in the tray.
 - **Customize** (☰) — reorder providers and metrics by drag, hide rows,
   tuck rarely-needed ones behind an "On Demand" caret. Ctrl+Z undoes.
 - **Liquid glass UI** — real SDF lens refraction on the auto-hiding
   sidebar and glass bars, magnetic minimap trail, circular day/night wipe.
-- **Share cards** — hover a card, click ⧉, paste the PNG anywhere.
+- **Share cards** — hover a card, click ⧉, and paste anywhere: a
+  pixel-true snapshot of the card exactly as it looks on screen, framed
+  with the Pane logo.
 - **Quick links** — Status / Dashboard shortcuts on every card.
 - **[Local HTTP API](docs/local-http-api.md)** — `GET
   http://127.0.0.1:6736/v1/usage` for scripts, Rainmeter widgets, stream
