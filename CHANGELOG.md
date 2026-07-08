@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.4 — 2026-07-08
+
+### Performance
+- Background refreshes no longer rebuild the popover interface while
+  it's hidden in the tray (~99% of the time) — rendering now happens
+  once, at the moment you open Pane. Same for the 30-second countdown
+  ticks. Less idle CPU, all day.
+- New **Settings → General → "Liquid glass effects"** toggle (on by
+  default). Turn it off on slower PCs: the glass refraction and blurs
+  become clean flat surfaces, and the expensive lens machinery never
+  even initializes — from the very first frame of a cold start.
+
 ## 0.4.3 — 2026-07-08
 
 ### New
