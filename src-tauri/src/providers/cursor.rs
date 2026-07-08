@@ -360,9 +360,7 @@ async fn fetch() -> Result<Snapshot, String> {
         || spend_type.as_deref() == Some("team")
         || pooled_limit > 0.0;
 
-    let used_cents = plan_usage
-        .get("totalSpend")
-        .and_then(|v| v.as_f64())
+    let used_cents = num(plan_usage.get("totalSpend"))
         .or_else(|| limit.map(|l| l - num(plan_usage.get("remaining")).unwrap_or(0.0)))
         .unwrap_or(0.0);
 
