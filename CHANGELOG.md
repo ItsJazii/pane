@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.5 — 2026-07-09
 
 ### Fixed
 - **Cursor Pro/Pro+/Ultra/Teams accounts now show real usage** — percent
