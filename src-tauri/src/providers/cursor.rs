@@ -109,7 +109,13 @@ pub async fn fetch_usage_csv() -> Option<String> {
         }
     }
 
-    let token = unquote(&read_state_values().ok()?.0?);
+    // Prefer a token refreshed by fetch() this run — the stored one may
+    // have expired since Cursor last wrote it.
+    let token = refreshed_token()
+        .lock()
+        .ok()
+        .and_then(|t| t.clone())
+        .or_else(|| read_state_values().ok()?.0.map(|t| unquote(&t)))?;
     if token.is_empty() {
         return None;
     }
@@ -269,9 +275,10 @@ async fn fetch() -> Result<Snapshot, String> {
     let total_pct = plan_usage.and_then(|p| num(p.get("totalPercentUsed")));
 
     // Legacy request-quota accounts (and team/enterprise plans that hide
-    // dollar pools) still answer the old REST endpoint.
+    // dollar pools) still answer the old REST endpoint. Use the effective
+    // token — the stored one may be the stale token we just replaced.
     if !enabled || plan_usage.is_none() || (limit.is_none() && total_pct.is_none()) {
-        return legacy_fetch(&stored).await;
+        return legacy_fetch(&token).await;
     }
     let plan_usage = plan_usage.unwrap();
 
@@ -287,9 +294,9 @@ async fn fetch() -> Result<Snapshot, String> {
     // Some accounts answer GetPlanInfo without a name — the Stripe
     // membership endpoint still knows ("pro", "ultra", ...).
     if plan.is_none() {
-        if let Some(sub) = jwt_sub(&stored) {
+        if let Some(sub) = jwt_sub(&token) {
             let user_id = sub.split('|').next_back().unwrap_or(&sub).to_string();
-            let cookie = format!("WorkosCursorSessionToken={user_id}%3A%3A{stored}");
+            let cookie = format!("WorkosCursorSessionToken={user_id}%3A%3A{token}");
             if let Ok(r) = http()
                 .get("https://cursor.com/api/auth/stripe")
                 .header("Cookie", &cookie)
