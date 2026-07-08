@@ -2107,7 +2107,9 @@ window.addEventListener("DOMContentLoaded", () => {
   document.querySelector("#theme-btn")!.addEventListener("click", toggleTheme);
   setupTrailFisheye();
   setupTooltips();
-  window.setTimeout(initLiquidLens, 150);
+  // No lens init here: applyGlass() (via initSettings, after the saved
+  // config arrives) owns it — a fixed timer raced the config load and
+  // built the maps even for users who turned glass off.
   window.addEventListener("keydown", (e) => {
     konamiListen(e);
     if (e.ctrlKey && e.key.toLowerCase() === "z" && customizeOpen) {
