@@ -255,7 +255,18 @@ async fn fetch() -> Result<Snapshot, String> {
 
     // Current-generation usage: percent of the plan's included usage,
     // via the same dashboard RPCs Cursor's web dashboard calls.
-    let mut usage = connect_post("GetCurrentPeriodUsage", &token).await?;
+    // A transient failure of the new API must not strand legacy-plan
+    // users whose data lives behind the old endpoint — try that before
+    // giving up (keeping the original error if both paths fail).
+    let mut usage = match connect_post("GetCurrentPeriodUsage", &token).await {
+        Ok(u) => u,
+        Err(e) => {
+            return match legacy_fetch(&token).await {
+                Ok(s) => Ok(s),
+                Err(_) => Err(e),
+            };
+        }
+    };
     if usage.is_none() {
         if let Some(fresh) = match &refresh {
             Some(r) => refresh_access_token(r).await,
