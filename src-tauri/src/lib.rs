@@ -747,6 +747,19 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Popover-open update check: the footer asks on every tray click and
+/// shows an Update button when this returns a newer version.
+#[tauri::command]
+async fn check_update(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    updater
+        .check()
+        .await
+        .map(|u| u.map(|u| u.version.clone()))
+        .map_err(|e| e.to_string())
+}
+
 /// Startup + every 4 h: quiet update check; a hit emits "update-available"
 /// with the new version so the frontend can show its banner. 404 (no
 /// releases yet) and offline are non-events.
@@ -868,7 +881,8 @@ pub fn run() {
             copy_share_image,
             set_shortcut,
             codex_redeem_credit,
-            install_update
+            install_update,
+            check_update
         ])
         .setup(|app| {
             spawn_update_checker(app.handle());
