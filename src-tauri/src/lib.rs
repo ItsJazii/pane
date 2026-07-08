@@ -737,12 +737,18 @@ async fn codex_redeem_credit(credit_id: String) -> Result<String, String> {
 async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
     use tauri_plugin_updater::UpdaterExt;
     let updater = app.updater().map_err(|e| e.to_string())?;
-    if let Some(update) = updater.check().await.map_err(|e| e.to_string())? {
-        update
-            .download_and_install(|_, _| {}, || {})
-            .await
-            .map_err(|e| e.to_string())?;
-        app.restart();
+    match updater.check().await.map_err(|e| e.to_string())? {
+        Some(update) => {
+            update
+                .download_and_install(|_, _| {}, || {})
+                .await
+                .map_err(|e| e.to_string())?;
+            app.restart();
+        }
+        // The update the button promised is gone (yanked release, CDN
+        // hiccup). Succeeding silently would strand the frontend in its
+        // "Installing…" state — fail so the button can recover.
+        None => return Err("update no longer available — try again shortly".into()),
     }
     Ok(())
 }

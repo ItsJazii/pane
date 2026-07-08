@@ -877,6 +877,8 @@ function renderBuildInfo(): void {
     btn.addEventListener("click", () => {
       btn.textContent = "Installing…";
       btn.disabled = true;
+      // On success the app restarts, so only the failure path matters:
+      // re-enable the button and surface the reason.
       invoke("install_update").catch((err) => {
         btn.textContent = `⬆ Update to v${updateVersion} — retry`;
         btn.disabled = false;
