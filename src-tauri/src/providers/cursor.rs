@@ -367,8 +367,12 @@ async fn fetch() -> Result<Snapshot, String> {
         .unwrap_or(0.0);
 
     if is_team {
-        let limit_cents =
-            limit.ok_or("Cursor team usage limit missing from API response")?;
+        // Team-shaped accounts sometimes omit the plan limit; the legacy
+        // request endpoint is what still describes them (same fallback
+        // upstream uses for this shape).
+        let Some(limit_cents) = limit else {
+            return legacy_fetch(&token).await;
+        };
         metrics.push(
             Metric::progress(
                 "Total usage",
