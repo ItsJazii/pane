@@ -332,6 +332,18 @@ fn resolve(s: &Store, model: &str) -> Option<Price> {
         .map(|(_, c)| c.clone())
         .unwrap_or_else(|| model.to_string());
 
+    // Cursor's Max-mode slugs ("gpt-5.6-sol-max") bill token-based at the
+    // base model's rates; when nothing prices the -max slug itself, price
+    // the base model instead. Handled up front so the stripped name gets
+    // the full chain below (aliases, fast tiers, fuzzy matches).
+    if s.supplement.get(&canonical).is_none() && s.litellm.get(&canonical).is_none() {
+        if let Some(base) = canonical.strip_suffix("-max") {
+            if let Some(p) = resolve(s, base) {
+                return Some(p);
+            }
+        }
+    }
+
     if let Some(p) = s.supplement.get(&canonical) {
         return Some(*p);
     }
