@@ -72,6 +72,9 @@ struct FileData {
 struct FileEntry {
     mtime: SystemTime,
     size: u64,
+    /// Pricing-catalog generation the file was priced under — a catalog
+    /// refresh re-prices even files that haven't changed on disk.
+    gen: u64,
     data: FileData,
 }
 
@@ -207,9 +210,10 @@ fn file_days(path: &Path, parse: &mut dyn FnMut(&str, &mut FileData)) -> FileDat
     let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
     let size = meta.len();
 
+    let gen = pricing::generation();
     if let Ok(map) = cache().lock() {
         if let Some(entry) = map.get(path) {
-            if entry.mtime == mtime && entry.size == size {
+            if entry.mtime == mtime && entry.size == size && entry.gen == gen {
                 return entry.data.clone();
             }
         }
@@ -223,7 +227,7 @@ fn file_days(path: &Path, parse: &mut dyn FnMut(&str, &mut FileData)) -> FileDat
     }
 
     if let Ok(mut map) = cache().lock() {
-        map.insert(path.to_path_buf(), FileEntry { mtime, size, data: data.clone() });
+        map.insert(path.to_path_buf(), FileEntry { mtime, size, gen, data: data.clone() });
     }
     data
 }
@@ -604,9 +608,18 @@ mod tests {
         eprintln!("cursor csv: {} bytes", csv.as_deref().map(str::len).unwrap_or(0));
         if let Some(c) = &csv {
             eprintln!("csv header: {}", c.lines().next().unwrap_or(""));
-            if let Some(row) = c.lines().nth(1) {
-                let date = super::split_csv_row(row).into_iter().next().unwrap_or_default();
-                eprintln!("csv first-row date cell: {date:?}");
+            for row in c.lines().skip(1).take(3) {
+                let cells = super::split_csv_row(row);
+                eprintln!(
+                    "row: date={:?} parsed={} model={:?} in={:?} out={:?} total={:?} cost={:?}",
+                    cells.first(),
+                    cells.first().map(|d| super::parse_csv_date(d).is_some()).unwrap_or(false),
+                    cells.get(4),
+                    cells.get(6),
+                    cells.get(9),
+                    cells.get(10),
+                    cells.get(11),
+                );
             }
         }
         for sp in super::collect(csv) {
@@ -644,6 +657,11 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
     let mut list = vec![claude(), codex(), grok(), opencode()];
     if let Some(csv) = cursor_csv {
         list.push(cursor_from_csv(&csv));
+    }
+    // Models nothing prices yet (new slugs ship often): flag the catalog
+    // to look for updates hourly instead of daily.
+    if list.iter().any(|sp| sp.unpriced > 0) {
+        pricing::note_unpriced();
     }
     list.into_iter().filter(ProviderSpend::has_data).collect()
 }

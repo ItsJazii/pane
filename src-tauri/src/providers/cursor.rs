@@ -123,9 +123,17 @@ pub async fn fetch_usage_csv() -> Option<String> {
     let user_id = sub.split('|').next_back().unwrap_or(&sub).to_string();
     let cookie = format!("WorkosCursorSessionToken={user_id}%3A%3A{token}");
 
+    // The export answers 200-with-empty unless it's given an explicit
+    // range; strategy=tokens yields the per-model token columns the spend
+    // parser prices (same query Cursor's dashboard sends).
+    let end = chrono::Utc::now().timestamp_millis();
+    let start = end - 31 * 24 * 3_600_000;
     let resp = http()
-        .get("https://cursor.com/api/dashboard/export-usage-events-csv")
+        .get(format!(
+            "https://cursor.com/api/dashboard/export-usage-events-csv?startDate={start}&endDate={end}&strategy=tokens"
+        ))
         .header("Cookie", &cookie)
+        .header("Accept", "text/csv")
         .send()
         .await
         .ok()?;

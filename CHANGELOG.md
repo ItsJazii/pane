@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Cursor spend tiles work again** — Cursor's usage-events export now
+  requires an explicit date range and token strategy; Pane sends both
+  (last 31 days), so Today / Yesterday / 30 Days dollars populate.
+- **New models price within the hour, not within the day** — when spend
+  events reference models the price catalog doesn't know yet (new Cursor
+  slugs ship often), Pane now rechecks the catalog hourly instead of
+  daily, and a catalog update re-prices already-scanned logs instead of
+  waiting for them to change on disk.
+
 ## 0.4.5 — 2026-07-09
 
 ### Fixed
