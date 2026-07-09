@@ -332,18 +332,6 @@ fn resolve(s: &Store, model: &str) -> Option<Price> {
         .map(|(_, c)| c.clone())
         .unwrap_or_else(|| model.to_string());
 
-    // Cursor's Max-mode slugs ("gpt-5.6-sol-max") bill token-based at the
-    // base model's rates; when nothing prices the -max slug itself, price
-    // the base model instead. Handled up front so the stripped name gets
-    // the full chain below (aliases, fast tiers, fuzzy matches).
-    if s.supplement.get(&canonical).is_none() && s.litellm.get(&canonical).is_none() {
-        if let Some(base) = canonical.strip_suffix("-max") {
-            if let Some(p) = resolve(s, base) {
-                return Some(p);
-            }
-        }
-    }
-
     if let Some(p) = s.supplement.get(&canonical) {
         return Some(*p);
     }
@@ -372,7 +360,14 @@ fn resolve(s: &Store, model: &str) -> Option<Price> {
     {
         return Some(p);
     }
-    s.modelsdev.get(&canonical).copied()
+    if let Some(p) = s.modelsdev.get(&canonical) {
+        return Some(*p);
+    }
+    // Cursor's Max-mode slugs ("gpt-5.6-sol-max") bill token-based at the
+    // base model's rates, and no catalog carries the -max name itself. Only
+    // when the whole chain above misses does the suffix get stripped and
+    // the base model resolved — a real -max entry in any source wins.
+    canonical.strip_suffix("-max").and_then(|base| resolve(s, base))
 }
 
 #[cfg(test)]
