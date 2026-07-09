@@ -534,6 +534,51 @@ fn opencode() -> ProviderSpend {
     build_spend("opencode", "OpenCode", data)
 }
 
+/// Devin CLI keeps per-request token metrics in its local sessions.db
+/// (cloud Devin sessions bill ACUs and write no local logs, so only CLI
+/// usage appears). Events carry the session's model with Windsurf-style
+/// reasoning-effort suffixes stripped for pricing.
+fn devin() -> ProviderSpend {
+    let mut data = FileData::default();
+    for ev in providers::devin::collect_usage_events() {
+        let Some(ts) = DateTime::from_timestamp_millis(ev.ts_ms) else { continue };
+        let tokens = ev.input + ev.output + ev.cache_read + ev.cache_write;
+        if tokens <= 0.0 {
+            continue;
+        }
+        let model = devin_model(&ev.model);
+        match pricing::lookup(model) {
+            Some(p) => {
+                let cost = (ev.input * p.input
+                    + ev.cache_read * p.cache_read
+                    + ev.cache_write * p.cache_write
+                    + ev.output * p.output)
+                    / 1e6;
+                add_event(&mut data, ts, model, cost, tokens);
+            }
+            None => note_unpriced(&mut data, model),
+        }
+    }
+    build_spend("devin", "Devin", data)
+}
+
+/// Windsurf-style slugs append a reasoning effort ("claude-opus-4-8-medium")
+/// that no catalog knows; price and display the base model. A couple of
+/// slugs also spell the model differently than the catalogs do.
+fn devin_model(raw: &str) -> &str {
+    let mut base = raw;
+    for suffix in ["-low", "-medium", "-high", "-xhigh"] {
+        if let Some(b) = raw.strip_suffix(suffix) {
+            base = b;
+            break;
+        }
+    }
+    match base {
+        "claude-5-fable" => "claude-fable-5", // LiteLLM's slug order
+        b => b,
+    }
+}
+
 /// Cursor spend from the dashboard's usage-events CSV export (fetched by the
 /// async caller — this stays a pure parser). Column layout is discovered
 /// from the header row; rows with an explicit cost win, token-only rows are
@@ -689,7 +734,7 @@ fn split_csv_row(line: &str) -> Vec<String> {
 
 pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
     pricing::ensure_fresh();
-    let mut list = vec![claude(), codex(), grok(), opencode()];
+    let mut list = vec![claude(), codex(), grok(), opencode(), devin()];
     if let Some(csv) = cursor_csv {
         list.push(cursor_from_csv(&csv));
     }
