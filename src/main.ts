@@ -738,8 +738,11 @@ function donutEntries(tab: SpendTab): DonutEntry[] {
   return lastSpend
     .filter((s) => !config.disabled.includes(s.id)) // disabled = gone everywhere
     .map((s) => ({ s, w: s[tab] }))
-    .filter((e) => e.w.cost > 0.005 || e.w.tokens > 0)
-    .sort((a, b) => b.w.cost - a.w.cost);
+    // Membership, order, and wedge share all follow the active metric so
+    // the legend ranking always matches the ring (cost keeps a half-cent
+    // noise floor).
+    .filter((e) => (config.spendMetric === "tokens" ? e.w.tokens > 0 : e.w.cost > 0.005))
+    .sort((a, b) => spendVal(b.w) - spendVal(a.w));
 }
 
 /// The donut meters dollars or raw tokens — a click on the ring toggles.
