@@ -17,9 +17,12 @@ import grokIcon from "./assets/providers/grok.svg?raw";
 import minimaxIcon from "./assets/providers/minimax.svg?raw";
 import opencodeIcon from "./assets/providers/opencode.svg?raw";
 import openrouterIcon from "./assets/providers/openrouter.svg?raw";
-// Inlined as a data URI (not a URL) so the share-card SVG snapshot can
-// embed it — rasterized SVG images can't load external resources.
+// Inlined as data URIs (not URLs) so the share-card SVG snapshot can
+// embed them — rasterized SVG images can't load external resources.
+// The bare ring suits the sidebar; the footer uses the full rounded
+// app icon, which stays legible at tiny sizes.
 import paneLogo from "./assets/pane-logo.png?inline";
+import paneIcon from "./assets/pane-icon.png?inline";
 import zaiIcon from "./assets/providers/zai.svg?raw";
 
 const PROVIDER_ICONS: Record<string, string> = {
@@ -121,6 +124,7 @@ interface Config {
   notifyCuttingClose: boolean;
   notifyWillRunOut: boolean;
   spendTab: SpendTab;
+  spendMetric: "cost" | "tokens";
   showUsed: boolean;
   resetExact: boolean;
   timeFormat: "auto" | "12" | "24";
@@ -204,14 +208,14 @@ const PROVIDER_LINKS: Record<string, { label: string; url: string }[]> = {
 // get a stable hue derived from their id.
 const SPEND_COLORS: Record<string, string> = {
   claude: "#de7356",
-  codex: "#10a37f",
+  codex: "#3b82f6",
   openrouter: "#6467f2",
   antigravity: "#4285f4",
   copilot: "#a855f7",
   minimax: "#f5433c",
-  grok: "#8b93a1",
+  grok: "#10a37f",
   opencode: "#b7b1b1",
-  cursor: "#e8eaed",
+  cursor: "var(--spend-cursor)", // brand black, theme-flipped in CSS
 };
 
 function spendColor(id: string): string {
@@ -241,6 +245,7 @@ let config: Config = {
   notifyCuttingClose: false,
   notifyWillRunOut: false,
   spendTab: "today",
+  spendMetric: "cost",
   showUsed: false,
   resetExact: false,
   timeFormat: "auto",
@@ -619,7 +624,7 @@ function renderTrend(spend: ProviderSpend): string {
   const title = `Last 30 days (${dateOf(0)} – ${dateOf(29)}) · peak ${fmtTokens(max)} tokens on ${dateOf(peakIdx)} · from local logs`;
   return `
     <div class="metric trend">
-      <div class="metric-head"><span class="metric-label" title="${escapeHtml(title)}">Usage Trend</span></div>
+      <span class="metric-label" title="${escapeHtml(title)}">Usage Trend</span>
       <svg class="trend-chart" viewBox="0 0 297 32" preserveAspectRatio="none">${bars}</svg>
     </div>`;
 }
@@ -691,6 +696,7 @@ function renderCard(s: Snapshot): string {
   return `
     <article class="provider${muted}" data-provider="${s.id}">
       <div class="provider-head">
+        <span class="drag-grip" title="Drag to reorder">⠿</span>
         <span class="provider-name">${escapeHtml(s.name)}</span>
         ${plan}
         ${stale}
@@ -698,9 +704,11 @@ function renderCard(s: Snapshot): string {
         ${share}
         <span class="provider-icon">${icon}</span>
       </div>
-      ${body}
-      ${linksRow}
-      ${caret}
+      <div class="card-panel">
+        ${body}
+        ${linksRow}
+        ${caret}
+      </div>
     </article>`;
 }
 
@@ -715,8 +723,14 @@ function orderedSnapshots(): Snapshot[] {
   });
 }
 
-const DONUT_R = 34;
-const DONUT_CIRC = 2 * Math.PI * DONUT_R;
+// The ring is built from annular wedges (like the Mac's SectorMark chart):
+// radial-cut ends with softly rounded corners and angular gaps, so tiny
+// spenders stay thin slivers instead of ballooning to a round-cap dot.
+const TAU = Math.PI * 2;
+const DONUT_OUT = 44; // outer radius
+const DONUT_IN = 30; // inner radius — 14 thick, centered on r=37
+const DONUT_PAD = 2.2 / 37; // angular gap between neighbors (~2px mid-ring)
+const DONUT_MIN = 0.07; // slimmest visible sliver (~2.6px mid-ring)
 
 type DonutEntry = { s: ProviderSpend; w: SpendWindow };
 
@@ -724,38 +738,105 @@ function donutEntries(tab: SpendTab): DonutEntry[] {
   return lastSpend
     .filter((s) => !config.disabled.includes(s.id)) // disabled = gone everywhere
     .map((s) => ({ s, w: s[tab] }))
-    .filter((e) => e.w.cost > 0.005 || e.w.tokens > 0)
-    .sort((a, b) => b.w.cost - a.w.cost);
+    // Membership, order, and wedge share all follow the active metric so
+    // the legend ranking always matches the ring (cost keeps a half-cent
+    // noise floor).
+    .filter((e) => (config.spendMetric === "tokens" ? e.w.tokens > 0 : e.w.cost > 0.005))
+    .sort((a, b) => spendVal(b.w) - spendVal(a.w));
 }
 
-/// Arc lengths + offsets per provider (min-sliver rescaled), shared by the
-/// initial render and the tab-switch morph.
-function donutGeometry(entries: DonutEntry[]): { total: number; geo: Map<string, { len: number; offset: number }> } {
-  const total = entries.reduce((sum, e) => sum + e.w.cost, 0);
-  const spenders = entries.filter((e) => e.w.cost > 0);
-  const MIN_LEN = 3;
-  let lens = spenders.map((e) =>
-    total > 0 ? Math.max(MIN_LEN, (e.w.cost / total) * DONUT_CIRC) : 0,
-  );
-  const lenSum = lens.reduce((a, b) => a + b, 0);
-  if (lenSum > 0) lens = lens.map((l) => (l / lenSum) * DONUT_CIRC);
-  const geo = new Map<string, { len: number; offset: number }>();
-  let offset = 0;
+/// The donut meters dollars or raw tokens — a click on the ring toggles.
+function spendVal(w: SpendWindow): number {
+  return config.spendMetric === "tokens" ? w.tokens : w.cost;
+}
+
+function fmtSpendVal(w: SpendWindow): string {
+  return config.spendMetric === "tokens" ? fmtTokens(w.tokens) : fmtMoney(w.cost);
+}
+
+/// Angular extent per provider (slivers lifted to stay visible), shared by
+/// the initial render and the tab-switch morph. Angles run clockwise from
+/// 12 o'clock; the first gap straddles the top like the Mac's ring.
+function donutGeometry(entries: DonutEntry[]): { total: number; geo: Map<string, { a0: number; a1: number }> } {
+  const total = entries.reduce((sum, e) => sum + spendVal(e.w), 0);
+  const spenders = entries.filter((e) => spendVal(e.w) > 0);
+  const geo = new Map<string, { a0: number; a1: number }>();
+  if (spenders.length === 0 || total <= 0) return { total, geo };
+  if (spenders.length === 1) {
+    geo.set(spenders[0].s.id, { a0: 0, a1: TAU });
+    return { total, geo };
+  }
+  const avail = TAU - spenders.length * DONUT_PAD;
+  const spans = spenders.map((e) => (spendVal(e.w) / total) * avail);
+  let excess = 0;
+  for (let i = 0; i < spans.length; i++) {
+    if (spans[i] < DONUT_MIN) {
+      excess += DONUT_MIN - spans[i];
+      spans[i] = DONUT_MIN;
+    }
+  }
+  if (excess > 0) {
+    const big = spans.indexOf(Math.max(...spans));
+    spans[big] = Math.max(DONUT_MIN, spans[big] - excess);
+  }
+  let a = DONUT_PAD / 2;
   spenders.forEach((e, i) => {
-    geo.set(e.s.id, { len: lens[i], offset });
-    offset += lens[i];
+    geo.set(e.s.id, { a0: a, a1: a + spans[i] });
+    a += spans[i] + DONUT_PAD;
   });
   return { total, geo };
+}
+
+function donutPt(r: number, a: number): string {
+  return `${(48 + r * Math.sin(a)).toFixed(2)} ${(48 - r * Math.cos(a)).toFixed(2)}`;
+}
+
+/// SVG path for one annular sector with rounded corners (d3-arc style).
+/// A full-circle span comes back as a two-ring evenodd annulus instead.
+function sectorPath(a0: number, a1: number): string {
+  const span = a1 - a0;
+  if (span >= TAU - 0.0001) {
+    const ring = (r: number, sweep: number) =>
+      `M ${donutPt(r, 0)} A ${r} ${r} 0 1 ${sweep} ${donutPt(r, Math.PI)} A ${r} ${r} 0 1 ${sweep} ${donutPt(r, TAU)} Z`;
+    return `${ring(DONUT_OUT, 1)} ${ring(DONUT_IN, 0)}`;
+  }
+  // Corner radius shrinks on thin slivers so the roundings never overlap.
+  const s = Math.sin(span / 2);
+  const rc = Math.max(
+    0.2,
+    Math.min(3, (DONUT_OUT - DONUT_IN) / 2, (DONUT_IN * s) / (1 - s), (DONUT_OUT * s) / (1 + s)),
+  );
+  const f1 = Math.asin(rc / (DONUT_OUT - rc)); // angle eaten by an outer corner
+  const f0 = Math.asin(rc / (DONUT_IN + rc)); // …and by an inner corner
+  const d1 = Math.sqrt((DONUT_OUT - rc) ** 2 - rc * rc); // corner tangents on the radial cuts
+  const d0 = Math.sqrt((DONUT_IN + rc) ** 2 - rc * rc);
+  return [
+    `M ${donutPt(d1, a0)}`,
+    `A ${rc} ${rc} 0 0 1 ${donutPt(DONUT_OUT, a0 + f1)}`,
+    `A ${DONUT_OUT} ${DONUT_OUT} 0 ${span - 2 * f1 > Math.PI ? 1 : 0} 1 ${donutPt(DONUT_OUT, a1 - f1)}`,
+    `A ${rc} ${rc} 0 0 1 ${donutPt(d1, a1)}`,
+    `L ${donutPt(d0, a1)}`,
+    `A ${rc} ${rc} 0 0 1 ${donutPt(DONUT_IN, a1 - f0)}`,
+    `A ${DONUT_IN} ${DONUT_IN} 0 ${span - 2 * f0 > Math.PI ? 1 : 0} 0 ${donutPt(DONUT_IN, a0 + f0)}`,
+    `A ${rc} ${rc} 0 0 1 ${donutPt(d0, a0)}`,
+    "Z",
+  ].join(" ");
+}
+
+/// Hover nudges a wedge outward along its bisector, Mac-style.
+function donutPop(g: { a0: number; a1: number }): { tx: string; ty: string } {
+  const mid = (g.a0 + g.a1) / 2;
+  return { tx: `${(2.5 * Math.sin(mid)).toFixed(2)}px`, ty: `${(-2.5 * Math.cos(mid)).toFixed(2)}px` };
 }
 
 function legendHtml(entries: DonutEntry[]): string {
   return entries
     .map(
       (e) => `
-        <div class="legend-row">
+        <div class="legend-row" data-pid="${e.s.id}">
           <span class="dot" style="background:${spendColor(e.s.id)}"></span>
           <span class="legend-name">${escapeHtml(e.s.name)} ${unpricedWarn(e.s)}</span>
-          <span class="legend-val">${fmtMoney(e.w.cost)}</span>
+          <span class="legend-val">${fmtSpendVal(e.w)}</span>
         </div>`,
     )
     .join("");
@@ -767,36 +848,47 @@ function switchSpendTab(tab: SpendTab): void {
   spendTab = tab;
   void patchConfig({ spendTab });
   const card = document.querySelector<HTMLElement>(".total-spend");
-  const circles = card ? Array.from(card.querySelectorAll<SVGCircleElement>("circle.seg")) : [];
+  const paths = card ? Array.from(card.querySelectorAll<SVGPathElement>("path.seg")) : [];
   const entries = donutEntries(tab);
   const { total, geo } = donutGeometry(entries);
+  // Wedge paths share one command structure so CSS can tween `d`; a
+  // full-circle annulus doesn't, so single-spender states rebuild instead.
   const morphable =
     card &&
-    circles.length > 0 &&
-    [...geo.keys()].every((id) => circles.some((c) => c.dataset.pid === id));
+    paths.length > 0 &&
+    geo.size >= 2 &&
+    paths.every((p) => !p.dataset.full) &&
+    [...geo.keys()].every((id) => paths.some((p) => p.dataset.pid === id));
   if (!morphable) {
     renderAll();
     return;
   }
-  for (const c of circles) {
-    const g = geo.get(c.dataset.pid ?? "");
+  for (const p of paths) {
+    const g = geo.get(p.dataset.pid ?? "");
     if (g) {
-      c.style.opacity = "1";
-      c.style.strokeDasharray = `${g.len} ${DONUT_CIRC - g.len}`;
-      c.style.strokeDashoffset = `${-g.offset}`;
+      const pop = donutPop(g);
+      p.style.opacity = "1";
+      p.style.setProperty("d", `path("${sectorPath(g.a0, g.a1)}")`);
+      p.style.setProperty("--tx", pop.tx);
+      p.style.setProperty("--ty", pop.ty);
     } else {
-      c.style.opacity = "0";
+      p.style.opacity = "0";
     }
   }
   const totalEl = card.querySelector(".donut-total");
-  if (totalEl) totalEl.textContent = fmtMoney(total);
+  if (totalEl)
+    totalEl.textContent = config.spendMetric === "tokens" ? fmtTokens(total) : fmtMoney(total);
   const legend = card.querySelector(".legend");
   if (legend) legend.innerHTML = legendHtml(entries);
   card.querySelectorAll(".tab").forEach((t) => {
     t.classList.toggle("active", t.getAttribute("data-tab") === tab);
   });
   const wrap = card.querySelector<HTMLElement>(".donut-wrap");
-  if (wrap) wrap.title = `$${total.toFixed(2)} — computed locally from session logs`;
+  if (wrap) {
+    const isTokens = config.spendMetric === "tokens";
+    const exactVal = isTokens ? `${fmtTokens(total)} tokens` : `$${total.toFixed(2)}`;
+    wrap.title = `${exactVal} — computed locally from session logs. Click to show ${isTokens ? "dollars" : "tokens"}.`;
+  }
 }
 
 function renderTotalSpend(): string {
@@ -813,7 +905,7 @@ function renderTotalSpend(): string {
         <div class="provider-head">
           <span class="provider-name">Total Spend</span>
         </div>
-        <p class="placeholder" style="margin:8px 0 4px">${note}</p>
+        <div class="card-panel"><p class="placeholder" style="margin:4px 0">${note}</p></div>
       </article>`;
   }
 
@@ -822,24 +914,28 @@ function renderTotalSpend(): string {
     .filter((e) => geo.has(e.s.id))
     .map((e) => {
       const g = geo.get(e.s.id)!;
-      return `<circle class="seg" data-pid="${e.s.id}" r="${DONUT_R}" cx="44" cy="44" fill="none" stroke="${spendColor(e.s.id)}" stroke-width="11"
-        style="stroke-dasharray:${g.len} ${DONUT_CIRC - g.len};stroke-dashoffset:${-g.offset}" transform="rotate(-90 44 44)"/>`;
+      const pop = donutPop(g);
+      const full = g.a1 - g.a0 >= TAU - 0.0001 ? ` data-full="1"` : "";
+      return `<path class="seg" data-pid="${e.s.id}"${full} fill-rule="evenodd"
+        d="${sectorPath(g.a0, g.a1)}" style="fill:${spendColor(e.s.id)};--tx:${pop.tx};--ty:${pop.ty}"/>`;
     })
     .join("");
-  const track = `<circle class="donut-track" r="${DONUT_R}" cx="44" cy="44" fill="none" stroke-width="11"/>`;
 
   const legend = legendHtml(entries);
 
   const tab = (id: SpendTab, label: string) =>
     `<button class="tab${spendTab === id ? " active" : ""}" data-tab="${id}">${label}</button>`;
 
-  const exact = `$${total.toFixed(2)} — computed locally from session logs`;
+  const isTokens = config.spendMetric === "tokens";
+  const exactVal = isTokens ? `${fmtTokens(total)} tokens` : `$${total.toFixed(2)}`;
+  const exact = `${exactVal} — computed locally from session logs. Click to show ${isTokens ? "dollars" : "tokens"}.`;
   const body = entries.length
     ? `
       <div class="donut-wrap" title="${escapeHtml(exact)}">
-        <svg width="88" height="88" viewBox="0 0 88 88">
-          ${track}${segments}
-          <text class="donut-total" x="44" y="49" text-anchor="middle" font-size="14" font-weight="600">${fmtMoney(total)}</text>
+        <svg width="96" height="96" viewBox="0 0 96 96">
+          ${segments}
+          <text class="donut-total" x="48" y="50" text-anchor="middle" font-size="14" font-weight="600">${isTokens ? fmtTokens(total) : fmtMoney(total)}</text>
+          <text class="donut-sub" x="48" y="62" text-anchor="middle" font-size="8">${isTokens ? "tokens" : "dollars"}</text>
         </svg>
         <div class="legend">${legend}</div>
       </div>`
@@ -854,10 +950,12 @@ function renderTotalSpend(): string {
         <span class="spacer"></span>
         <button class="share-btn" data-share="__total__" title="Copy card as image">⧉</button>
       </div>
-      <div class="tabs">
-        ${tab("today", "Today")}${tab("yesterday", "Yesterday")}${tab("last30", "30 Days")}
+      <div class="card-panel">
+        <div class="tabs">
+          ${tab("today", "Today")}${tab("yesterday", "Yesterday")}${tab("last30", "30 Days")}
+        </div>
+        ${body}
       </div>
-      ${body}
     </article>`;
 }
 
@@ -933,12 +1031,9 @@ async function shareCard(id: string): Promise<void> {
 
     const rect = el.getBoundingClientRect();
     const W = Math.ceil(rect.width);
-    const H = Math.ceil(rect.height);
     const S = 2;
     const PAD = 20; // frame around the card, like the Mac share cards
     const FOOT = 30; // logo + tagline row
-    const W2 = W + PAD * 2;
-    const H2 = H + PAD * 2 + FOOT;
 
     let css = "";
     for (const sheet of Array.from(document.styleSheets)) {
@@ -955,19 +1050,48 @@ async function shareCard(id: string): Promise<void> {
     const bodyStyle = getComputedStyle(document.body);
     css +=
       "*{animation:none!important;transition:none!important}" +
-      `#snap-root{font-family:${bodyStyle.fontFamily};font-size:${bodyStyle.fontSize};` +
-      `color:${bodyStyle.color};letter-spacing:${bodyStyle.letterSpacing};` +
-      `background:var(--background);padding:${PAD}px;box-sizing:border-box;` +
-      `width:${W2}px;height:${H2}px}` +
       "#snap-root .share-btn{display:none!important}" +
       `#snap-foot{display:flex;align-items:center;justify-content:center;gap:6px;` +
       `height:${FOOT}px;color:var(--muted-foreground);font-size:12px}` +
-      "#snap-foot img{width:14px;height:14px}";
+      "#snap-foot img{width:16px;height:16px;border-radius:4px}";
 
     const clone = el.cloneNode(true) as HTMLElement;
     clone.style.margin = "0";
     clone.style.width = `${W}px`;
     clone.style.boxSizing = "border-box";
+
+    // Shares are the card minus its interactive chrome (trend chart,
+    // spend rows, pace hints, links, carets, grips); .snap-card restores
+    // the card surface the popover no longer draws (cards sit flat on
+    // the background there, panels carry the chrome).
+    clone.classList.add("snap-card");
+    if (id !== "__total__") {
+      clone
+        .querySelectorAll(
+          ".share-btn, .card-caret, .quick-links, .metric.trend, [data-spend], .action-row, .pace-note, .tick, .drag-grip"
+        )
+        .forEach((n) => n.remove());
+    }
+
+    // The curated clone is shorter than the on-screen card (chrome
+    // removed), so measure IT — briefly attached offscreen — instead of
+    // sizing the canvas from the original and leaving dead space.
+    clone.style.position = "fixed";
+    clone.style.left = "-99999px";
+    clone.style.top = "0";
+    document.body.appendChild(clone);
+    const H = Math.ceil(clone.getBoundingClientRect().height);
+    clone.remove();
+    clone.style.position = "";
+    clone.style.left = "";
+    clone.style.top = "";
+    const W2 = W + PAD * 2;
+    const H2 = H + PAD * 2 + FOOT;
+    css +=
+      `#snap-root{font-family:${bodyStyle.fontFamily};font-size:${bodyStyle.fontSize};` +
+      `color:${bodyStyle.color};letter-spacing:${bodyStyle.letterSpacing};` +
+      `background:var(--background);padding:${PAD}px;box-sizing:border-box;` +
+      `width:${W2}px;height:${H2}px}`;
 
     // data-theme / data-density live on <html>; :root of the snapshot
     // document is the <svg>, so the attributes are mirrored there for the
@@ -984,7 +1108,7 @@ async function shareCard(id: string): Promise<void> {
       // literal "]]>" inside CSS would end the section early, so split it.
       `<style><![CDATA[${css.split("]]>").join("]]]]><![CDATA[>")}]]></style>` +
       new XMLSerializer().serializeToString(clone) +
-      `<div id="snap-foot"><img src="${paneLogo}" alt="" /><span>Monitor Your AI Subs with Pane</span></div>` +
+      `<div id="snap-foot"><img src="${paneIcon}" alt="" /><span>Monitor Your AI Subscriptions with Pane</span></div>` +
       `</div></foreignObject></svg>`;
 
     const img = new Image();
@@ -2163,6 +2287,86 @@ window.addEventListener("DOMContentLoaded", () => {
   });
 
   const providersEl = document.querySelector<HTMLElement>("#providers")!;
+  // The donut center toggles what the card meters: dollars ⇄ raw tokens.
+  // Left or right click both work; the choice persists.
+  const toggleSpendMetric = () => {
+    config.spendMetric = config.spendMetric === "tokens" ? "cost" : "tokens";
+    void patchConfig({ spendMetric: config.spendMetric });
+    renderAll();
+  };
+  providersEl.addEventListener("contextmenu", (e) => {
+    if ((e.target as Element).closest?.(".donut-wrap")) {
+      e.preventDefault();
+      toggleSpendMetric();
+    }
+  });
+
+  // Donut hover: pointing at a segment or its legend row swells the arc
+  // and dims the others, Mac-style. [data-pid] links the two.
+  const setDonutHot = (id: string | null) => {
+    document.querySelectorAll<HTMLElement>(".total-spend [data-pid]").forEach((el) => {
+      el.classList.toggle("hot", id !== null && el.dataset.pid === id);
+    });
+  };
+  providersEl.addEventListener("mouseover", (e) => {
+    const t = (e.target as Element).closest?.<HTMLElement>(".total-spend [data-pid]");
+    if (t) setDonutHot(t.dataset.pid ?? null);
+  });
+  providersEl.addEventListener("mouseout", (e) => {
+    if ((e.target as Element).closest?.(".total-spend [data-pid]")) setDonutHot(null);
+  });
+
+  // In-popover reordering: drag a card by the grip in its header. The new
+  // order saves to the same layout Customize edits, so both stay in sync.
+  let dragCard: HTMLElement | null = null;
+  let armedCard: HTMLElement | null = null;
+  providersEl.addEventListener("mousedown", (e) => {
+    const grip = (e.target as HTMLElement).closest(".drag-grip");
+    const card = grip?.closest<HTMLElement>("article[data-provider]");
+    if (card) {
+      card.draggable = true;
+      armedCard = card;
+    }
+  });
+  // A grip press that never turns into a drag would otherwise leave the
+  // card grab-anywhere; disarm on release when no drag started.
+  document.addEventListener("mouseup", () => {
+    if (armedCard && !dragCard) armedCard.draggable = false;
+    armedCard = null;
+  });
+  providersEl.addEventListener("dragstart", (e) => {
+    dragCard = (e.target as HTMLElement).closest?.("article[data-provider]") ?? null;
+    dragCard?.classList.add("dragging");
+  });
+  providersEl.addEventListener("dragover", (e) => {
+    if (!dragCard) return;
+    e.preventDefault();
+    const over = (e.target as HTMLElement).closest?.<HTMLElement>("article[data-provider]");
+    if (!over || over === dragCard) return;
+    const r = over.getBoundingClientRect();
+    const before = e.clientY < r.top + r.height / 2;
+    over.parentElement!.insertBefore(dragCard, before ? over : over.nextElementSibling);
+  });
+  const endCardDrag = () => {
+    if (!dragCard) return;
+    dragCard.classList.remove("dragging");
+    dragCard.draggable = false;
+    dragCard = null;
+    ensureLayout();
+    const domIds = Array.from(
+      providersEl.querySelectorAll<HTMLElement>("article[data-provider]")
+    ).map((a) => a.dataset.provider!);
+    const L = config.layout!;
+    L.providerOrder = [...domIds, ...L.providerOrder.filter((id) => !domIds.includes(id))];
+    void patchConfig({ layout: L });
+    updateTrailActive();
+  };
+  providersEl.addEventListener("drop", (e) => {
+    e.preventDefault();
+    endCardDrag();
+  });
+  providersEl.addEventListener("dragend", endCardDrag);
+
   providersEl.addEventListener("click", (e) => {
     const target = e.target as HTMLElement;
 
@@ -2176,6 +2380,10 @@ window.addEventListener("DOMContentLoaded", () => {
     const shareBtn = target.closest<HTMLElement>("[data-share]");
     if (shareBtn) {
       void shareCard(shareBtn.dataset.share!);
+      return;
+    }
+    if (target.closest(".donut-wrap")) {
+      toggleSpendMetric();
       return;
     }
     if (target.closest("[data-welcome-close]")) {
