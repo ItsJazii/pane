@@ -193,6 +193,6 @@ mod tests {
             (r.status().as_u16(), r.text().await.unwrap_or_default())
         });
         eprintln!("kilo probe: HTTP {status}");
-        eprintln!("{}", &body[..body.len().min(2000)]);
+        eprintln!("{}", body.chars().take(2000).collect::<String>());
     }
 }
