@@ -442,45 +442,80 @@ fn codex() -> ProviderSpend {
     build_spend("codex", "Codex", all)
 }
 
-/// Grok CLI's unified.jsonl — shape is undocumented, so parse tolerantly.
+/// Grok CLI appends one global log at ~/.grok/logs/unified.jsonl (or under
+/// $GROK_HOME). Token counts ride on `shell.turn.inference_done` lines
+/// (prompt/completion/reasoning/cached_prompt); those rows carry no model
+/// id, so the active model is tracked per CLI process from the model-change
+/// events the CLI also logs — the same scheme the Mac scanner uses.
 fn grok() -> ProviderSpend {
-    let path = dirs::home_dir()
-        .unwrap_or_default()
-        .join(".grok")
-        .join("logs")
-        .join("unified.jsonl");
+    let root = std::env::var("GROK_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| dirs::home_dir().unwrap_or_default().join(".grok"));
+    let path = root.join("logs").join("unified.jsonl");
     let mut all = FileData::default();
     if path.exists() {
+        let mut model_by_pid: HashMap<i64, String> = HashMap::new();
         let data = file_days(&path, &mut |line, data| {
-            if !line.contains("tokens") && !line.contains("usage") {
+            if !line.contains("inference_done") && !line.contains("model") {
                 return;
             }
             let Ok(v) = serde_json::from_str::<Value>(line) else { return };
-            let usage = v
-                .get("usage")
-                .or_else(|| v.pointer("/response/usage"))
-                .cloned()
-                .unwrap_or(Value::Null);
-            let num = |keys: &[&str]| {
-                keys.iter()
-                    .find_map(|k| usage.get(*k).and_then(Value::as_f64))
-                    .unwrap_or(0.0)
+            let Some(msg) = v.get("msg").and_then(Value::as_str) else { return };
+            let ctx = v.get("ctx").cloned().unwrap_or(Value::Null);
+            let pid = v.get("pid").and_then(Value::as_i64);
+            let model_field = match msg {
+                "model changed" => ctx.get("model"),
+                "model catalog: notifying clients" => ctx.get("current_model_id"),
+                "backend_search: model switch" => ctx
+                    .get("model")
+                    .or_else(|| ctx.get("current_model_id"))
+                    .or_else(|| ctx.get("model_id")),
+                "subagent model resolved" => ctx.get("model_id").or_else(|| ctx.get("model")),
+                _ => None,
             };
-            let input = num(&["prompt_tokens", "input_tokens"]);
-            let output = num(&["completion_tokens", "output_tokens"]);
-            let tokens = input + output;
+            if let Some(m) = model_field.and_then(Value::as_str) {
+                let m = m.trim();
+                if !m.is_empty() {
+                    if let Some(pid) = pid {
+                        model_by_pid.insert(pid, m.to_string());
+                    }
+                }
+                return;
+            }
+            if msg != "shell.turn.inference_done" {
+                return;
+            }
+            let num = |k: &str| ctx.get(k).and_then(Value::as_f64);
+            let Some(prompt) = num("prompt_tokens") else { return };
+            let Some(ts) = parse_ts(v.get("ts")) else { return };
+            let output = num("completion_tokens").unwrap_or(0.0) + num("reasoning_tokens").unwrap_or(0.0);
+            // cached_prompt_tokens is a subset of prompt_tokens, so the total
+            // counts the prompt once.
+            let cached = num("cached_prompt_tokens").unwrap_or(0.0).min(prompt);
+            let tokens = prompt + output;
             if tokens <= 0.0 {
                 return;
             }
-            let ts = parse_ts(v.get("timestamp"))
-                .or_else(|| parse_ts(v.get("time")))
-                .or_else(|| parse_ts(v.get("created_at")));
-            let Some(ts) = ts else { return };
-            let model = v.get("model").and_then(Value::as_str).unwrap_or("Unattributed");
-            let (pi, po) = pricing::lookup(model)
-                .map(|p| (p.input, p.output))
-                .unwrap_or_else(|| grok_price(model));
-            add_event(data, ts, model, (input * pi + output * po) / 1e6, tokens);
+            // Token rows carry no model id — attribute via the row's process;
+            // rows with no attributable model are excluded, like the Mac.
+            let Some(model) = pid.and_then(|p| model_by_pid.get(&p)).cloned() else { return };
+            let rate = pricing::lookup(&model).map(|p| (p.input, p.output, p.cache_read));
+            let (pi, po, pc) = match rate {
+                Some(r) => r,
+                // Static backstop only for recognizably Grok-family models
+                // (catalog down); it has no cache rate, so cached tokens are
+                // conservatively priced as fresh input there.
+                None if model.to_lowercase().contains("grok") => {
+                    let (i, o) = grok_price(&model);
+                    (i, o, i)
+                }
+                None => {
+                    note_unpriced(data, &model);
+                    return;
+                }
+            };
+            let cost = ((prompt - cached) * pi + cached * pc + output * po) / 1e6;
+            add_event(data, ts, &model, cost, tokens);
         });
         merge_data(&mut all, data);
     }
