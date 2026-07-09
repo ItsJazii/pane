@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.6 — 2026-07-09
 
 ### Fixed
 - **Cursor spend tiles work again** — Cursor's usage-events export now
