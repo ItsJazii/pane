@@ -10,7 +10,7 @@ reset? What did today actually cost me?*
 
 **[pane.jazii.dev](https://pane.jazii.dev)** · [Install](#install) · [How it works](#how-it-works) · [Providers](#providers-18-and-counting) · [Features](#features) · [Privacy](#privacy--security) · [Credits](#credits)
 
-<img src="docs/screenshot.png" width="380" alt="Pane in dark mode — Total Spend donut, Claude and Codex usage cards with pace bars" />&nbsp;&nbsp;<img src="docs/screenshot-light.png" width="380" alt="Pane in light mode — same popover with the light theme" />
+<img src="docs/promo.png" width="760" alt="Pane — track all your AI subscription limits in one tray app: Total Spend donut with per-provider slices, usage cards with pace bars" />
 
 </div>
 
