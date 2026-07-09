@@ -60,6 +60,22 @@ fn store() -> &'static Mutex<Store> {
     S.get_or_init(Default::default)
 }
 
+/// Set when the spend engine met models no catalog prices — sources are
+/// then retried hourly instead of daily, so a newly shipped model (e.g. a
+/// fresh Cursor slug) prices as soon as the supplement learns it.
+static UNPRICED_HINT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Bumped whenever a source ingests a new document; spend's per-file cache
+/// keys on it so already-parsed logs re-price under the new catalog.
+static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn note_unpriced() {
+    UNPRICED_HINT.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn generation() -> u64 {
+    GENERATION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn dir() -> PathBuf {
     providers::config_dir().join("pricing")
 }
@@ -223,11 +239,16 @@ pub fn ensure_fresh() {
 
     let mut state = load_state();
     let now = now_ms();
+    let refresh_ms = if UNPRICED_HINT.load(std::sync::atomic::Ordering::Relaxed) {
+        3_600_000 // unpriced models seen: look for catalog updates hourly
+    } else {
+        REFRESH_MS
+    };
     for (source, url) in SOURCES {
         let entry = state.get(source).cloned().unwrap_or_else(|| json!({}));
         let fetched_at = entry.get("fetchedAt").and_then(Value::as_i64).unwrap_or(0);
         let failed_at = entry.get("failedAt").and_then(Value::as_i64).unwrap_or(0);
-        let due = now - fetched_at > REFRESH_MS && now - failed_at > RETRY_MS;
+        let due = now - fetched_at > refresh_ms && now - failed_at > RETRY_MS;
         if !due {
             continue;
         }
@@ -266,6 +287,8 @@ pub fn ensure_fresh() {
                     let _ = std::fs::write(dir().join(format!("{source}.json")), &body);
                     ingest(&mut store().lock().unwrap(), source, &doc);
                     state[source] = json!({ "etag": new_etag, "fetchedAt": now, "failedAt": 0 });
+                    GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    UNPRICED_HINT.store(false, std::sync::atomic::Ordering::Relaxed);
                     eprintln!("[pane] pricing: refreshed {source}");
                 }
                 Err(e) => {
