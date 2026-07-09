@@ -319,12 +319,18 @@ pub fn lookup(model: &str) -> Option<Price> {
     if let Some(hit) = s.memo.get(model) {
         return *hit;
     }
-    let result = resolve(&s, model);
+    let result = resolve(&s, model, 0);
     s.memo.insert(model.to_string(), result);
     result
 }
 
-fn resolve(s: &Store, model: &str) -> Option<Price> {
+fn resolve(s: &Store, model: &str, depth: u8) -> Option<Price> {
+    // Alias rules come from a third-party URL; a crafted rule set could
+    // otherwise bounce a name between an alias and the -max strip below
+    // forever ("foo" → "foo-max" → "foo" → …) and overflow the stack.
+    if depth >= 4 {
+        return None;
+    }
     let canonical = s
         .alias_rules
         .iter()
@@ -360,7 +366,16 @@ fn resolve(s: &Store, model: &str) -> Option<Price> {
     {
         return Some(p);
     }
-    s.modelsdev.get(&canonical).copied()
+    if let Some(p) = s.modelsdev.get(&canonical) {
+        return Some(*p);
+    }
+    // Cursor's Max-mode slugs ("gpt-5.6-sol-max") bill token-based at the
+    // base model's rates, and no catalog carries the -max name itself. Only
+    // when the whole chain above misses does the suffix get stripped and
+    // the base model resolved — a real -max entry in any source wins.
+    canonical
+        .strip_suffix("-max")
+        .and_then(|base| resolve(s, base, depth + 1))
 }
 
 #[cfg(test)]
