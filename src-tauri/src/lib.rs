@@ -79,6 +79,7 @@ fn config_with_defaults(mut cfg: Value) -> Value {
     obj.entry("notifyCuttingClose").or_insert(json!(true));
     obj.entry("notifyWillRunOut").or_insert(json!(true));
     obj.entry("spendTab").or_insert(json!("today"));
+    obj.entry("spendMetric").or_insert(json!("cost"));
     obj.entry("showUsed").or_insert(json!(false));
     obj.entry("resetExact").or_insert(json!(false));
     obj.entry("timeFormat").or_insert(json!("auto"));
@@ -114,6 +115,7 @@ const CONFIG_KEYS: &[&str] = &[
     "notifyAlmostOut",
     "notifyCuttingClose",
     "notifyWillRunOut",
+    "spendMetric",
     "spendTab",
     "showUsed",
     "resetExact",

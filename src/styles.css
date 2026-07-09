@@ -19,6 +19,10 @@
   --accent: #27272a;
   --destructive: #ef4444;
   --chart-blue: #3b82f6;
+  /* Cursor's brand black flips to white on the dark theme (like the Mac
+     ring and our recolored Cursor mark) — pure black vanishes on a dark
+     card. */
+  --spend-cursor: #ececef;
   --radius: 10px;
 
   font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
@@ -40,6 +44,7 @@
   --primary: #18181b;
   --primary-foreground: #fafafa;
   --accent: #f4f4f5;
+  --spend-cursor: #18181b;
   color-scheme: light;
 }
 
@@ -48,6 +53,9 @@
   font-size: 13px;
 }
 :root[data-density="compact"] .provider {
+  padding: 5px 2px 2px;
+}
+:root[data-density="compact"] .card-panel {
   padding: 8px 12px;
 }
 :root[data-density="compact"] .metric {
@@ -502,22 +510,67 @@ select:focus-visible {
   display: none;
 }
 
+/* Cards: header floats on the background, the metrics live in an inset
+   panel below it (the Mac popover composition). Customize keeps the old
+   solid-card look via .customize-block overrides further down. */
 .provider {
+  background: transparent;
+  border: none;
+  padding: 7px 3px 3px;
+}
+
+.card-panel {
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: 14px;
   padding: 11px 13px;
   transition: border-color 0.18s ease, box-shadow 0.18s ease;
 }
 
-.provider:hover {
+.provider:hover .card-panel {
   border-color: #3f3f46;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
 }
 
-:root[data-theme="light"] .provider:hover {
+:root[data-theme="light"] .provider:hover .card-panel {
   border-color: #d4d4d8;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.07);
+}
+
+.customize-block {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 11px 13px;
+}
+
+/* Drag grip: appears on card hover, left of the provider name. */
+.drag-grip {
+  opacity: 0;
+  cursor: grab;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  margin-right: 1px;
+  user-select: none;
+  transition: opacity 0.15s ease;
+}
+.provider:hover .drag-grip {
+  opacity: 0.8;
+}
+.provider.dragging {
+  opacity: 0.45;
+}
+
+/* Usage Trend as a compact sparkline row: label left, chart right. */
+.metric.trend {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.metric.trend .trend-chart {
+  flex: 1;
+  min-width: 0;
+  height: 22px;
 }
 
 .provider-head {
@@ -1296,10 +1349,6 @@ body.drawer-open #drawer {
 }
 
 /* Chart colors routed through theme variables so light mode reads right. */
-.donut-track {
-  stroke: var(--muted);
-}
-
 .donut-total {
   fill: var(--foreground);
 }
@@ -1363,12 +1412,14 @@ body.drawer-open #drawer {
   cursor: default;
 }
 
-/* Donut arcs morph between spend tabs. */
-.total-spend circle.seg {
+/* Donut wedges morph between spend tabs (`d` tweens in Chromium when the
+   path structure matches) and pop outward on hover. */
+.total-spend path.seg {
   transition:
-    stroke-dasharray 0.5s cubic-bezier(0.16, 1, 0.3, 1),
-    stroke-dashoffset 0.5s cubic-bezier(0.16, 1, 0.3, 1),
-    opacity 0.3s ease;
+    d 0.5s cubic-bezier(0.16, 1, 0.3, 1),
+    transform 0.18s ease,
+    opacity 0.18s ease;
+  cursor: pointer;
 }
 
 /* First-run welcome card. */
@@ -1666,4 +1717,46 @@ body.no-glass .main-col footer,
 body.no-glass .glass-bar,
 body.no-glass .cust-dock {
   background: var(--background) !important;
+}
+
+/* Share-card composition (used only inside ⧉ snapshots): metrics live in
+   an inset rounded panel under the header, like the Mac share cards. */
+.snap-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 10px 12px 12px;
+}
+.snap-card .card-panel {
+  background: rgba(0, 0, 0, 0.22);
+  border: none;
+  padding: 14px 16px 12px;
+}
+:root[data-theme="light"] .snap-card .card-panel {
+  background: rgba(0, 0, 0, 0.05);
+}
+.snap-card .metric {
+  margin: 12px 0;
+}
+
+/* Donut hover: the pointed-at wedge slides outward along its bisector
+   (--tx/--ty precomputed per segment), the rest fade back; the matching
+   legend row lights up. [data-pid] pairs wedge and row. */
+.total-spend path.seg.hot {
+  transform: translate(var(--tx, 0px), var(--ty, 0px));
+}
+.total-spend svg:has(.hot) path.seg:not(.hot) {
+  opacity: 0.45;
+}
+.total-spend .legend-row {
+  border-radius: 6px;
+  padding: 1px 5px;
+  margin: 0 -5px;
+  transition: background 0.15s ease;
+}
+.total-spend .legend-row.hot {
+  background: var(--accent);
+}
+.donut-sub {
+  fill: var(--muted-foreground);
 }
