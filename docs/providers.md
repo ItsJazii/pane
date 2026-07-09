@@ -70,9 +70,13 @@ Ground rules that apply to every provider:
 
 ## Devin (Devin CLI)
 
-- **Reads:** `%APPDATA%\devin\credentials.toml`.
+- **Reads:** `%APPDATA%\devin\credentials.toml`;
+  `%APPDATA%\devin\cli\sessions.db` (+ WAL/SHM sidecars, copied before
+  reading) for local spend.
 - **Calls:** Devin's `GetUserStatus` RPC.
-- **Shows:** weekly/daily quota, extra balance, plan.
+- **Shows:** weekly/daily quota, extra balance, plan; local spend from
+  Devin CLI sessions (cloud Devin sessions bill ACUs and keep no local
+  logs, so they can't be priced).
 
 ## MiniMax
 
