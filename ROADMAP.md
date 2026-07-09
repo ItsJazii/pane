@@ -1,11 +1,16 @@
 # Roadmap — full Mac parity (and beyond)
 
-**Status (v0.4.0, 2026-07-07): every wave below is shipped.** Pane has
-full feature parity with the macOS original (re-audited at its HEAD
-4d75562) plus 18 providers, signed auto-updates, and Codex reset-credit
-redemption. What comes next is demand-driven — open an issue for the
-provider or feature you're missing. Candidates on deck: Windsurf and
-JetBrains AI providers, a Re-detect Tools button, tray "Bars" icon
+**Status (v0.4.6+, 2026-07-10): every wave below is shipped, and the
+post-launch releases keep going.** Pane has full feature parity with the
+macOS original plus 18 providers, signed auto-updates published by CI,
+Codex reset-credit redemption, update-check-on-open with a one-click
+footer button, live model pricing that re-prices within the hour when
+new models appear, modern Cursor plan support, and a Mac-parity design
+pass (inset card composition, wedge spend donut with dollars ⇄ tokens,
+in-popover drag reorder, curated share cards). What comes next is
+demand-driven — open an issue for the provider or feature you're
+missing. Candidates on deck: Windsurf and JetBrains AI providers,
+long-context pricing tiers, a Re-detect Tools button, tray "Bars" icon
 style, code signing.
 
 ---
@@ -55,7 +60,7 @@ wave ends with a shipped, installed build.
 - [x] Stars (≤2 per provider) drive the tray strip, replacing the plain
       trayProviders picker; strip follows customize order.
 - [x] Per-provider Reset and Reset All (with confirm).
-- [ ] Stretch: Ctrl+Z undo for customization steps. (deferred)
+- [x] Stretch: Ctrl+Z undo for customization steps.
 
 ## Wave 6 — Platform features
 - [x] Provider quick links (Status / Console / Dashboard buttons per card).
@@ -77,11 +82,11 @@ wave ends with a shipped, installed build.
 
 ## Wave 8 — Ship v0.2.0
 - [x] Version bump, changelog, rebuild installers, silent reinstall.
-- [ ] (Parked until user says go: GitHub release, auto-updater, winget.)
+- [x] GitHub release, auto-updater, winget submission (in review).
 
-All waves shipped 2026-07-07 as v0.2.0. Remaining backlog: Ctrl+Z undo in
-Customize, GitHub/winget publishing, OpenCode official balance API when it
-ships, Cursor server-side spend.
+All waves shipped 2026-07-07 as v0.2.0; public launch followed as v0.4.0.
+Remaining backlog: OpenCode official balance API when it ships,
+long-context pricing tiers.
 
 ## Deliberately not ported
 - Anonymous telemetry — ours stays zero-telemetry.

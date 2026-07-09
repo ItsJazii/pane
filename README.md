@@ -61,7 +61,7 @@ Silent install (for scripts): `Pane_x.y.z_x64-setup.exe /S`
 
 ### winget *(pending review)*
 
-Pane 0.4.0 is [submitted to the winget community repo](https://github.com/microsoft/winget-pkgs/pull/399096).
+Pane is [submitted to the winget community repo](https://github.com/microsoft/winget-pkgs/pull/399096).
 Once Microsoft's review merges it, this works:
 
 ```
@@ -114,9 +114,11 @@ reset window ("Almost out", "Will run out").
 **4. Counting the money.** Your CLIs already log every request locally.
 Pane scans those logs (Claude, Codex, Grok, OpenCode, Cursor CSV), prices
 each request with live per-model rates (LiteLLM / models.dev, refreshed
-daily), and draws the Today / Yesterday / 30-day donut with a per-model
-breakdown. On a flat-rate plan this shows what your usage *would* cost at
-API prices — the best ad for your subscription you'll ever see. Events for
+daily — hourly while unknown models are around, so brand-new models price
+within the hour), and draws the Today / Yesterday / 30-day donut with a
+per-model breakdown. Click the ring to flip between dollars and tokens.
+On a flat-rate plan this shows what your usage *would* cost at API
+prices — the best ad for your subscription you'll ever see. Events for
 models without a known price are excluded and flagged, never guessed.
 
 **5. Staying local.** All of the above happens on your machine. There is no
@@ -158,7 +160,9 @@ whatever the community asks for loudest.
 - **Pace projections** — colored bars and "will run out" warnings based on
   your burn rate within each reset window, plus optional Windows toasts.
 - **Local spend** — Today / Yesterday / 30 Days donut with per-model
-  breakdown and a 30-day trend, priced with live model rates.
+  breakdown and a 30-day trend, priced with live model rates. Hover a
+  slice and it pops out with its legend row; click the ring to flip
+  dollars ⇄ tokens.
 - **Codex reset credits** — see each banked credit's exact expiry and
   redeem it with one click.
 - **Signed auto-updates** — Pane checks for updates every time you open
@@ -167,13 +171,15 @@ whatever the community asks for loudest.
   verifies the signature, and restarts.
 - **Live tray numbers** — star up to two metrics per provider and they
   render as logo + percentage pairs directly in the tray.
-- **Customize** (☰) — reorder providers and metrics by drag, hide rows,
-  tuck rarely-needed ones behind an "On Demand" caret. Ctrl+Z undoes.
+- **Customize** — drag any card by its grip right in the popover to
+  reorder, or open the Customize screen (☰) to reorder metrics, hide
+  rows, and tuck rarely-needed ones behind an "On Demand" caret. Ctrl+Z
+  undoes.
 - **Liquid glass UI** — real SDF lens refraction on the auto-hiding
   sidebar and glass bars, magnetic minimap trail, circular day/night wipe.
-- **Share cards** — hover a card, click ⧉, and paste anywhere: a
-  pixel-true snapshot of the card exactly as it looks on screen, framed
-  with the Pane logo.
+- **Share cards** — hover a card, click ⧉, and paste anywhere: a clean
+  composition of the card (interactive chrome stripped, just the
+  numbers), framed with the Pane icon and tagline.
 - **Quick links** — Status / Dashboard shortcuts on every card.
 - **[Local HTTP API](docs/local-http-api.md)** — `GET
   http://127.0.0.1:6736/v1/usage` for scripts, Rainmeter widgets, stream
