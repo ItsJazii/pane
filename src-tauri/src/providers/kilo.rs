@@ -98,9 +98,22 @@ async fn fetch() -> Result<Snapshot, String> {
         }
     }
 
-    // [1] kiloPass.getState — subscription window in USD.
+    // [1] kiloPass.getState — subscription window in USD. `subscription`
+    // is null for accounts without a Pass; some responses put the fields
+    // at the top level instead (only trusted when they look the part).
+    let no_pass = Value::Null;
     if let Some(pass) = batch.get(1).and_then(unwrap_trpc) {
-        let sub = pass.get("subscription").unwrap_or(pass);
+        let sub = match pass.get("subscription") {
+            Some(s) if s.is_object() => s,
+            Some(_) => &no_pass, // explicit null: no Kilo Pass
+            None if pass.get("currentPeriodUsageUsd").is_some()
+                || pass.get("currentPeriodBaseCreditsUsd").is_some()
+                || pass.get("tier").is_some() =>
+            {
+                pass
+            }
+            None => &no_pass,
+        };
         let used = sub.get("currentPeriodUsageUsd").and_then(Value::as_f64);
         let base = sub.get("currentPeriodBaseCreditsUsd").and_then(Value::as_f64).unwrap_or(0.0);
         let bonus = sub.get("currentPeriodBonusCreditsUsd").and_then(Value::as_f64).unwrap_or(0.0);
@@ -135,6 +148,20 @@ async fn fetch() -> Result<Snapshot, String> {
         }
     }
 
+    // A fresh account answers both procedures with empty data (no credit
+    // blocks, subscription null). That's a zero state, not an error.
+    if metrics.is_empty() {
+        if let Some(blocks) = batch.first().and_then(unwrap_trpc).filter(|b| b.is_object()) {
+            let bal =
+                blocks.get("totalBalance_mUsd").and_then(Value::as_f64).unwrap_or(0.0) / 1e6;
+            let value = if bal > 0.0 {
+                format!("${bal:.2} balance")
+            } else {
+                "None yet — top up on the dashboard".to_string()
+            };
+            metrics.push(Metric::text("Credits", value));
+        }
+    }
     if metrics.is_empty() {
         return Err("no credit data in response".into());
     }
@@ -144,4 +171,28 @@ async fn fetch() -> Result<Snapshot, String> {
 /// Just enough URL-encoding for the fixed tRPC input literal.
 fn urlencoding_min(s: &str) -> String {
     s.replace('{', "%7B").replace('}', "%7D").replace('"', "%22").replace(':', "%3A").replace(',', "%2C")
+}
+
+#[cfg(test)]
+mod tests {
+    /// Live probe against this machine's real Kilo session: prints the raw
+    /// tRPC response (status + first 2000 chars) so shape changes can be
+    /// diagnosed. Run: cargo test --lib kilo -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn live_probe() {
+        let key = super::stored_api_key("kilo", &["KILO_API_KEY"])
+            .or_else(super::cli_token)
+            .expect("no kilo credentials on this machine");
+        let input = super::urlencoding_min("{\"0\":{\"json\":null},\"1\":{\"json\":null}}");
+        let url = format!(
+            "https://app.kilo.ai/api/trpc/user.getCreditBlocks,kiloPass.getState?batch=1&input={input}"
+        );
+        let (status, body) = tauri::async_runtime::block_on(async {
+            let r = super::http().get(&url).bearer_auth(&key).send().await.expect("request");
+            (r.status().as_u16(), r.text().await.unwrap_or_default())
+        });
+        eprintln!("kilo probe: HTTP {status}");
+        eprintln!("{}", body.chars().take(2000).collect::<String>());
+    }
 }
