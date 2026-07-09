@@ -2319,10 +2319,20 @@ window.addEventListener("DOMContentLoaded", () => {
   // In-popover reordering: drag a card by the grip in its header. The new
   // order saves to the same layout Customize edits, so both stay in sync.
   let dragCard: HTMLElement | null = null;
+  let armedCard: HTMLElement | null = null;
   providersEl.addEventListener("mousedown", (e) => {
     const grip = (e.target as HTMLElement).closest(".drag-grip");
     const card = grip?.closest<HTMLElement>("article[data-provider]");
-    if (card) card.draggable = true;
+    if (card) {
+      card.draggable = true;
+      armedCard = card;
+    }
+  });
+  // A grip press that never turns into a drag would otherwise leave the
+  // card grab-anywhere; disarm on release when no drag started.
+  document.addEventListener("mouseup", () => {
+    if (armedCard && !dragCard) armedCard.draggable = false;
+    armedCard = null;
   });
   providersEl.addEventListener("dragstart", (e) => {
     dragCard = (e.target as HTMLElement).closest?.("article[data-provider]") ?? null;
