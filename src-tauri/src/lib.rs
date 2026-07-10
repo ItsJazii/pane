@@ -566,6 +566,11 @@ async fn fetch_usage(app: tauri::AppHandle) -> Vec<providers::Snapshot> {
             snap: providers::Snapshot,
         }
         const MAX_STALE_MS: i64 = 24 * 60 * 60 * 1000;
+        // One failed cycle isn't "Outdated": vendors hiccup routinely, and
+        // at short refresh intervals the tag was flashing on every blip.
+        // Data younger than the grace window serves silently; the tag (and
+        // the error on hover) appears once staleness is real.
+        const STALE_GRACE_MS: i64 = 3 * 60 * 1000;
 
         static LAST_OK: OnceLock<Mutex<HashMap<String, CachedSnap>>> = OnceLock::new();
         let cache_file = providers::config_dir().join("last_snapshots.json");
@@ -588,11 +593,14 @@ async fn fetch_usage(app: tauri::AppHandle) -> Vec<providers::Snapshot> {
                     dirty = true;
                 } else if s.status == "error" {
                     if let Some(previous) = map.get(&s.id) {
-                        if now_ms - previous.at <= MAX_STALE_MS {
+                        let age = now_ms - previous.at;
+                        if age <= MAX_STALE_MS {
                             let warning = s.error.clone();
                             *s = previous.snap.clone();
-                            s.stale = true;
-                            s.warning = warning;
+                            if age > STALE_GRACE_MS {
+                                s.stale = true;
+                                s.warning = warning;
+                            }
                         }
                     }
                 }
