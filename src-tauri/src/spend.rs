@@ -588,12 +588,13 @@ fn devin_model(raw: &str) -> String {
     }
     if let Some(rest) = base.strip_prefix("gpt-") {
         let parts: Vec<&str> = rest.splitn(3, '-').collect();
-        if parts.len() >= 2
-            && !parts[0].is_empty()
-            && !parts[1].is_empty()
-            && parts[0].chars().all(|c| c.is_ascii_digit())
-            && parts[1].chars().all(|c| c.is_ascii_digit())
-        {
+        // Version components are 1–2 digits ("5-6" is 5.6); OpenAI's
+        // date-stamped snapshots ("4-0125-preview") use 4-digit segments
+        // and must pass through untouched.
+        let is_ver = |s: &str| {
+            !s.is_empty() && s.len() <= 2 && s.chars().all(|c| c.is_ascii_digit())
+        };
+        if parts.len() >= 2 && is_ver(parts[0]) && is_ver(parts[1]) {
             let tail = parts.get(2).map(|t| format!("-{t}")).unwrap_or_default();
             return format!("gpt-{}.{}{}", parts[0], parts[1], tail);
         }
