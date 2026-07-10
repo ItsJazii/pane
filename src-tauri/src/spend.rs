@@ -577,7 +577,7 @@ fn devin() -> ProviderSpend {
 /// reordered.
 fn devin_model(raw: &str) -> String {
     let mut base = raw;
-    for suffix in ["-low", "-medium", "-high", "-xhigh"] {
+    for suffix in ["-xhigh", "-light", "-low", "-medium", "-high"] {
         if let Some(b) = raw.strip_suffix(suffix) {
             base = b;
             break;

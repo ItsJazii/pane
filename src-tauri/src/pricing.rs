@@ -349,7 +349,22 @@ fn resolve(s: &Store, model: &str, depth: u8) -> Option<Price> {
     // composed slugs like "gpt-5.6-sol-max-fast" reach the -max fallback
     // and alias/fuzzy matching too.
     if let Some(base) = canonical.strip_suffix("-fast") {
-        let m = s.fast_multipliers.get(base).copied().unwrap_or(2.0);
+        // Multipliers are keyed by the plain model name; peel effort/mode
+        // tokens off composed bases ("gpt-5.6-sol-max" → "gpt-5.6-sol") so
+        // "sol-max-fast" gets sol's real multiplier, not the default.
+        let mut mkey = base;
+        let m = loop {
+            if let Some(m) = s.fast_multipliers.get(mkey) {
+                break *m;
+            }
+            match ["-xhigh", "-light", "-low", "-medium", "-high", "-max", "-ultra"]
+                .iter()
+                .find_map(|suf| mkey.strip_suffix(suf))
+            {
+                Some(next) => mkey = next,
+                None => break 2.0,
+            }
+        };
         if let Some(p) = resolve(s, base, depth + 1) {
             return Some(Price {
                 input: p.input * m,
@@ -372,13 +387,19 @@ fn resolve(s: &Store, model: &str, depth: u8) -> Option<Price> {
     if let Some(p) = s.modelsdev.get(&canonical) {
         return Some(*p);
     }
-    // Cursor's Max-mode slugs ("gpt-5.6-sol-max") bill token-based at the
-    // base model's rates, and no catalog carries the -max name itself. Only
-    // when the whole chain above misses does the suffix get stripped and
-    // the base model resolved — a real -max entry in any source wins.
-    canonical
-        .strip_suffix("-max")
-        .and_then(|base| resolve(s, base, depth + 1))
+    // Slug tails no catalog carries under their own name, billed at the
+    // base model's per-token rates: reasoning-effort tiers (they change how
+    // many tokens burn, not the unit price) and Cursor's Max/Ultra modes
+    // (token-based at model rates). Only when the whole chain above misses
+    // does one trailing token get peeled and the rest rerun — compositions
+    // unwind right to left ("…-max-xhigh" → "…-max" → base), the depth cap
+    // bounds it, and a real entry for any tail in any source always wins.
+    for suffix in ["-xhigh", "-light", "-low", "-medium", "-high", "-max", "-ultra"] {
+        if let Some(base) = canonical.strip_suffix(suffix) {
+            return resolve(s, base, depth + 1);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -389,14 +410,27 @@ mod tests {
     #[ignore]
     fn live_probe() {
         super::ensure_fresh();
-        for model in [
-            "claude-opus-4-8",
-            "gpt-5.1-codex-max-xhigh",
-            "composer-2.5",
-            "claude-4.5-haiku-thinking",
-            "gpt-5",
-            "some-unknown-model-xyz",
-        ] {
+        let mut matrix: Vec<String> = vec![
+            "claude-opus-4-8".into(),
+            "gpt-5.1-codex-max-xhigh".into(),
+            "composer-2.5".into(),
+            "claude-4.5-haiku-thinking".into(),
+            "gpt-5".into(),
+            "some-unknown-model-xyz".into(),
+        ];
+        // The full GPT-5.6 family surface Cursor/Devin can emit: every
+        // effort tier, Max/Ultra modes, fast tier, and their compositions.
+        for base in ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"] {
+            matrix.push(base.to_string());
+            for suffix in [
+                "-light", "-low", "-medium", "-high", "-xhigh", "-max", "-ultra", "-fast",
+                "-max-xhigh", "-ultra-high", "-max-fast", "-fast-high",
+                "-light-fast", "-xhigh-fast", "-ultra-fast", "-max-fast-xhigh",
+            ] {
+                matrix.push(format!("{base}{suffix}"));
+            }
+        }
+        for model in &matrix {
             match super::lookup(model) {
                 Some(p) => eprintln!(
                     "{model}: in=${:.2} out=${:.2} cr=${:.3} cw=${:.2} (per 1M)",
