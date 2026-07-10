@@ -166,25 +166,38 @@ fn sessions_db_path() -> Option<PathBuf> {
     Some(PathBuf::from(appdata).join("devin").join("cli").join("sessions.db"))
 }
 
+/// (mtime, size) of one file; a fixed sentinel when it doesn't exist.
+type FileStamp = (std::time::SystemTime, u64);
+
+fn file_stamp(path: &std::path::Path) -> FileStamp {
+    std::fs::metadata(path)
+        .map(|m| (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len()))
+        .unwrap_or((std::time::UNIX_EPOCH, 0))
+}
+
 /// Per-request token metrics from the Devin CLI's local session store.
 /// Assistant messages carry a metrics object (input/output/cache tokens);
 /// the store keeps one row per message per branch of the session's message
 /// forest, so rows dedupe by (session, message id). The model is tracked
 /// per session. Cloud Devin sessions bill ACUs and never land in this db —
-/// only CLI usage shows up. Parsed results are cached against the db's
-/// (mtime, size) so the 37 MB file isn't copied on every refresh.
+/// only CLI usage shows up. Parsed results are cached so the 37 MB file
+/// isn't copied on every refresh; the cache keys on the main db AND the
+/// WAL sidecar, because SQLite appends new rows to the -wal without
+/// touching the main file until a checkpoint runs.
 pub fn collect_usage_events() -> Vec<UsageEvent> {
     use std::sync::Mutex;
-    static CACHE: Mutex<Option<(std::time::SystemTime, u64, Vec<UsageEvent>)>> = Mutex::new(None);
+    static CACHE: Mutex<Option<(FileStamp, FileStamp, Vec<UsageEvent>)>> = Mutex::new(None);
 
     let Some(db_path) = sessions_db_path() else { return Vec::new() };
-    let Ok(meta) = std::fs::metadata(&db_path) else { return Vec::new() };
-    let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
-    let size = meta.len();
+    if !db_path.exists() {
+        return Vec::new();
+    }
+    let db_stamp = file_stamp(&db_path);
+    let wal_stamp = file_stamp(&db_path.with_extension("db-wal"));
 
     if let Ok(cache) = CACHE.lock() {
-        if let Some((m, s, events)) = cache.as_ref() {
-            if *m == mtime && *s == size {
+        if let Some((d, w, events)) = cache.as_ref() {
+            if *d == db_stamp && *w == wal_stamp {
                 return events.clone();
             }
         }
@@ -210,7 +223,7 @@ pub fn collect_usage_events() -> Vec<UsageEvent> {
     }
 
     if let Ok(mut cache) = CACHE.lock() {
-        *cache = Some((mtime, size, events.clone()));
+        *cache = Some((db_stamp, wal_stamp, events.clone()));
     }
     events
 }
