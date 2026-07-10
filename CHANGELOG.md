@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.4.7 — 2026-07-10
+
+### Added
+- **Devin spend** — the Devin CLI's local session store now feeds the
+  Total Spend donut, spend rows, per-model breakdown, and usage trend,
+  priced with the live catalog like the other CLIs. Windsurf-style
+  model names ("gpt-5-6-sol-max") are normalized so they price, and
+  the store is read through SQLite's backup API so numbers stay
+  correct while the Devin app is actively writing. Cloud Devin
+  sessions bill in ACUs and keep no local logs, so only CLI usage
+  appears.
+- **Dollars ⇄ tokens** — click the Total Spend ring (or right-click)
+  to flip the donut, legend, and center total between money and raw
+  token counts; the choice persists.
+- **Reorder without leaving the popover** — every card grows a drag
+  grip in its header; drop it where you want and the order saves to
+  the same layout Customize edits.
+
+### Changed
+- **The popover looks like the Mac's now** — provider cards are a
+  clean header over an inset panel, the usage trend sits in a labeled
+  row, and the Total Spend ring is rebuilt from true wedge segments:
+  radial-cut ends with soft corners, hairline gaps, and tiny spenders
+  that stay thin slivers instead of swelling into dots. Hovering a
+  wedge (or its legend row) slides it outward and dims the rest.
+- **Spend colors** — Codex blue, Grok green, Devin sky blue, and
+  Cursor its brand black (flipped to white in dark mode so it stays
+  visible).
+- **Share cards** — the copied image is a curated composition: buttons,
+  links, and spend chrome stripped, the canvas hugs the content, the
+  header aligns with the panel's text column, and the footer carries
+  the app icon with the full tagline.
+- **Unpriced usage keeps its tokens** — requests on models with no
+  public pricing now count their measured tokens in token totals and
+  the trend; dollars still refuse to guess, and the ⚠ (on the
+  provider's spend row only) explains it in plain words.
+
+### Fixed
+- **Grok spend works again** — the Grok CLI changed its log format and
+  the old scanner silently matched nothing; the new one reads token
+  counts from the CLI's turn events and attributes models per process,
+  like the Mac app.
+- **Cursor Max-mode models price correctly** — "-max" slugs bill
+  token-based at the base model's rates, so they now resolve through
+  the full pricing chain instead of landing in the unpriced bucket.
+- **Kilo fresh accounts** — a just-created account shows a friendly
+  "no credits yet" card instead of an error.
+
 ## 0.4.6 — 2026-07-09
 
 ### Fixed
