@@ -146,3 +146,142 @@ async fn fetch() -> Result<Snapshot, String> {
     }
     Ok(Snapshot::ok(ID, NAME, plan, metrics))
 }
+
+// ---------------------------------------------------------------------------
+// Local spend events — the Devin CLI's sessions.db
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+pub struct UsageEvent {
+    pub ts_ms: i64,
+    pub model: String,
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+}
+
+fn sessions_db_path() -> Option<PathBuf> {
+    let appdata = std::env::var("APPDATA").ok()?;
+    Some(PathBuf::from(appdata).join("devin").join("cli").join("sessions.db"))
+}
+
+/// (mtime, size) of one file; a fixed sentinel when it doesn't exist.
+type FileStamp = (std::time::SystemTime, u64);
+
+fn file_stamp(path: &std::path::Path) -> FileStamp {
+    std::fs::metadata(path)
+        .map(|m| (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len()))
+        .unwrap_or((std::time::UNIX_EPOCH, 0))
+}
+
+/// Per-request token metrics from the Devin CLI's local session store.
+/// Assistant messages carry a metrics object (input/output/cache tokens);
+/// the store keeps one row per message per branch of the session's message
+/// forest, so rows dedupe by (session, message id). The model is tracked
+/// per session. Cloud Devin sessions bill ACUs and never land in this db —
+/// only CLI usage shows up. Parsed results are cached so the 37 MB file
+/// isn't copied on every refresh; the cache keys on the main db AND the
+/// WAL sidecar, because SQLite appends new rows to the -wal without
+/// touching the main file until a checkpoint runs.
+pub fn collect_usage_events() -> Vec<UsageEvent> {
+    use std::sync::Mutex;
+    static CACHE: Mutex<Option<(FileStamp, FileStamp, Vec<UsageEvent>)>> = Mutex::new(None);
+
+    let Some(db_path) = sessions_db_path() else { return Vec::new() };
+    if !db_path.exists() {
+        return Vec::new();
+    }
+    let db_stamp = file_stamp(&db_path);
+    let wal_stamp = file_stamp(&db_path.with_extension("db-wal"));
+
+    if let Ok(cache) = CACHE.lock() {
+        if let Some((d, w, events)) = cache.as_ref() {
+            if *d == db_stamp && *w == wal_stamp {
+                return events.clone();
+            }
+        }
+    }
+
+    // Copy db + sidecars first — the CLI may hold the live files locked.
+    let tmp_base = std::env::temp_dir().join(format!("pane-devin-{}", std::process::id()));
+    let tmp_db = tmp_base.with_extension("db");
+    if std::fs::copy(&db_path, &tmp_db).is_err() {
+        return Vec::new();
+    }
+    for suffix in ["db-wal", "db-shm"] {
+        let side = db_path.with_extension(suffix);
+        if side.exists() {
+            let _ = std::fs::copy(&side, tmp_base.with_extension(suffix));
+        }
+    }
+
+    let events = read_usage_events(&tmp_db).unwrap_or_default();
+
+    for suffix in ["db", "db-wal", "db-shm"] {
+        let _ = std::fs::remove_file(tmp_base.with_extension(suffix));
+    }
+
+    if let Ok(mut cache) = CACHE.lock() {
+        *cache = Some((db_stamp, wal_stamp, events.clone()));
+    }
+    events
+}
+
+fn read_usage_events(db: &std::path::Path) -> Result<Vec<UsageEvent>, String> {
+    let conn = rusqlite::Connection::open(db).map_err(|e| format!("open db copy: {e}"))?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT m.session_id, m.chat_message, m.created_at, s.model
+             FROM message_nodes m JOIN sessions s ON s.id = m.session_id",
+        )
+        .map_err(|e| format!("query messages: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|e| format!("read messages: {e}"))?;
+
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for row in rows.flatten() {
+        let (session_id, chat_message, node_created_s, model) = row;
+        let Ok(msg) = serde_json::from_str::<Value>(&chat_message) else { continue };
+        if msg.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let md = msg.get("metadata").cloned().unwrap_or(Value::Null);
+        let Some(metrics) = md.get("metrics").filter(|m| m.is_object()) else { continue };
+        // One message can appear on several branches of the session forest.
+        if let Some(mid) = msg
+            .get("message_id")
+            .and_then(Value::as_str)
+            .or_else(|| md.get("request_id").and_then(Value::as_str))
+        {
+            if !seen.insert((session_id.clone(), mid.to_string())) {
+                continue;
+            }
+        }
+        let num = |k: &str| metrics.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+        let ts_ms = md
+            .get("created_at")
+            .and_then(Value::as_str)
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.timestamp_millis())
+            .unwrap_or(node_created_s * 1000);
+        out.push(UsageEvent {
+            ts_ms,
+            model: model.clone(),
+            input: num("input_tokens"),
+            output: num("output_tokens"),
+            cache_read: num("cache_read_tokens"),
+            cache_write: num("cache_creation_tokens"),
+        });
+    }
+    Ok(out)
+}
