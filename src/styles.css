@@ -1728,9 +1728,10 @@ body.no-glass .cust-dock {
   padding: 16px 18px 16px;
 }
 /* The live popover keeps headers tight against transparent cards; on the
-   solid snapshot surface the name and mark need air from the corners. */
+   solid snapshot surface the header lines up with the panel's inner text
+   column (card 18px + head 16px = card 18px + panel 16px). */
 .snap-card .provider-head {
-  padding: 0 4px;
+  padding: 0 16px;
   margin-bottom: 12px;
 }
 .snap-card .card-panel {
