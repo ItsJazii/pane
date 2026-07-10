@@ -838,7 +838,7 @@ function legendHtml(entries: DonutEntry[]): string {
       (e) => `
         <div class="legend-row" data-pid="${e.s.id}">
           <span class="dot" style="background:${spendColor(e.s.id)}"></span>
-          <span class="legend-name">${escapeHtml(e.s.name)} ${unpricedWarn(e.s)}</span>
+          <span class="legend-name">${escapeHtml(e.s.name)}</span>
           <span class="legend-val">${fmtSpendVal(e.w)}</span>
         </div>`,
     )
