@@ -112,7 +112,8 @@ amber/red as the math worsens and optional Windows toasts fire once per
 reset window ("Almost out", "Will run out").
 
 **4. Counting the money.** Your CLIs already log every request locally.
-Pane scans those logs (Claude, Codex, Grok, OpenCode, Cursor CSV), prices
+Pane scans those logs (Claude, Codex, Grok, OpenCode, Devin CLI, Cursor
+CSV), prices
 each request with live per-model rates (LiteLLM / models.dev, refreshed
 daily — hourly while unknown models are around, so brand-new models price
 within the hour), and draws the Today / Yesterday / 30-day donut with a
@@ -134,7 +135,7 @@ Pane server, no account, and no telemetry — see [Privacy](#privacy--security).
 | OpenCode (Go plan) | Local `opencode.db` spend vs documented plan limits* |
 | GitHub Copilot | Copilot editor login or GitHub CLI (Credential Manager) + GitHub API |
 | Grok (Grok CLI) | `%USERPROFILE%\.grok\auth.json` + Grok billing API |
-| Devin (Devin CLI) | `%APPDATA%\devin\credentials.toml` + GetUserStatus RPC |
+| Devin (Devin CLI) | `%APPDATA%\devin\credentials.toml` + GetUserStatus RPC; local CLI session store for spend |
 | MiniMax | API key (Settings, env var, or CLI config) + token-plan API |
 | OpenRouter | API key (Settings) or key stored by OpenCode |
 | Z.ai | API key (Settings), CLI key file, or env var |
