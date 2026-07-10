@@ -203,29 +203,51 @@ pub fn collect_usage_events() -> Vec<UsageEvent> {
         }
     }
 
-    // Copy db + sidecars first — the CLI may hold the live files locked.
+    // Snapshot through SQLite's backup API rather than copying files: the
+    // Devin app writes new rows to the WAL continuously, and a raw copy of
+    // db + WAL taken at slightly different instants makes SQLite silently
+    // discard the WAL — recent sessions would just vanish from the totals.
     let tmp_base = std::env::temp_dir().join(format!("pane-devin-{}", std::process::id()));
     let tmp_db = tmp_base.with_extension("db");
-    if std::fs::copy(&db_path, &tmp_db).is_err() {
-        return Vec::new();
-    }
-    for suffix in ["db-wal", "db-shm"] {
-        let side = db_path.with_extension(suffix);
-        if side.exists() {
-            let _ = std::fs::copy(&side, tmp_base.with_extension(suffix));
-        }
-    }
-
-    let events = read_usage_events(&tmp_db).unwrap_or_default();
+    let events = snapshot_db(&db_path, &tmp_db).and_then(|()| read_usage_events(&tmp_db));
 
     for suffix in ["db", "db-wal", "db-shm"] {
         let _ = std::fs::remove_file(tmp_base.with_extension(suffix));
     }
 
-    if let Ok(mut cache) = CACHE.lock() {
-        *cache = Some((db_stamp, wal_stamp, events.clone()));
+    match events {
+        Ok(events) => {
+            if let Ok(mut cache) = CACHE.lock() {
+                *cache = Some((db_stamp, wal_stamp, events.clone()));
+            }
+            events
+        }
+        // Busy/locked db: keep showing the last good events instead of a
+        // sudden empty Devin row; the next refresh retries.
+        Err(_) => CACHE
+            .lock()
+            .ok()
+            .and_then(|c| c.as_ref().map(|(_, _, e)| e.clone()))
+            .unwrap_or_default(),
     }
-    events
+}
+
+/// Consistent point-in-time copy of the live db (reads through the WAL
+/// with proper locks, retrying briefly while the writer is busy).
+fn snapshot_db(src_path: &std::path::Path, dst_path: &std::path::Path) -> Result<(), String> {
+    let _ = std::fs::remove_file(dst_path);
+    let src = rusqlite::Connection::open_with_flags(
+        src_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|e| format!("open live db: {e}"))?;
+    let mut dst =
+        rusqlite::Connection::open(dst_path).map_err(|e| format!("open snapshot: {e}"))?;
+    let backup = rusqlite::backup::Backup::new(&src, &mut dst)
+        .map_err(|e| format!("backup init: {e}"))?;
+    backup
+        .run_to_completion(256, std::time::Duration::from_millis(10), None)
+        .map_err(|e| format!("backup run: {e}"))
 }
 
 fn read_usage_events(db: &std::path::Path) -> Result<Vec<UsageEvent>, String> {

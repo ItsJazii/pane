@@ -87,13 +87,15 @@ interface ProviderSpend {
   unpriced_models: string[];
 }
 
-/// ⚠ shown when events were excluded because no catalog prices the model —
-/// totals would otherwise silently under-report.
+/// ⚠ shown when some events have no known model price — their tokens are
+/// counted, but no dollars are guessed, so dollar totals under-report.
 function unpricedWarn(sp: ProviderSpend | undefined): string {
   if (!sp || sp.unpriced <= 0) return "";
   const models = sp.unpriced_models.join(", ") || "unknown models";
   return `<span class="stale" title="${escapeHtml(
-    `${sp.unpriced} events excluded — no price known for: ${models}. Totals may under-report.`,
+    `${sp.unpriced} requests ran on models with no public pricing (${models}). ` +
+      `Their tokens are included, but they can't be turned into dollars — ` +
+      `so the real cost is a little higher than shown.`,
   )}">⚠</span>`;
 }
 
@@ -836,7 +838,7 @@ function legendHtml(entries: DonutEntry[]): string {
       (e) => `
         <div class="legend-row" data-pid="${e.s.id}">
           <span class="dot" style="background:${spendColor(e.s.id)}"></span>
-          <span class="legend-name">${escapeHtml(e.s.name)} ${unpricedWarn(e.s)}</span>
+          <span class="legend-name">${escapeHtml(e.s.name)}</span>
           <span class="legend-val">${fmtSpendVal(e.w)}</span>
         </div>`,
     )

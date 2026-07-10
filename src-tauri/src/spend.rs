@@ -45,8 +45,11 @@ pub struct ProviderSpend {
     pub last30: Window,
     /// Tokens per day, oldest first — trend[29] is today.
     pub trend: Vec<f64>,
-    /// Events excluded because no catalog prices their model — counting
-    /// them at a guessed rate would fabricate dollars (Mac #853 semantics).
+    /// Events whose model no catalog prices. Their measured tokens still
+    /// count in token totals/trend, but no dollars are guessed for them
+    /// (a deliberate softening of the Mac's exclude-everything semantics:
+    /// tokens are facts, only prices are unknown), so dollar figures
+    /// under-report and the ⚠ says so.
     pub unpriced: u64,
     pub unpriced_models: Vec<String>,
 }
@@ -96,8 +99,13 @@ fn add_event(data: &mut FileData, ts: DateTime<Utc>, model: &str, cost: f64, tok
     entry.1 += tokens;
 }
 
-fn note_unpriced(data: &mut FileData, model: &str) {
+/// Tally an event no catalog can price: its tokens still count (they're
+/// measured, not guessed) at zero cost, so only the dollars under-report.
+fn note_unpriced(data: &mut FileData, ts: DateTime<Utc>, model: &str, tokens: f64) {
     *data.unpriced.entry(model.to_string()).or_insert(0) += 1;
+    if tokens > 0.0 {
+        add_event(data, ts, model, 0.0, tokens);
+    }
 }
 
 fn merge_data(target: &mut FileData, source: FileData) {
@@ -349,7 +357,7 @@ fn claude() -> ProviderSpend {
                         }
                         None => {
                             if tokens > 0.0 {
-                                note_unpriced(data, &model);
+                                note_unpriced(data, ts, &model, tokens);
                             }
                             return;
                         }
@@ -430,7 +438,7 @@ fn codex() -> ProviderSpend {
                 Some(r) => r,
                 None if lower.contains("gpt") || lower.contains("codex") => codex_price(&model),
                 None => {
-                    note_unpriced(data, &model);
+                    note_unpriced(data, ts, &model, tokens);
                     return;
                 }
             };
@@ -510,7 +518,7 @@ fn grok() -> ProviderSpend {
                     (i, o, i)
                 }
                 None => {
-                    note_unpriced(data, &model);
+                    note_unpriced(data, ts, &model, tokens);
                     return;
                 }
             };
@@ -547,25 +555,27 @@ fn devin() -> ProviderSpend {
             continue;
         }
         let model = devin_model(&ev.model);
-        match pricing::lookup(model) {
+        match pricing::lookup(&model) {
             Some(p) => {
                 let cost = (ev.input * p.input
                     + ev.cache_read * p.cache_read
                     + ev.cache_write * p.cache_write
                     + ev.output * p.output)
                     / 1e6;
-                add_event(&mut data, ts, model, cost, tokens);
+                add_event(&mut data, ts, &model, cost, tokens);
             }
-            None => note_unpriced(&mut data, model),
+            None => note_unpriced(&mut data, ts, &model, tokens),
         }
     }
     build_spend("devin", "Devin", data)
 }
 
 /// Windsurf-style slugs append a reasoning effort ("claude-opus-4-8-medium")
-/// that no catalog knows; price and display the base model. A couple of
-/// slugs also spell the model differently than the catalogs do.
-fn devin_model(raw: &str) -> &str {
+/// that no catalog knows; price and display the base model. Some slugs also
+/// spell the model differently than the catalogs: version dots become
+/// dashes ("gpt-5-6-sol-max" is GPT-5.6 Sol Max) and Fable's parts are
+/// reordered.
+fn devin_model(raw: &str) -> String {
     let mut base = raw;
     for suffix in ["-low", "-medium", "-high", "-xhigh"] {
         if let Some(b) = raw.strip_suffix(suffix) {
@@ -573,10 +583,23 @@ fn devin_model(raw: &str) -> &str {
             break;
         }
     }
-    match base {
-        "claude-5-fable" => "claude-fable-5", // LiteLLM's slug order
-        b => b,
+    if base == "claude-5-fable" {
+        return "claude-fable-5".into(); // LiteLLM's slug order
     }
+    if let Some(rest) = base.strip_prefix("gpt-") {
+        let parts: Vec<&str> = rest.splitn(3, '-').collect();
+        // Version components are 1–2 digits ("5-6" is 5.6); OpenAI's
+        // date-stamped snapshots ("4-0125-preview") use 4-digit segments
+        // and must pass through untouched.
+        let is_ver = |s: &str| {
+            !s.is_empty() && s.len() <= 2 && s.chars().all(|c| c.is_ascii_digit())
+        };
+        if parts.len() >= 2 && is_ver(parts[0]) && is_ver(parts[1]) {
+            let tail = parts.get(2).map(|t| format!("-{t}")).unwrap_or_default();
+            return format!("gpt-{}.{}{}", parts[0], parts[1], tail);
+        }
+    }
+    base.to_string()
 }
 
 /// Cursor spend from the dashboard's usage-events CSV export (fetched by the
@@ -646,7 +669,7 @@ pub fn cursor_from_csv(csv: &str) -> ProviderSpend {
                         / 1e6;
                     add_event(&mut data, ts, &model, cost, tokens);
                 }
-                None => note_unpriced(&mut data, &model),
+                None => note_unpriced(&mut data, ts, &model, tokens),
             }
         }
     }
