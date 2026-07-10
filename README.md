@@ -113,14 +113,16 @@ reset window ("Almost out", "Will run out").
 
 **4. Counting the money.** Your CLIs already log every request locally.
 Pane scans those logs (Claude, Codex, Grok, OpenCode, Devin CLI, Cursor
-CSV), prices
-each request with live per-model rates (LiteLLM / models.dev, refreshed
-daily — hourly while unknown models are around, so brand-new models price
-within the hour), and draws the Today / Yesterday / 30-day donut with a
-per-model breakdown. Click the ring to flip between dollars and tokens.
-On a flat-rate plan this shows what your usage *would* cost at API
-prices — the best ad for your subscription you'll ever see. Events for
-models without a known price are excluded and flagged, never guessed.
+CSV), prices each request with live per-model rates (LiteLLM /
+models.dev, refreshed daily — hourly while unknown models are around, so
+brand-new models price within the hour), and draws the Today /
+Yesterday / 30-day donut with a per-model breakdown. Click the ring to
+flip between dollars and tokens. On a flat-rate plan this shows what
+your usage *would* cost at API prices — the best ad for your
+subscription you'll ever see. Requests on models with no public
+pricing keep their measured tokens in the counts, but no dollars are
+ever guessed for them — a ⚠ on the provider's spend row says the real
+cost runs a little higher than shown.
 
 **5. Staying local.** All of the above happens on your machine. There is no
 Pane server, no account, and no telemetry — see [Privacy](#privacy--security).
