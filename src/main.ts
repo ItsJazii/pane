@@ -93,7 +93,9 @@ function unpricedWarn(sp: ProviderSpend | undefined): string {
   if (!sp || sp.unpriced <= 0) return "";
   const models = sp.unpriced_models.join(", ") || "unknown models";
   return `<span class="stale" title="${escapeHtml(
-    `${sp.unpriced} events have no known price (${models}) — tokens are counted, dollars under-report.`,
+    `${sp.unpriced} requests ran on models with no public pricing (${models}). ` +
+      `Their tokens are included, but they can't be turned into dollars — ` +
+      `so the real cost is a little higher than shown.`,
   )}">⚠</span>`;
 }
 
