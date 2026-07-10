@@ -547,25 +547,27 @@ fn devin() -> ProviderSpend {
             continue;
         }
         let model = devin_model(&ev.model);
-        match pricing::lookup(model) {
+        match pricing::lookup(&model) {
             Some(p) => {
                 let cost = (ev.input * p.input
                     + ev.cache_read * p.cache_read
                     + ev.cache_write * p.cache_write
                     + ev.output * p.output)
                     / 1e6;
-                add_event(&mut data, ts, model, cost, tokens);
+                add_event(&mut data, ts, &model, cost, tokens);
             }
-            None => note_unpriced(&mut data, model),
+            None => note_unpriced(&mut data, &model),
         }
     }
     build_spend("devin", "Devin", data)
 }
 
 /// Windsurf-style slugs append a reasoning effort ("claude-opus-4-8-medium")
-/// that no catalog knows; price and display the base model. A couple of
-/// slugs also spell the model differently than the catalogs do.
-fn devin_model(raw: &str) -> &str {
+/// that no catalog knows; price and display the base model. Some slugs also
+/// spell the model differently than the catalogs: version dots become
+/// dashes ("gpt-5-6-sol-max" is GPT-5.6 Sol Max) and Fable's parts are
+/// reordered.
+fn devin_model(raw: &str) -> String {
     let mut base = raw;
     for suffix in ["-low", "-medium", "-high", "-xhigh"] {
         if let Some(b) = raw.strip_suffix(suffix) {
@@ -573,10 +575,22 @@ fn devin_model(raw: &str) -> &str {
             break;
         }
     }
-    match base {
-        "claude-5-fable" => "claude-fable-5", // LiteLLM's slug order
-        b => b,
+    if base == "claude-5-fable" {
+        return "claude-fable-5".into(); // LiteLLM's slug order
     }
+    if let Some(rest) = base.strip_prefix("gpt-") {
+        let parts: Vec<&str> = rest.splitn(3, '-').collect();
+        if parts.len() >= 2
+            && !parts[0].is_empty()
+            && !parts[1].is_empty()
+            && parts[0].chars().all(|c| c.is_ascii_digit())
+            && parts[1].chars().all(|c| c.is_ascii_digit())
+        {
+            let tail = parts.get(2).map(|t| format!("-{t}")).unwrap_or_default();
+            return format!("gpt-{}.{}{}", parts[0], parts[1], tail);
+        }
+    }
+    base.to_string()
 }
 
 /// Cursor spend from the dashboard's usage-events CSV export (fetched by the

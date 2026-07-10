@@ -35,7 +35,7 @@ tokio = { version = "1", features = ["macros", "process", "time"] }
 chrono = "0.4"
 base64 = "0.22"
 dirs = "6"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 toml = "0.8"
 regex = "1"
 webview2-com = "0.38"
