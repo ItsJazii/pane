@@ -349,7 +349,22 @@ fn resolve(s: &Store, model: &str, depth: u8) -> Option<Price> {
     // composed slugs like "gpt-5.6-sol-max-fast" reach the -max fallback
     // and alias/fuzzy matching too.
     if let Some(base) = canonical.strip_suffix("-fast") {
-        let m = s.fast_multipliers.get(base).copied().unwrap_or(2.0);
+        // Multipliers are keyed by the plain model name; peel effort/mode
+        // tokens off composed bases ("gpt-5.6-sol-max" → "gpt-5.6-sol") so
+        // "sol-max-fast" gets sol's real multiplier, not the default.
+        let mut mkey = base;
+        let m = loop {
+            if let Some(m) = s.fast_multipliers.get(mkey) {
+                break *m;
+            }
+            match ["-xhigh", "-light", "-low", "-medium", "-high", "-max", "-ultra"]
+                .iter()
+                .find_map(|suf| mkey.strip_suffix(suf))
+            {
+                Some(next) => mkey = next,
+                None => break 2.0,
+            }
+        };
         if let Some(p) = resolve(s, base, depth + 1) {
             return Some(Price {
                 input: p.input * m,
@@ -410,6 +425,7 @@ mod tests {
             for suffix in [
                 "-light", "-low", "-medium", "-high", "-xhigh", "-max", "-ultra", "-fast",
                 "-max-xhigh", "-ultra-high", "-max-fast", "-fast-high",
+                "-light-fast", "-xhigh-fast", "-ultra-fast", "-max-fast-xhigh",
             ] {
                 matrix.push(format!("{base}{suffix}"));
             }
