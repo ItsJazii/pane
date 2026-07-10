@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.8 — 2026-07-11
+
+### Fixed
+- **The whole model-family surface prices now** — reasoning-effort
+  tiers (light/low/medium/high/xhigh), Max **and Ultra** modes, the
+  fast tier, and any composition of them ("gpt-5.6-sol-max-fast",
+  "…-ultra-high", "…-max-fast-xhigh") resolve to the base model's
+  rates, with fast keeping its real per-family multiplier in every
+  composition. Previously composed slugs fell into the unpriced ⚠
+  bucket — on the test machine that was ~$19 of one day's Cursor
+  Max-fast usage hiding from the totals. Verified by a 51-slug
+  regression matrix across GPT-5.6 Luna/Terra/Sol; the handling is
+  generic, so other families (Grok fast tiers etc.) get the same
+  guarantees.
+- **"Outdated" stopped crying wolf** — a single failed refresh no
+  longer tags every card; data under three minutes old serves
+  silently, and the amber tag (with the real error on hover) appears
+  only when staleness is real. Persistent failures surface exactly as
+  before.
+
 ## 0.4.7 — 2026-07-10
 
 ### Added
