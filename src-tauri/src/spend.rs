@@ -45,8 +45,11 @@ pub struct ProviderSpend {
     pub last30: Window,
     /// Tokens per day, oldest first — trend[29] is today.
     pub trend: Vec<f64>,
-    /// Events excluded because no catalog prices their model — counting
-    /// them at a guessed rate would fabricate dollars (Mac #853 semantics).
+    /// Events whose model no catalog prices. Their measured tokens still
+    /// count in token totals/trend, but no dollars are guessed for them
+    /// (a deliberate softening of the Mac's exclude-everything semantics:
+    /// tokens are facts, only prices are unknown), so dollar figures
+    /// under-report and the ⚠ says so.
     pub unpriced: u64,
     pub unpriced_models: Vec<String>,
 }
@@ -96,8 +99,13 @@ fn add_event(data: &mut FileData, ts: DateTime<Utc>, model: &str, cost: f64, tok
     entry.1 += tokens;
 }
 
-fn note_unpriced(data: &mut FileData, model: &str) {
+/// Tally an event no catalog can price: its tokens still count (they're
+/// measured, not guessed) at zero cost, so only the dollars under-report.
+fn note_unpriced(data: &mut FileData, ts: DateTime<Utc>, model: &str, tokens: f64) {
     *data.unpriced.entry(model.to_string()).or_insert(0) += 1;
+    if tokens > 0.0 {
+        add_event(data, ts, model, 0.0, tokens);
+    }
 }
 
 fn merge_data(target: &mut FileData, source: FileData) {
@@ -349,7 +357,7 @@ fn claude() -> ProviderSpend {
                         }
                         None => {
                             if tokens > 0.0 {
-                                note_unpriced(data, &model);
+                                note_unpriced(data, ts, &model, tokens);
                             }
                             return;
                         }
@@ -430,7 +438,7 @@ fn codex() -> ProviderSpend {
                 Some(r) => r,
                 None if lower.contains("gpt") || lower.contains("codex") => codex_price(&model),
                 None => {
-                    note_unpriced(data, &model);
+                    note_unpriced(data, ts, &model, tokens);
                     return;
                 }
             };
@@ -510,7 +518,7 @@ fn grok() -> ProviderSpend {
                     (i, o, i)
                 }
                 None => {
-                    note_unpriced(data, &model);
+                    note_unpriced(data, ts, &model, tokens);
                     return;
                 }
             };
@@ -556,7 +564,7 @@ fn devin() -> ProviderSpend {
                     / 1e6;
                 add_event(&mut data, ts, &model, cost, tokens);
             }
-            None => note_unpriced(&mut data, &model),
+            None => note_unpriced(&mut data, ts, &model, tokens),
         }
     }
     build_spend("devin", "Devin", data)
@@ -660,7 +668,7 @@ pub fn cursor_from_csv(csv: &str) -> ProviderSpend {
                         / 1e6;
                     add_event(&mut data, ts, &model, cost, tokens);
                 }
-                None => note_unpriced(&mut data, &model),
+                None => note_unpriced(&mut data, ts, &model, tokens),
             }
         }
     }

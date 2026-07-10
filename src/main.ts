@@ -87,13 +87,13 @@ interface ProviderSpend {
   unpriced_models: string[];
 }
 
-/// ⚠ shown when events were excluded because no catalog prices the model —
-/// totals would otherwise silently under-report.
+/// ⚠ shown when some events have no known model price — their tokens are
+/// counted, but no dollars are guessed, so dollar totals under-report.
 function unpricedWarn(sp: ProviderSpend | undefined): string {
   if (!sp || sp.unpriced <= 0) return "";
   const models = sp.unpriced_models.join(", ") || "unknown models";
   return `<span class="stale" title="${escapeHtml(
-    `${sp.unpriced} events excluded — no price known for: ${models}. Totals may under-report.`,
+    `${sp.unpriced} events have no known price (${models}) — tokens are counted, dollars under-report.`,
   )}">⚠</span>`;
 }
 
