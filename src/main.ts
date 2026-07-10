@@ -215,6 +215,7 @@ const SPEND_COLORS: Record<string, string> = {
   minimax: "#f5433c",
   grok: "#10a37f",
   opencode: "#b7b1b1",
+  devin: "#38bdf8",
   cursor: "var(--spend-cursor)", // brand black, theme-flipped in CSS
 };
 
