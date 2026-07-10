@@ -5,7 +5,10 @@
 ### Added
 - **Devin spend** — the Devin CLI's local session store now feeds the
   Total Spend donut, spend rows, per-model breakdown, and usage trend,
-  priced with the live catalog like the other CLIs. Cloud Devin
+  priced with the live catalog like the other CLIs. Windsurf-style
+  model names ("gpt-5-6-sol-max") are normalized so they price, and
+  the store is read through SQLite's backup API so numbers stay
+  correct while the Devin app is actively writing. Cloud Devin
   sessions bill in ACUs and keep no local logs, so only CLI usage
   appears.
 - **Dollars ⇄ tokens** — click the Total Spend ring (or right-click)
@@ -26,8 +29,13 @@
   Cursor its brand black (flipped to white in dark mode so it stays
   visible).
 - **Share cards** — the copied image is a curated composition: buttons,
-  links, and spend chrome stripped, the canvas hugs the content, and
-  the footer carries the app icon with the full tagline.
+  links, and spend chrome stripped, the canvas hugs the content, the
+  header aligns with the panel's text column, and the footer carries
+  the app icon with the full tagline.
+- **Unpriced usage keeps its tokens** — requests on models with no
+  public pricing now count their measured tokens in token totals and
+  the trend; dollars still refuse to guess, and the ⚠ (on the
+  provider's spend row only) explains it in plain words.
 
 ### Fixed
 - **Grok spend works again** — the Grok CLI changed its log format and
