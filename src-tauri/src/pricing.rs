@@ -344,10 +344,13 @@ fn resolve(s: &Store, model: &str, depth: u8) -> Option<Price> {
     if let Some(p) = s.litellm.get(&canonical) {
         return Some(*p);
     }
-    // Fast tier: base price × the supplement's multiplier (default 2).
+    // Fast tier: base price × the supplement's multiplier (default 2). The
+    // base runs through the whole chain — not a bare map lookup — so
+    // composed slugs like "gpt-5.6-sol-max-fast" reach the -max fallback
+    // and alias/fuzzy matching too.
     if let Some(base) = canonical.strip_suffix("-fast") {
-        if let Some(p) = s.litellm.get(base).or_else(|| s.supplement.get(base)) {
-            let m = s.fast_multipliers.get(base).copied().unwrap_or(2.0);
+        let m = s.fast_multipliers.get(base).copied().unwrap_or(2.0);
+        if let Some(p) = resolve(s, base, depth + 1) {
             return Some(Price {
                 input: p.input * m,
                 output: p.output * m,
