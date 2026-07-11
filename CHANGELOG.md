@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.9 — 2026-07-11
+
+### Added
+- **Cost/MTok** — the Total Spend ring's metric now cycles Cost →
+  Cost/MTok → Tokens on click (right-click cycles backward). The center
+  shows your true blended rate — total dollars over total megatokens —
+  and each legend row shows that provider's own $/MTok.
+- Cursor's spend rows say **"estimated"** — its usage export aggregates
+  requests, so per-request exactness isn't possible.
+- Reset countdowns inside a minute read **"Resets soon"** instead of a
+  dying timer.
+
+### Fixed
+- **Long-context requests price correctly** — models with 1M-token
+  context bill the *whole* request at a higher tier once the prompt
+  crosses 200k tokens; Pane now applies those tiers. Claude's 1-hour
+  cache writes bill at twice the input rate (they were priced as
+  ordinary writes before), and Claude fast-mode requests apply the
+  published fast multiplier. Spend histories reprice automatically —
+  expect Claude's 30-day figure to correct upward.
+- **Codex percentages show as reported** — the old "fresh window
+  reads 1%, call it 0" normalization masked real early usage and is
+  gone (the Mac dropped it too). "Not started" now keys on the window
+  still being full-length, and windows under 5% used never flash a
+  red pace projection off a floored reading.
+
 ## 0.4.8 — 2026-07-11
 
 ### Fixed
