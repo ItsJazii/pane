@@ -126,7 +126,7 @@ interface Config {
   notifyCuttingClose: boolean;
   notifyWillRunOut: boolean;
   spendTab: SpendTab;
-  spendMetric: "cost" | "tokens";
+  spendMetric: "cost" | "tokens" | "mtok";
   showUsed: boolean;
   resetExact: boolean;
   timeFormat: "auto" | "12" | "24";
@@ -566,7 +566,8 @@ function renderMetric(m: Metric): string {
       if (notStarted) {
         resetHtml = `<span title="Sessions start after you send your first message.">Not started</span>`;
       } else {
-        const countdown = `Resets in ${fmtDuration(m.resets_at - Date.now())}`;
+        const remain = m.resets_at - Date.now();
+        const countdown = remain < 60_000 ? "Resets soon" : `Resets in ${fmtDuration(remain)}`;
         const exact = `Resets ${fmtExact(m.resets_at)}`;
         const [text, alt] = config.resetExact ? [exact, countdown] : [countdown, exact];
         resetHtml = `<span class="clickable" data-flip="reset" title="${escapeHtml(alt)}">${escapeHtml(text)}</span>`;
@@ -650,8 +651,12 @@ function renderSpendRow(
   w: SpendWindow,
   sp?: ProviderSpend,
 ): string {
+  // Cursor's CSV aggregates requests, so its dollars are honest estimates.
+  const est = providerId === "cursor" ? " · estimated" : "";
   const text =
-    w.tokens > 0 || w.cost > 0.005 ? `${fmtMoney(w.cost)} · ${fmtTokens(w.tokens)} tokens` : "No data";
+    w.tokens > 0 || w.cost > 0.005
+      ? `${fmtMoney(w.cost)} · ${fmtTokens(w.tokens)} tokens${est}`
+      : "No data";
   const warn = key === "last30" ? unpricedWarn(sp) : "";
   return `
     <div class="metric-text spend-row" data-spend="${providerId}|${key}">
@@ -755,17 +760,60 @@ function donutEntries(tab: SpendTab): DonutEntry[] {
     // Membership, order, and wedge share all follow the active metric so
     // the legend ranking always matches the ring (cost keeps a half-cent
     // noise floor).
-    .filter((e) => (config.spendMetric === "tokens" ? e.w.tokens > 0 : e.w.cost > 0.005))
+    .filter((e) =>
+      config.spendMetric === "tokens"
+        ? e.w.tokens > 0
+        : config.spendMetric === "mtok"
+          ? e.w.tokens > 0 && e.w.cost > 0.005
+          : e.w.cost > 0.005,
+    )
     .sort((a, b) => spendVal(b.w) - spendVal(a.w));
 }
 
 /// The donut meters dollars or raw tokens — a click on the ring toggles.
 function spendVal(w: SpendWindow): number {
-  return config.spendMetric === "tokens" ? w.tokens : w.cost;
+  if (config.spendMetric === "tokens") return w.tokens;
+  if (config.spendMetric === "mtok") return w.tokens > 0 ? w.cost / (w.tokens / 1e6) : 0;
+  return w.cost;
 }
 
+/// Dollar-rate figure: two decimals under $1k, abbreviated above.
+function fmtRate(v: number): string {
+  return v < 1000 ? `$${v.toFixed(2)}` : fmtMoney(v);
+}
+
+/// The ring's two-line center (and its hover text) for the active metric.
+/// Cost/MTok is the overall average — total dollars over total megatokens —
+/// not a sum of per-provider rates.
+function spendCenter(entries: DonutEntry[]): { primary: string; sub: string; exact: string } {
+  if (config.spendMetric === "mtok") {
+    const cost = entries.reduce((s, e) => s + e.w.cost, 0);
+    const mtok = entries.reduce((s, e) => s + e.w.tokens, 0) / 1e6;
+    const rate = mtok > 0 ? cost / mtok : 0;
+    return { primary: fmtRate(rate), sub: "$/MTok", exact: `${fmtRate(rate)}/MTok average` };
+  }
+  if (config.spendMetric === "tokens") {
+    const t = entries.reduce((s, e) => s + e.w.tokens, 0);
+    return { primary: fmtTokens(t), sub: "tokens", exact: `${fmtTokens(t)} tokens` };
+  }
+  const c = entries.reduce((s, e) => s + e.w.cost, 0);
+  return { primary: fmtMoney(c), sub: "dollars", exact: `$${c.toFixed(2)}` };
+}
+
+/// The metric a click (or right-click, reversed) moves to next — the Mac
+/// menu's order: Cost, Cost/MTok, Tokens.
+function nextSpendMetric(back: boolean): "cost" | "tokens" | "mtok" {
+  const order: ("cost" | "tokens" | "mtok")[] = ["cost", "mtok", "tokens"];
+  const i = order.indexOf(config.spendMetric);
+  return order[(i + (back ? order.length - 1 : 1)) % order.length];
+}
+
+const METRIC_NAMES = { cost: "dollars", mtok: "cost per MTok", tokens: "tokens" } as const;
+
 function fmtSpendVal(w: SpendWindow): string {
-  return config.spendMetric === "tokens" ? fmtTokens(w.tokens) : fmtMoney(w.cost);
+  if (config.spendMetric === "tokens") return fmtTokens(w.tokens);
+  if (config.spendMetric === "mtok") return `${fmtRate(spendVal(w))}/MTok`;
+  return fmtMoney(w.cost);
 }
 
 /// Angular extent per provider (slivers lifted to stay visible), shared by
@@ -864,7 +912,7 @@ function switchSpendTab(tab: SpendTab): void {
   const card = document.querySelector<HTMLElement>(".total-spend");
   const paths = card ? Array.from(card.querySelectorAll<SVGPathElement>("path.seg")) : [];
   const entries = donutEntries(tab);
-  const { total, geo } = donutGeometry(entries);
+  const { geo } = donutGeometry(entries);
   // Wedge paths share one command structure so CSS can tween `d`; a
   // full-circle annulus doesn't, so single-spender states rebuild instead.
   const morphable =
@@ -890,8 +938,8 @@ function switchSpendTab(tab: SpendTab): void {
     }
   }
   const totalEl = card.querySelector(".donut-total");
-  if (totalEl)
-    totalEl.textContent = config.spendMetric === "tokens" ? fmtTokens(total) : fmtMoney(total);
+  const center = spendCenter(entries);
+  if (totalEl) totalEl.textContent = center.primary;
   const legend = card.querySelector(".legend");
   if (legend) legend.innerHTML = legendHtml(entries);
   card.querySelectorAll(".tab").forEach((t) => {
@@ -899,9 +947,7 @@ function switchSpendTab(tab: SpendTab): void {
   });
   const wrap = card.querySelector<HTMLElement>(".donut-wrap");
   if (wrap) {
-    const isTokens = config.spendMetric === "tokens";
-    const exactVal = isTokens ? `${fmtTokens(total)} tokens` : `$${total.toFixed(2)}`;
-    wrap.title = `${exactVal} — computed locally from session logs. Click to show ${isTokens ? "dollars" : "tokens"}.`;
+    wrap.title = `${center.exact} — computed locally from session logs. Click to show ${METRIC_NAMES[nextSpendMetric(false)]}.`;
   }
 }
 
@@ -923,7 +969,7 @@ function renderTotalSpend(): string {
       </article>`;
   }
 
-  const { total, geo } = donutGeometry(entries);
+  const { geo } = donutGeometry(entries);
   const segments = entries
     .filter((e) => geo.has(e.s.id))
     .map((e) => {
@@ -940,16 +986,15 @@ function renderTotalSpend(): string {
   const tab = (id: SpendTab, label: string) =>
     `<button class="tab${spendTab === id ? " active" : ""}" data-tab="${id}">${label}</button>`;
 
-  const isTokens = config.spendMetric === "tokens";
-  const exactVal = isTokens ? `${fmtTokens(total)} tokens` : `$${total.toFixed(2)}`;
-  const exact = `${exactVal} — computed locally from session logs. Click to show ${isTokens ? "dollars" : "tokens"}.`;
+  const center = spendCenter(entries);
+  const exact = `${center.exact} — computed locally from session logs. Click to show ${METRIC_NAMES[nextSpendMetric(false)]}.`;
   const body = entries.length
     ? `
       <div class="donut-wrap" title="${escapeHtml(exact)}">
         <svg width="96" height="96" viewBox="0 0 96 96">
           ${segments}
-          <text class="donut-total" x="48" y="50" text-anchor="middle" font-size="14" font-weight="600">${isTokens ? fmtTokens(total) : fmtMoney(total)}</text>
-          <text class="donut-sub" x="48" y="62" text-anchor="middle" font-size="8">${isTokens ? "tokens" : "dollars"}</text>
+          <text class="donut-total" x="48" y="50" text-anchor="middle" font-size="14" font-weight="600">${center.primary}</text>
+          <text class="donut-sub" x="48" y="62" text-anchor="middle" font-size="8">${center.sub}</text>
         </svg>
         <div class="legend">${legend}</div>
       </div>`
@@ -2303,15 +2348,15 @@ window.addEventListener("DOMContentLoaded", () => {
   const providersEl = document.querySelector<HTMLElement>("#providers")!;
   // The donut center toggles what the card meters: dollars ⇄ raw tokens.
   // Left or right click both work; the choice persists.
-  const toggleSpendMetric = () => {
-    config.spendMetric = config.spendMetric === "tokens" ? "cost" : "tokens";
+  const toggleSpendMetric = (back = false) => {
+    config.spendMetric = nextSpendMetric(back);
     void patchConfig({ spendMetric: config.spendMetric });
     renderAll();
   };
   providersEl.addEventListener("contextmenu", (e) => {
     if ((e.target as Element).closest?.(".donut-wrap")) {
       e.preventDefault();
-      toggleSpendMetric();
+      toggleSpendMetric(true); // right-click cycles backward
     }
   });
 
