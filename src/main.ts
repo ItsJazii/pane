@@ -552,10 +552,17 @@ function renderMetric(m: Metric): string {
 
     let resetHtml = "";
     if (m.resets_at !== null && m.resets_at > Date.now()) {
-      // A rolling session window (≤6h period) at exactly 0% hasn't begun —
-      // its clock starts on the first message, so a countdown would lie.
-      const notStarted =
-        used <= 0 && m.period_ms !== null && m.period_ms <= 6 * 3_600_000;
+      // A rolling session window (≤6h period) that is still full-length
+      // hasn't begun — its clock starts on the first message, so a
+      // countdown would lie. Codex floors percentages and reports 1% on an
+      // untouched window, so the label keys on the window being fresh
+      // (with a grace for server-side reset staleness), not on a zero the
+      // backend no longer fabricates.
+      let notStarted = false;
+      if (m.period_ms !== null && m.period_ms <= 6 * 3_600_000 && used <= 1) {
+        const grace = Math.max(60_000, m.period_ms / 100);
+        notStarted = m.resets_at - Date.now() >= m.period_ms - grace;
+      }
       if (notStarted) {
         resetHtml = `<span title="Sessions start after you send your first message.">Not started</span>`;
       } else {
