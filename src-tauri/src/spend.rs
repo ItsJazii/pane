@@ -342,18 +342,38 @@ fn claude() -> ProviderSpend {
             let cache_read = num("cache_read_input_tokens");
             let cache_write = num("cache_creation_input_tokens");
             let tokens = input + output + cache_read + cache_write;
+            // Cache writes split by lifetime when the breakdown is present —
+            // 1-hour writes bill at twice the input rate.
+            let (w5m, w1h) = match usage.get("cache_creation") {
+                Some(cc) => {
+                    let g = |k: &str| cc.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+                    let (a, b) = (g("ephemeral_5m_input_tokens"), g("ephemeral_1h_input_tokens"));
+                    if a + b > 0.0 { (a, b) } else { (cache_write, 0.0) }
+                }
+                None => (cache_write, 0.0),
+            };
+            let fast = usage.get("speed").and_then(Value::as_str) == Some("fast");
 
             // Cost preference: the log's own costUSD → live catalog price
             // → static family fallback → excluded (never a guessed $0).
             let cost = match v.get("costUSD").and_then(Value::as_f64) {
                 Some(c) => c,
                 None => {
-                    let rate = pricing::lookup(&model)
-                        .map(|p| (p.input, p.output, p.cache_read, p.cache_write))
-                        .or_else(|| claude_price(&model));
-                    match rate {
-                        Some((i, o, cr, cw)) => {
-                            (input * i + output * o + cache_read * cr + cache_write * cw) / 1e6
+                    let price = pricing::lookup(&model).or_else(|| {
+                        claude_price(&model)
+                            .map(|(i, o, cr, cw)| pricing::Price::flat(i, o, cr, cw))
+                    });
+                    match price {
+                        Some(p) => {
+                            let u = pricing::Usage {
+                                input,
+                                output,
+                                cache_read,
+                                cache_write_5m: w5m,
+                                cache_write_1h: w1h,
+                            };
+                            let mult = if fast { pricing::fast_multiplier(&model) } else { 1.0 };
+                            pricing::request_cost(&p, &u, true) * mult
                         }
                         None => {
                             if tokens > 0.0 {
@@ -433,17 +453,26 @@ fn codex() -> ProviderSpend {
             // Live catalog first; the static gpt-5 table only for models
             // that are recognizably Codex-family; anything else is excluded.
             let lower = model.to_lowercase();
-            let rate = pricing::lookup(&model).map(|p| (p.input, p.output, p.cache_read));
-            let (pi, po, pc) = match rate {
-                Some(r) => r,
-                None if lower.contains("gpt") || lower.contains("codex") => codex_price(&model),
-                None => {
-                    note_unpriced(data, ts, &model, tokens);
-                    return;
+            let price = pricing::lookup(&model).or_else(|| {
+                if lower.contains("gpt") || lower.contains("codex") {
+                    let (i, o, cr) = codex_price(&model);
+                    Some(pricing::Price::flat(i, o, cr, i))
+                } else {
+                    None
                 }
+            });
+            let Some(p) = price else {
+                note_unpriced(data, ts, &model, tokens);
+                return;
             };
-            let cost = ((input - cached) * pi + cached * pc + output * po) / 1e6;
-            add_event(data, ts, &model, cost, tokens);
+            let u = pricing::Usage {
+                input: input - cached,
+                output,
+                cache_read: cached,
+                cache_write_5m: 0.0,
+                cache_write_1h: 0.0,
+            };
+            add_event(data, ts, &model, pricing::request_cost(&p, &u, true), tokens);
         });
         merge_data(&mut all, data);
     }
@@ -507,23 +536,29 @@ fn grok() -> ProviderSpend {
             // Token rows carry no model id — attribute via the row's process;
             // rows with no attributable model are excluded, like the Mac.
             let Some(model) = pid.and_then(|p| model_by_pid.get(&p)).cloned() else { return };
-            let rate = pricing::lookup(&model).map(|p| (p.input, p.output, p.cache_read));
-            let (pi, po, pc) = match rate {
-                Some(r) => r,
-                // Static backstop only for recognizably Grok-family models
-                // (catalog down); it has no cache rate, so cached tokens are
-                // conservatively priced as fresh input there.
-                None if model.to_lowercase().contains("grok") => {
+            // Static backstop only for recognizably Grok-family models
+            // (catalog down); it has no cache rate, so cached tokens are
+            // conservatively priced as fresh input there.
+            let price = pricing::lookup(&model).or_else(|| {
+                if model.to_lowercase().contains("grok") {
                     let (i, o) = grok_price(&model);
-                    (i, o, i)
+                    Some(pricing::Price::flat(i, o, i, i))
+                } else {
+                    None
                 }
-                None => {
-                    note_unpriced(data, ts, &model, tokens);
-                    return;
-                }
+            });
+            let Some(p) = price else {
+                note_unpriced(data, ts, &model, tokens);
+                return;
             };
-            let cost = ((prompt - cached) * pi + cached * pc + output * po) / 1e6;
-            add_event(data, ts, &model, cost, tokens);
+            let u = pricing::Usage {
+                input: prompt - cached,
+                output,
+                cache_read: cached,
+                cache_write_5m: 0.0,
+                cache_write_1h: 0.0,
+            };
+            add_event(data, ts, &model, pricing::request_cost(&p, &u, true), tokens);
         });
         merge_data(&mut all, data);
     }
@@ -557,12 +592,14 @@ fn devin() -> ProviderSpend {
         let model = devin_model(&ev.model);
         match pricing::lookup(&model) {
             Some(p) => {
-                let cost = (ev.input * p.input
-                    + ev.cache_read * p.cache_read
-                    + ev.cache_write * p.cache_write
-                    + ev.output * p.output)
-                    / 1e6;
-                add_event(&mut data, ts, &model, cost, tokens);
+                let u = pricing::Usage {
+                    input: ev.input,
+                    output: ev.output,
+                    cache_read: ev.cache_read,
+                    cache_write_5m: ev.cache_write,
+                    cache_write_1h: 0.0,
+                };
+                add_event(&mut data, ts, &model, pricing::request_cost(&p, &u, true), tokens);
             }
             None => note_unpriced(&mut data, ts, &model, tokens),
         }
@@ -662,12 +699,16 @@ pub fn cursor_from_csv(csv: &str) -> ProviderSpend {
         } else if tokens > 0.0 {
             match pricing::lookup(&model) {
                 Some(p) => {
-                    let cost = (input_wo * p.input
-                        + cache_write * p.cache_write
-                        + output * p.output
-                        + cache_read * p.cache_read)
-                        / 1e6;
-                    add_event(&mut data, ts, &model, cost, tokens);
+                    let u = pricing::Usage {
+                        input: input_wo,
+                        output,
+                        cache_read,
+                        cache_write_5m: cache_write,
+                        cache_write_1h: 0.0,
+                    };
+                    // CSV rows aggregate requests, so no single-request
+                    // long-context call can be proven — stay on base rates.
+                    add_event(&mut data, ts, &model, pricing::request_cost(&p, &u, false), tokens);
                 }
                 None => note_unpriced(&mut data, ts, &model, tokens),
             }

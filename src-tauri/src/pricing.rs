@@ -28,6 +28,78 @@ pub struct Price {
     pub output: f64,
     pub cache_read: f64,
     pub cache_write: f64,
+    /// Rates for requests whose prompt crosses 200k tokens — 1M-context
+    /// models bill the whole request at a higher tier. None = no tier.
+    pub input_200k: Option<f64>,
+    pub output_200k: Option<f64>,
+    pub cache_read_200k: Option<f64>,
+    pub cache_write_200k: Option<f64>,
+    /// Explicit 1-hour cache-write rates; absent, 1h writes bill at
+    /// twice the (tier-selected) input rate.
+    pub cache_write_1h: Option<f64>,
+    pub cache_write_1h_200k: Option<f64>,
+}
+
+impl Price {
+    /// A price with no long-context tier and no explicit 1h rate — what
+    /// models.dev, the supplement, and the static fallbacks provide.
+    pub fn flat(input: f64, output: f64, cache_read: f64, cache_write: f64) -> Self {
+        Price {
+            input,
+            output,
+            cache_read,
+            cache_write,
+            input_200k: None,
+            output_200k: None,
+            cache_read_200k: None,
+            cache_write_200k: None,
+            cache_write_1h: None,
+            cache_write_1h_200k: None,
+        }
+    }
+}
+
+/// One request's token counts, cache writes split by lifetime.
+pub struct Usage {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write_5m: f64,
+    pub cache_write_1h: f64,
+}
+
+/// Dollar cost of one request. Vendors bill the *whole* request (output
+/// included) at the >200k tier once the prompt — everything except output —
+/// crosses 200k tokens; aggregated sources (Cursor's CSV) opt out because
+/// their rows don't preserve request boundaries. 1-hour cache writes bill
+/// at twice the tier-selected input rate unless the catalog carries an
+/// explicit rate.
+pub fn request_cost(p: &Price, u: &Usage, apply_long_context: bool) -> f64 {
+    let prompt = u.input + u.cache_read + u.cache_write_5m + u.cache_write_1h;
+    let long = apply_long_context && prompt > 200_000.0;
+    let pick = |base: f64, above: Option<f64>| if long { above.unwrap_or(base) } else { base };
+    let input = pick(p.input, p.input_200k);
+    let w1h = if long {
+        p.cache_write_1h_200k
+            .or(p.input_200k.map(|i| i * 2.0))
+            .unwrap_or_else(|| p.cache_write_1h.unwrap_or(p.input * 2.0))
+    } else {
+        p.cache_write_1h.unwrap_or(p.input * 2.0)
+    };
+    (u.input * input
+        + u.output * pick(p.output, p.output_200k)
+        + u.cache_read * pick(p.cache_read, p.cache_read_200k)
+        + u.cache_write_5m * pick(p.cache_write, p.cache_write_200k)
+        + u.cache_write_1h * w1h)
+        / 1e6
+}
+
+/// The supplement's fast multiplier for a model, 1.0 when none is
+/// published — a fast-flagged request without data bills at standard
+/// rates rather than a guessed premium (Mac behavior).
+pub fn fast_multiplier(model: &str) -> f64 {
+    let s = store().lock().unwrap();
+    s.fast_multipliers.get(model).copied().unwrap_or(1.0)
 }
 
 const SOURCES: [(&str, &str); 3] = [
@@ -98,15 +170,20 @@ fn parse_litellm(doc: &Value) -> HashMap<String, Price> {
         else {
             continue;
         };
+        let per_m = |key: &str| per_tok(key).map(|v| v * 1e6);
         out.insert(
             model.clone(),
             Price {
                 input: input * 1e6,
                 output: output * 1e6,
-                cache_read: per_tok("cache_read_input_token_cost").map(|v| v * 1e6).unwrap_or(input * 1e6),
-                cache_write: per_tok("cache_creation_input_token_cost")
-                    .map(|v| v * 1e6)
-                    .unwrap_or(input * 1e6),
+                cache_read: per_m("cache_read_input_token_cost").unwrap_or(input * 1e6),
+                cache_write: per_m("cache_creation_input_token_cost").unwrap_or(input * 1e6),
+                input_200k: per_m("input_cost_per_token_above_200k_tokens"),
+                output_200k: per_m("output_cost_per_token_above_200k_tokens"),
+                cache_read_200k: per_m("cache_read_input_token_cost_above_200k_tokens"),
+                cache_write_200k: per_m("cache_creation_input_token_cost_above_200k_tokens"),
+                cache_write_1h: per_m("cache_creation_input_token_cost_above_1hr"),
+                cache_write_1h_200k: per_m("cache_creation_input_token_cost_above_1hr_above_200k_tokens"),
             },
         );
     }
@@ -123,12 +200,12 @@ fn parse_modelsdev(doc: &Value) -> HashMap<String, Price> {
             let get = |key: &str| cost.get(key).and_then(Value::as_f64);
             let (Some(input), Some(output)) = (get("input"), get("output")) else { continue };
             // First provider wins; models.dev repeats ids across resellers.
-            out.entry(id.clone()).or_insert(Price {
+            out.entry(id.clone()).or_insert(Price::flat(
                 input,
                 output,
-                cache_read: get("cache_read").unwrap_or(input),
-                cache_write: get("cache_write").unwrap_or(input),
-            });
+                get("cache_read").unwrap_or(input),
+                get("cache_write").unwrap_or(input),
+            ));
         }
     }
     out
@@ -148,12 +225,12 @@ fn apply_supplement(store: &mut Store, doc: &Value) {
             };
             store.supplement.insert(
                 model.clone(),
-                Price {
+                Price::flat(
                     input,
                     output,
-                    cache_read: get("cache_read_per_million").unwrap_or(input),
-                    cache_write: get("cache_write_per_million").unwrap_or(input),
-                },
+                    get("cache_read_per_million").unwrap_or(input),
+                    get("cache_write_per_million").unwrap_or(input),
+                ),
             );
         }
     }
@@ -366,11 +443,18 @@ fn resolve(s: &Store, model: &str, depth: u8) -> Option<Price> {
             }
         };
         if let Some(p) = resolve(s, base, depth + 1) {
+            let scale = |v: Option<f64>| v.map(|x| x * m);
             return Some(Price {
                 input: p.input * m,
                 output: p.output * m,
                 cache_read: p.cache_read * m,
                 cache_write: p.cache_write * m,
+                input_200k: scale(p.input_200k),
+                output_200k: scale(p.output_200k),
+                cache_read_200k: scale(p.cache_read_200k),
+                cache_write_200k: scale(p.cache_write_200k),
+                cache_write_1h: scale(p.cache_write_1h),
+                cache_write_1h_200k: scale(p.cache_write_1h_200k),
             });
         }
     }
@@ -404,6 +488,51 @@ fn resolve(s: &Store, model: &str, depth: u8) -> Option<Price> {
 
 #[cfg(test)]
 mod tests {
+    use super::{request_cost, Price, Usage};
+
+    fn usage(input: f64, output: f64, cache_read: f64, w5m: f64, w1h: f64) -> Usage {
+        Usage { input, output, cache_read, cache_write_5m: w5m, cache_write_1h: w1h }
+    }
+
+    #[test]
+    fn long_context_reprices_the_whole_request() {
+        let mut p = Price::flat(3.0, 15.0, 0.3, 3.75);
+        p.input_200k = Some(6.0);
+        p.output_200k = Some(22.5);
+        p.cache_read_200k = Some(0.6);
+
+        // Under the threshold: base rates.
+        let small = usage(150_000.0, 10_000.0, 0.0, 0.0, 0.0);
+        let expect = (150_000.0 * 3.0 + 10_000.0 * 15.0) / 1e6;
+        assert!((request_cost(&p, &small, true) - expect).abs() < 1e-9);
+
+        // Prompt over 200k: every component reprices, output included.
+        let big = usage(250_000.0, 10_000.0, 0.0, 0.0, 0.0);
+        let expect = (250_000.0 * 6.0 + 10_000.0 * 22.5) / 1e6;
+        assert!((request_cost(&p, &big, true) - expect).abs() < 1e-9);
+
+        // Aggregated sources opt out and stay on base rates.
+        let expect = (250_000.0 * 3.0 + 10_000.0 * 15.0) / 1e6;
+        assert!((request_cost(&p, &big, false) - expect).abs() < 1e-9);
+
+        // Cache reads count toward the threshold even with tiny input.
+        let cached = usage(1_000.0, 0.0, 240_000.0, 0.0, 0.0);
+        let expect = (1_000.0 * 6.0 + 240_000.0 * 0.6) / 1e6;
+        assert!((request_cost(&p, &cached, true) - expect).abs() < 1e-9);
+    }
+
+    #[test]
+    fn one_hour_cache_writes_bill_twice_input() {
+        let p = Price::flat(4.0, 20.0, 0.4, 5.0);
+        let u = usage(0.0, 0.0, 0.0, 0.0, 1_000_000.0);
+        assert!((request_cost(&p, &u, true) - 8.0).abs() < 1e-9);
+
+        // An explicit catalog rate wins over the ×2 convention.
+        let mut p = p;
+        p.cache_write_1h = Some(9.0);
+        assert!((request_cost(&p, &u, true) - 9.0).abs() < 1e-9);
+    }
+
     /// Live probe: fetches the three catalogs and resolves a few real slugs.
     /// Run via `cargo test --lib pricing -- --ignored --nocapture`.
     #[test]
