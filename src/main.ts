@@ -492,6 +492,10 @@ function computePace(m: Metric): Pace {
   const elapsedMs = m.period_ms - remainMs;
   const frac = elapsedMs / m.period_ms;
   if (frac < 0.05 || elapsedMs < 5 * 60000) return byLevel();
+  // Near-empty windows stay calm: a floored 1% reading right at the
+  // projection gate can land exactly on the limit and flash red (Mac
+  // keeps the same 5% safeguard).
+  if (used < 5) return byLevel();
 
   const projected = used / frac;
   const tick = clampPercent(frac * 100);
@@ -548,10 +552,17 @@ function renderMetric(m: Metric): string {
 
     let resetHtml = "";
     if (m.resets_at !== null && m.resets_at > Date.now()) {
-      // A rolling session window (≤6h period) at exactly 0% hasn't begun —
-      // its clock starts on the first message, so a countdown would lie.
-      const notStarted =
-        used <= 0 && m.period_ms !== null && m.period_ms <= 6 * 3_600_000;
+      // A rolling session window (≤6h period) that is still full-length
+      // hasn't begun — its clock starts on the first message, so a
+      // countdown would lie. Codex floors percentages and reports 1% on an
+      // untouched window, so the label keys on the window being fresh
+      // (with a grace for server-side reset staleness), not on a zero the
+      // backend no longer fabricates.
+      let notStarted = false;
+      if (m.period_ms !== null && m.period_ms <= 6 * 3_600_000 && used <= 1) {
+        const grace = Math.max(60_000, m.period_ms / 100);
+        notStarted = m.resets_at - Date.now() >= m.period_ms - grace;
+      }
       if (notStarted) {
         resetHtml = `<span title="Sessions start after you send your first message.">Not started</span>`;
       } else {
