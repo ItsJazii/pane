@@ -360,7 +360,7 @@ fn push_window_labeled(metrics: &mut Vec<Metric>, node: Option<&Value>, label: &
 
 fn push_window_inner(metrics: &mut Vec<Metric>, node: Option<&Value>, label_in: &str, forced: bool) {
     let Some(node) = node else { return };
-    let Some(mut used) = node.get("used_percent").and_then(Value::as_f64) else { return };
+    let Some(used) = node.get("used_percent").and_then(Value::as_f64) else { return };
     let window_seconds = node
         .get("limit_window_seconds")
         .and_then(Value::as_i64)
@@ -388,15 +388,9 @@ fn push_window_inner(metrics: &mut Vec<Metric>, node: Option<&Value>, label_in: 
                 .and_then(Value::as_i64)
                 .map(|s| now_ms + s * 1000)
         });
-    // Codex floors to whole percents and reports 1% on an untouched window.
-    // If the window is essentially full-length (fresh, with a grace for
-    // server-side reset_at staleness), normalize ≤1% to a true zero so the
-    // UI can say "Not started" (upstream issue #708).
-    if let Some(reset) = resets_at {
-        let grace = (period_ms / 100).max(60_000);
-        if used <= 1.0 && now_ms < reset && reset - now_ms >= period_ms - grace {
-            used = 0.0;
-        }
-    }
+    // Percentages show as Codex reports them (it floors to whole percents,
+    // so an untouched window can read 1%) — the Mac dropped its old ≤1%→0
+    // normalization because it masked real early usage; near-empty windows
+    // are kept calm on the pacing side instead.
     metrics.push(Metric::progress(label, used, None).with_reset(resets_at, Some(period_ms)));
 }

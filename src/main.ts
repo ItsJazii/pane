@@ -492,6 +492,10 @@ function computePace(m: Metric): Pace {
   const elapsedMs = m.period_ms - remainMs;
   const frac = elapsedMs / m.period_ms;
   if (frac < 0.05 || elapsedMs < 5 * 60000) return byLevel();
+  // Near-empty windows stay calm: a floored 1% reading right at the
+  // projection gate can land exactly on the limit and flash red (Mac
+  // keeps the same 5% safeguard).
+  if (used < 5) return byLevel();
 
   const projected = used / frac;
   const tick = clampPercent(frac * 100);
