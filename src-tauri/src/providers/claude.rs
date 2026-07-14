@@ -113,6 +113,21 @@ async fn fetch() -> Result<Snapshot, String> {
         .await
         .map_err(|e| format!("usage request: {e}"))?;
     if !resp.status().is_success() {
+        // Anthropic's 429s state how long the cooldown runs (a plan change
+        // can trigger a ~25-minute one); carry it so the fetch guard can
+        // bench for exactly that long instead of knocking every 5 minutes.
+        if resp.status().as_u16() == 429 {
+            if let Some(secs) = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok())
+            {
+                return Err(format!(
+                    "usage endpoint: HTTP 429 (retry_after_s={secs})"
+                ));
+            }
+        }
         return Err(format!("usage endpoint: HTTP {}", resp.status()));
     }
     let usage: Value = resp.json().await.map_err(|e| format!("usage parse: {e}"))?;
