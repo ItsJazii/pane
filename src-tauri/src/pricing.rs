@@ -75,8 +75,15 @@ pub struct Usage {
 /// at twice the tier-selected input rate unless the catalog carries an
 /// explicit rate.
 pub fn request_cost(p: &Price, u: &Usage, apply_long_context: bool) -> f64 {
+    request_cost_at(p, u, if apply_long_context { 200_000.0 } else { f64::INFINITY })
+}
+
+/// Like `request_cost`, with an explicit long-context threshold — the tier
+/// boundary is vendor-specific (Anthropic switches at 200k prompt tokens,
+/// OpenAI's Codex models at 272k).
+pub fn request_cost_at(p: &Price, u: &Usage, threshold: f64) -> f64 {
     let prompt = u.input + u.cache_read + u.cache_write_5m + u.cache_write_1h;
-    let long = apply_long_context && prompt > 200_000.0;
+    let long = prompt > threshold;
     let pick = |base: f64, above: Option<f64>| if long { above.unwrap_or(base) } else { base };
     let input = pick(p.input, p.input_200k);
     let w1h = if long {

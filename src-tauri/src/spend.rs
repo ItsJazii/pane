@@ -295,6 +295,180 @@ fn grok_price(model: &str) -> (f64, f64) {
 // Providers
 // ---------------------------------------------------------------------------
 
+/// Token buckets of one Claude usage object — a message's `usage` or one
+/// advisor iteration inside `usage.iterations` (same field names). `None`
+/// when the required input/output counts are missing, or when `speed`
+/// carries a value outside the known set (an unrecognized log shape — the
+/// Mac skips those lines too).
+struct ClaudeTokens {
+    input: f64,
+    output: f64,
+    cache_read: f64,
+    w5m: f64,
+    w1h: f64,
+    fast: bool,
+}
+
+impl ClaudeTokens {
+    fn total(&self) -> f64 {
+        self.input + self.output + self.cache_read + self.w5m + self.w1h
+    }
+}
+
+fn claude_tokens(u: &Value) -> Option<ClaudeTokens> {
+    let input = u.get("input_tokens").and_then(Value::as_f64)?;
+    let output = u.get("output_tokens").and_then(Value::as_f64)?;
+    let speed = u.get("speed").and_then(Value::as_str);
+    if let Some(s) = speed {
+        if s != "fast" && s != "standard" {
+            return None;
+        }
+    }
+    let num = |k: &str| u.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+    let cache_write = num("cache_creation_input_tokens");
+    // Cache writes split by lifetime when the breakdown is present —
+    // 1-hour writes bill at twice the input rate.
+    let (w5m, w1h) = match u.get("cache_creation") {
+        Some(cc) => {
+            let g = |k: &str| cc.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+            let (a, b) = (g("ephemeral_5m_input_tokens"), g("ephemeral_1h_input_tokens"));
+            if a + b > 0.0 { (a, b) } else { (cache_write, 0.0) }
+        }
+        None => (cache_write, 0.0),
+    };
+    Some(ClaudeTokens {
+        input,
+        output,
+        cache_read: num("cache_read_input_tokens"),
+        w5m,
+        w1h,
+        fast: speed == Some("fast"),
+    })
+}
+
+/// Price one Claude entry: live catalog → static family fallback → None
+/// (excluded, never a guessed $0). Fast-flagged requests scale by the
+/// supplement's multiplier.
+fn claude_cost(model: &str, t: &ClaudeTokens) -> Option<f64> {
+    let price = pricing::lookup(model).or_else(|| {
+        claude_price(model).map(|(i, o, cr, cw)| pricing::Price::flat(i, o, cr, cw))
+    })?;
+    let u = pricing::Usage {
+        input: t.input,
+        output: t.output,
+        cache_read: t.cache_read,
+        cache_write_5m: t.w5m,
+        cache_write_1h: t.w1h,
+    };
+    let mult = if t.fast { pricing::fast_multiplier(model) } else { 1.0 };
+    Some(pricing::request_cost(&price, &u, true) * mult)
+}
+
+/// Per-file dedup state for the Claude scanner.
+#[derive(Default)]
+struct ClaudeFileState {
+    /// (message id, request id) pairs already counted.
+    seen: HashSet<String>,
+    /// message id → whether its first occurrence was a sidechain line.
+    seen_mids: HashMap<String, bool>,
+}
+
+/// Parse one Claude Code session-log line into spend events. Persisted
+/// `claude -p` runs write the same assistant records (entrypoint "sdk-cli"),
+/// so they count like interactive usage; `--no-session-persistence` runs
+/// write no log at all.
+fn claude_line(st: &mut ClaudeFileState, line: &str, data: &mut FileData) {
+    if !line.contains("\"type\":\"assistant\"") {
+        return;
+    }
+    let Ok(v) = serde_json::from_str::<Value>(line) else { return };
+    if v.get("type").and_then(Value::as_str) != Some("assistant") {
+        return;
+    }
+    let Some(ts) = parse_ts(v.get("timestamp")) else { return };
+    let usage = v.pointer("/message/usage").cloned().unwrap_or(Value::Null);
+    let Some(t) = claude_tokens(&usage) else { return };
+
+    // Resumed sessions repeat messages under the same request id, and
+    // sidechain logs replay the parent's message under a *fresh* request id
+    // — dedupe on both. Keep-first: the parent line precedes its sidechain
+    // replay in the log. (The Mac also re-prefers a parent that arrives
+    // after its sidechain copy; a streaming pass can't retract an event, so
+    // that rarer order keeps the sidechain copy — still counted once.)
+    let sidechain = v.get("isSidechain").and_then(Value::as_bool).unwrap_or(false);
+    if let Some(mid) = v.pointer("/message/id").and_then(Value::as_str) {
+        let rid = v.get("requestId").and_then(Value::as_str).unwrap_or("");
+        if !st.seen.insert(format!("{mid}:{rid}")) {
+            return;
+        }
+        if let Some(&first_was_sidechain) = st.seen_mids.get(mid) {
+            if sidechain || first_was_sidechain {
+                return;
+            }
+            // Same message id under distinct request ids with no sidechain
+            // involved is a genuine retry — both count (Mac parity).
+        }
+        st.seen_mids.entry(mid.to_string()).or_insert(sidechain);
+    }
+
+    // `<synthetic>` is Claude Code's placeholder for tool-generated turns:
+    // there is no real model to price or warn about, so only a carried
+    // costUSD makes the line count (as unattributed usage).
+    let model_raw = v.pointer("/message/model").and_then(Value::as_str);
+    let synthetic = model_raw == Some("<synthetic>");
+    let model = model_raw.unwrap_or("unknown").to_string();
+
+    // Cost preference: the log's own costUSD → live catalog price
+    // → static family fallback → excluded (never a guessed $0).
+    match v.get("costUSD").and_then(Value::as_f64) {
+        Some(c) => {
+            let name = if synthetic { "unattributed" } else { model.as_str() };
+            if t.total() > 0.0 || c > 0.0 {
+                add_event(data, ts, name, c, t.total());
+            }
+        }
+        None if synthetic => {}
+        None => match claude_cost(&model, &t) {
+            Some(c) => {
+                if t.total() > 0.0 || c > 0.0 {
+                    add_event(data, ts, &model, c, t.total());
+                }
+            }
+            None => {
+                if t.total() > 0.0 {
+                    note_unpriced(data, ts, &model, t.total());
+                }
+            }
+        },
+    }
+
+    // Fable-era logs nest advisor work in `usage.iterations`. Only
+    // advisor-message iterations become extra entries, under the advisor's
+    // own model — ordinary message iterations are already inside the
+    // parent's usage totals, and counting them again would double-count.
+    let Some(iters) = usage.get("iterations").and_then(Value::as_array) else { return };
+    for it in iters {
+        if it.get("type").and_then(Value::as_str) != Some("advisor_message") {
+            continue;
+        }
+        let Some(advisor) = it
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|m| !m.is_empty() && *m != "<synthetic>")
+        else {
+            continue;
+        };
+        let Some(at) = claude_tokens(it) else { continue };
+        if at.total() <= 0.0 {
+            continue;
+        }
+        match claude_cost(advisor, &at) {
+            Some(c) => add_event(data, ts, advisor, c, at.total()),
+            None => note_unpriced(data, ts, advisor, at.total()),
+        }
+    }
+}
+
 /// Claude Code writes one JSONL per session under ~/.claude/projects. Each
 /// assistant line carries usage token counts and usually a precomputed
 /// costUSD, which we prefer over our own pricing table.
@@ -308,94 +482,316 @@ fn claude() -> ProviderSpend {
     recent_jsonl_files(&root, &mut files);
     let mut all = FileData::default();
     for file in files {
-        // Resumed sessions can repeat messages within a file; dedupe on
-        // message id + request id.
-        let mut seen: HashSet<String> = HashSet::new();
-        let data = file_days(&file, &mut |line, data| {
-            if !line.contains("\"type\":\"assistant\"") {
-                return;
-            }
-            let Ok(v) = serde_json::from_str::<Value>(line) else { return };
-            if v.get("type").and_then(Value::as_str) != Some("assistant") {
-                return;
-            }
-            let Some(ts) = parse_ts(v.get("timestamp")) else { return };
-
-            if let (Some(mid), Some(rid)) = (
-                v.pointer("/message/id").and_then(Value::as_str),
-                v.get("requestId").and_then(Value::as_str),
-            ) {
-                if !seen.insert(format!("{mid}:{rid}")) {
-                    return;
-                }
-            }
-
-            let model = v
-                .pointer("/message/model")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_string();
-            let usage = v.pointer("/message/usage").cloned().unwrap_or(Value::Null);
-            let num = |k: &str| usage.get(k).and_then(Value::as_f64).unwrap_or(0.0);
-            let input = num("input_tokens");
-            let output = num("output_tokens");
-            let cache_read = num("cache_read_input_tokens");
-            let cache_write = num("cache_creation_input_tokens");
-            let tokens = input + output + cache_read + cache_write;
-            // Cache writes split by lifetime when the breakdown is present —
-            // 1-hour writes bill at twice the input rate.
-            let (w5m, w1h) = match usage.get("cache_creation") {
-                Some(cc) => {
-                    let g = |k: &str| cc.get(k).and_then(Value::as_f64).unwrap_or(0.0);
-                    let (a, b) = (g("ephemeral_5m_input_tokens"), g("ephemeral_1h_input_tokens"));
-                    if a + b > 0.0 { (a, b) } else { (cache_write, 0.0) }
-                }
-                None => (cache_write, 0.0),
-            };
-            let fast = usage.get("speed").and_then(Value::as_str) == Some("fast");
-
-            // Cost preference: the log's own costUSD → live catalog price
-            // → static family fallback → excluded (never a guessed $0).
-            let cost = match v.get("costUSD").and_then(Value::as_f64) {
-                Some(c) => c,
-                None => {
-                    let price = pricing::lookup(&model).or_else(|| {
-                        claude_price(&model)
-                            .map(|(i, o, cr, cw)| pricing::Price::flat(i, o, cr, cw))
-                    });
-                    match price {
-                        Some(p) => {
-                            let u = pricing::Usage {
-                                input,
-                                output,
-                                cache_read,
-                                cache_write_5m: w5m,
-                                cache_write_1h: w1h,
-                            };
-                            let mult = if fast { pricing::fast_multiplier(&model) } else { 1.0 };
-                            pricing::request_cost(&p, &u, true) * mult
-                        }
-                        None => {
-                            if tokens > 0.0 {
-                                note_unpriced(data, ts, &model, tokens);
-                            }
-                            return;
-                        }
-                    }
-                }
-            };
-
-            if tokens > 0.0 || cost > 0.0 {
-                add_event(data, ts, &model, cost, tokens);
-            }
-        });
+        let mut state = ClaudeFileState::default();
+        let data = file_days(&file, &mut |line, data| claude_line(&mut state, line, data));
         merge_data(&mut all, data);
     }
     build_spend("claude", "Claude", all)
 }
 
+/// One `token_count` usage object, tolerating the older field spellings
+/// (`prompt_tokens`, `cache_read_input_tokens`, …) the Mac scanner accepts.
+#[derive(Clone, PartialEq)]
+struct CodexRaw {
+    input: f64,
+    cached: f64,
+    output: f64,
+    reasoning: f64,
+    total: f64,
+}
+
+fn codex_raw(v: &Value) -> CodexRaw {
+    let num = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|k| v.get(*k).and_then(Value::as_f64))
+            .unwrap_or(0.0)
+    };
+    let input = num(&["input_tokens", "prompt_tokens", "input"]);
+    let cached = num(&["cached_input_tokens", "cache_read_input_tokens", "cached_tokens"]);
+    let output = num(&["output_tokens", "completion_tokens", "output"]);
+    let reasoning = num(&["reasoning_output_tokens", "reasoning_tokens"]);
+    let reported = num(&["total_tokens"]);
+    let recomputed = input + output + reasoning;
+    let total = if reported > 0.0 || recomputed == 0.0 { reported } else { recomputed };
+    CodexRaw { input, cached, output, reasoning, total }
+}
+
+impl CodexRaw {
+    fn any_tokens(&self) -> bool {
+        self.input > 0.0 || self.cached > 0.0 || self.output > 0.0 || self.reasoning > 0.0
+    }
+
+    /// Recover a turn delta from cumulative totals (when `last_token_usage`
+    /// is absent).
+    fn minus(&self, prev: Option<&CodexRaw>) -> CodexRaw {
+        let p = |f: fn(&CodexRaw) -> f64| prev.map(f).unwrap_or(0.0);
+        CodexRaw {
+            input: (self.input - p(|r| r.input)).max(0.0),
+            cached: (self.cached - p(|r| r.cached)).max(0.0),
+            output: (self.output - p(|r| r.output)).max(0.0),
+            reasoning: (self.reasoning - p(|r| r.reasoning)).max(0.0),
+            total: (self.total - p(|r| r.total)).max(0.0),
+        }
+    }
+}
+
+/// A session_meta payload marking the file as a child session (subagent
+/// spawn or fork) whose leading `token_count` lines replay the parent's
+/// history. JSON `null` and blank strings count as absent — a root session
+/// declaring `forked_from_id: null` must not be misclassified as a child.
+fn codex_child_meta(payload: &Value) -> bool {
+    let set = |k: &str| {
+        payload.get(k).is_some_and(|v| match v {
+            Value::Null => false,
+            Value::String(s) => !s.trim().is_empty(),
+            _ => true,
+        })
+    };
+    set("forked_from_id")
+        || set("parent_thread_id")
+        || payload.get("thread_source").and_then(Value::as_str) == Some("subagent")
+        || payload.pointer("/source/subagent").is_some_and(|v| !v.is_null())
+}
+
+/// How a child session's replayed parent history is gated until its first
+/// live turn.
+enum CodexReplayGate {
+    /// Clear when `task_started.started_at` is at/after the child's creation
+    /// epoch (replayed task_started lines carry the parent's older one).
+    UntilStartedAt(f64),
+    /// The child's session_meta had no parseable creation timestamp: clear
+    /// when `started_at` is at/after that task_started line's own wall-clock
+    /// second.
+    SelfTimed,
+}
+
+/// Per-file parse state for one Codex rollout.
+#[derive(Default)]
+struct CodexFileState {
+    model: String,
+    saw_meta: bool,
+    gate: Option<CodexReplayGate>,
+    fast_tier: bool,
+    prev_totals: Option<CodexRaw>,
+}
+
+/// Date-stamped snapshots ("gpt-5.6-sol-2026-06-01" / "-20260601") map to
+/// their base slug for the provider tables below.
+fn codex_dated_base(model: &str) -> String {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r"-(\d{4}-\d{2}-\d{2}|\d{8})$").unwrap());
+    re.replace(model, "").into_owned()
+}
+
+/// Codex priority/fast service-tier multipliers are provider-specific and
+/// intentionally not Cursor's `-fast` supplement multipliers. Unknown models
+/// use the supplement's multiplier when one exists, else 2x.
+fn codex_priority_multiplier(dated: &str, rate_model: &str) -> f64 {
+    match dated {
+        "gpt-5.5" | "gpt-5.5-pro" => 2.5,
+        "gpt-5.4" | "gpt-5.4-pro" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" => 2.0,
+        _ => {
+            let m = pricing::fast_multiplier(rate_model);
+            if m == 1.0 { 2.0 } else { m }
+        }
+    }
+}
+
+/// OpenAI's published long-context rates (input, output, cache read $/MTok)
+/// for Codex models — the whole request switches tiers above 272k prompt
+/// tokens, not the 200k Anthropic uses.
+fn codex_long_context(dated: &str) -> Option<(f64, f64, f64)> {
+    match dated {
+        "gpt-5.4" | "gpt-5.6-terra" => Some((5.0, 22.5, 0.5)),
+        "gpt-5.4-pro" | "gpt-5.5-pro" => Some((60.0, 270.0, 60.0)),
+        "gpt-5.5" | "gpt-5.6-sol" => Some((10.0, 45.0, 1.0)),
+        "gpt-5.6-luna" => Some((2.0, 9.0, 0.2)),
+        _ => None,
+    }
+}
+
+/// OpenAI publishes no cached-input discount for these Pro models: cached
+/// input bills at the full input rate.
+fn codex_no_cache_discount(dated: &str) -> bool {
+    matches!(dated, "gpt-5.4-pro" | "gpt-5.5-pro")
+}
+
+/// Parse one Codex rollout line. Tracks the current model (turn_context),
+/// the fast/priority service tier (thread_settings_applied — config.toml is
+/// deliberately not consulted, toggling it must not reprice history), and a
+/// child session's replay gate; normalizes each token_count into a delta
+/// event.
+fn codex_line(st: &mut CodexFileState, line: &str, data: &mut FileData) {
+    if !(line.contains("token_count")
+        || line.contains("turn_context")
+        || line.contains("session_meta")
+        || line.contains("task_started")
+        || line.contains("thread_settings_applied"))
+    {
+        return;
+    }
+    let Ok(v) = serde_json::from_str::<Value>(line) else { return };
+
+    // Only the file's own (first) session_meta counts — a child file replays
+    // the parent's session_meta lines right after its own.
+    if v.get("type").and_then(Value::as_str) == Some("session_meta") {
+        if !st.saw_meta {
+            st.saw_meta = true;
+            if let Some(p) = v.get("payload") {
+                if codex_child_meta(p) {
+                    st.gate = Some(match parse_ts(v.get("timestamp")) {
+                        Some(ts) => CodexReplayGate::UntilStartedAt(ts.timestamp() as f64),
+                        None => CodexReplayGate::SelfTimed,
+                    });
+                }
+                if let Some(m) = p.get("model").and_then(Value::as_str) {
+                    st.model = m.to_string();
+                }
+            }
+        }
+        return;
+    }
+
+    match v.pointer("/payload/type").and_then(Value::as_str) {
+        Some("thread_settings_applied") => {
+            let tier = v
+                .pointer("/payload/thread_settings/service_tier")
+                .or_else(|| v.pointer("/payload/service_tier"))
+                .and_then(Value::as_str);
+            if let Some(t) = tier {
+                st.fast_tier = t == "fast" || t == "priority";
+            }
+            return;
+        }
+        Some("task_started") => {
+            // The first live task_started ends a child's replayed history —
+            // replayed ones carry the parent's original, older started_at.
+            if let Some(gate) = &st.gate {
+                if let Some(started) = v.pointer("/payload/started_at").and_then(Value::as_f64) {
+                    let cleared = match gate {
+                        CodexReplayGate::UntilStartedAt(t) => started >= *t,
+                        CodexReplayGate::SelfTimed => parse_ts(v.get("timestamp"))
+                            .is_some_and(|ts| started >= ts.timestamp() as f64),
+                    };
+                    if cleared {
+                        st.gate = None;
+                    }
+                }
+            }
+            return;
+        }
+        Some("token_count") => {}
+        _ => {
+            // turn_context (or older shapes): update the session's model.
+            if let Some(m) = v.pointer("/payload/model").and_then(Value::as_str) {
+                st.model = m.to_string();
+            }
+            return;
+        }
+    }
+
+    // token_count from here on. A model on the line itself wins.
+    if let Some(m) = v
+        .pointer("/payload/model")
+        .and_then(Value::as_str)
+        .or_else(|| v.pointer("/payload/info/model").and_then(Value::as_str))
+    {
+        st.model = m.to_string();
+    }
+    let Some(ts) = parse_ts(v.get("timestamp")) else { return };
+    let totals = v.pointer("/payload/info/total_token_usage").map(codex_raw);
+
+    // Replayed parent history: seed the delta baseline, never count it —
+    // a large parent history takes several seconds to replay, which is why
+    // this is a log marker and not a time window (the Mac's old one-second
+    // window leaked replays and inflated spend ~20x).
+    if st.gate.is_some() {
+        if let Some(t) = totals {
+            st.prev_totals = Some(t);
+        }
+        return;
+    }
+    // Unchanged cumulative totals mean a re-emitted stale snapshot, not new
+    // usage — even when the line repeats a last_token_usage.
+    if let (Some(t), Some(p)) = (&totals, &st.prev_totals) {
+        if t == p {
+            return;
+        }
+    }
+    let usage = match v.pointer("/payload/info/last_token_usage") {
+        Some(l) => codex_raw(l),
+        None => match &totals {
+            Some(t) => t.minus(st.prev_totals.as_ref()),
+            None => return,
+        },
+    };
+    if let Some(t) = totals {
+        st.prev_totals = Some(t);
+    }
+    if !usage.any_tokens() {
+        return;
+    }
+
+    let model = if st.model.is_empty() { "gpt-5".to_string() } else { st.model.clone() };
+    let tokens = usage.total;
+
+    // Codex speed is a provider tier, not Cursor's `-fast` price variant: a
+    // `-fast` slug resolves through its unscaled base rates and the Codex
+    // multiplier applies exactly once. A fast-only third-party slug with no
+    // base entry keeps its already-scaled rate, no second multiplier.
+    let (rate_model, alias_fast) = match model.strip_suffix("-fast") {
+        Some(base) if !base.is_empty() => (base.to_string(), true),
+        _ => (model.clone(), false),
+    };
+    let lower = model.to_lowercase();
+    let base_price = pricing::lookup(&rate_model);
+    let price = base_price
+        .or_else(|| if alias_fast { pricing::lookup(&model) } else { None })
+        .or_else(|| {
+            // The static gpt-5 table only for recognizably Codex-family
+            // models; anything else is excluded.
+            if lower.contains("gpt") || lower.contains("codex") {
+                let (i, o, cr) = codex_price(&rate_model);
+                Some(pricing::Price::flat(i, o, cr, i))
+            } else {
+                None
+            }
+        });
+    let Some(mut p) = price else {
+        note_unpriced(data, ts, &model, tokens);
+        return;
+    };
+
+    let dated = codex_dated_base(&rate_model.to_lowercase());
+    let mut threshold = 200_000.0;
+    if let Some((i, o, cr)) = codex_long_context(&dated) {
+        p.input_200k = Some(i);
+        p.output_200k = Some(o);
+        p.cache_read_200k = Some(cr);
+        threshold = 272_000.0;
+    }
+    if codex_no_cache_discount(&dated) {
+        p.cache_read = p.input;
+        p.cache_read_200k = p.input_200k;
+    }
+    let is_fast = if alias_fast { base_price.is_some() } else { st.fast_tier };
+    let mult = if is_fast { codex_priority_multiplier(&dated, &rate_model) } else { 1.0 };
+
+    let cached = usage.cached.min(usage.input);
+    let u = pricing::Usage {
+        input: usage.input - cached,
+        output: usage.output,
+        cache_read: cached,
+        cache_write_5m: 0.0,
+        cache_write_1h: 0.0,
+    };
+    add_event(data, ts, &model, pricing::request_cost_at(&p, &u, threshold) * mult, tokens);
+}
+
 /// Codex rollout files log a token_count event per turn; the model rides in
-/// the surrounding turn_context/session_meta lines.
+/// the surrounding turn_context/session_meta lines. Child sessions (subagent
+/// spawns and forks) replay the parent's entire history at spawn — those
+/// lines are skipped via a replay gate (see `codex_line`).
 fn codex() -> ProviderSpend {
     let home = std::env::var("CODEX_HOME")
         .map(PathBuf::from)
@@ -421,59 +817,8 @@ fn codex() -> ProviderSpend {
 
     let mut all = FileData::default();
     for file in files {
-        let mut model = String::from("gpt-5");
-        let data = file_days(&file, &mut |line, data| {
-            if !(line.contains("token_count")
-                || line.contains("turn_context")
-                || line.contains("session_meta"))
-            {
-                return;
-            }
-            let Ok(v) = serde_json::from_str::<Value>(line) else { return };
-            if let Some(m) = v.pointer("/payload/model").and_then(Value::as_str) {
-                model = m.to_string();
-                return;
-            }
-            if v.pointer("/payload/type").and_then(Value::as_str) != Some("token_count") {
-                return;
-            }
-            let Some(ts) = parse_ts(v.get("timestamp")) else { return };
-            let usage = v
-                .pointer("/payload/info/last_token_usage")
-                .cloned()
-                .unwrap_or(Value::Null);
-            let num = |k: &str| usage.get(k).and_then(Value::as_f64).unwrap_or(0.0);
-            let input = num("input_tokens");
-            let cached = num("cached_input_tokens").min(input);
-            let output = num("output_tokens");
-            let tokens = input + output;
-            if tokens <= 0.0 {
-                return;
-            }
-            // Live catalog first; the static gpt-5 table only for models
-            // that are recognizably Codex-family; anything else is excluded.
-            let lower = model.to_lowercase();
-            let price = pricing::lookup(&model).or_else(|| {
-                if lower.contains("gpt") || lower.contains("codex") {
-                    let (i, o, cr) = codex_price(&model);
-                    Some(pricing::Price::flat(i, o, cr, i))
-                } else {
-                    None
-                }
-            });
-            let Some(p) = price else {
-                note_unpriced(data, ts, &model, tokens);
-                return;
-            };
-            let u = pricing::Usage {
-                input: input - cached,
-                output,
-                cache_read: cached,
-                cache_write_5m: 0.0,
-                cache_write_1h: 0.0,
-            };
-            add_event(data, ts, &model, pricing::request_cost(&p, &u, true), tokens);
-        });
+        let mut state = CodexFileState::default();
+        let data = file_days(&file, &mut |line, data| codex_line(&mut state, line, data));
         merge_data(&mut all, data);
     }
     build_spend("codex", "Codex", all)
@@ -742,6 +1087,255 @@ fn parse_csv_date(s: &str) -> Option<DateTime<Utc>> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn tokens_sum(d: &FileData) -> f64 {
+        d.days.values().map(|v| v.1).sum()
+    }
+
+    fn cost_sum(d: &FileData) -> f64 {
+        d.days.values().map(|v| v.0).sum()
+    }
+
+    // ---- Codex: child-session replay gate --------------------------------
+
+    #[test]
+    fn codex_child_meta_rules() {
+        // JSON null / blank strings are absent — a root session declaring
+        // `forked_from_id: null` is not a child.
+        assert!(!codex_child_meta(&json!({"forked_from_id": null, "parent_thread_id": null})));
+        assert!(!codex_child_meta(&json!({"forked_from_id": "  "})));
+        assert!(!codex_child_meta(&json!({"session_id": "root"})));
+        assert!(codex_child_meta(&json!({"forked_from_id": "abc"})));
+        assert!(codex_child_meta(&json!({"parent_thread_id": "abc"})));
+        assert!(codex_child_meta(&json!({"thread_source": "subagent"})));
+        assert!(codex_child_meta(&json!({"source": {"subagent": {"thread_spawn": {}}}})));
+        assert!(!codex_child_meta(&json!({"source": {"subagent": null}})));
+    }
+
+    fn codex_run(lines: &[String]) -> FileData {
+        let mut st = CodexFileState::default();
+        let mut data = FileData::default();
+        for line in lines {
+            codex_line(&mut st, line, &mut data);
+        }
+        data
+    }
+
+    fn token_count_line(ts: &str, last: Option<(f64, f64)>, total: (f64, f64)) -> String {
+        let mut info = json!({
+            "total_token_usage": {"input_tokens": total.0, "output_tokens": total.1,
+                                  "total_tokens": total.0 + total.1}
+        });
+        if let Some((i, o)) = last {
+            info["last_token_usage"] =
+                json!({"input_tokens": i, "output_tokens": o, "total_tokens": i + o});
+        }
+        json!({"timestamp": ts, "type": "event_msg",
+               "payload": {"type": "token_count", "info": info}})
+        .to_string()
+    }
+
+    #[test]
+    fn codex_replay_gate_skips_child_history() {
+        let spawn_epoch = chrono::DateTime::parse_from_rfc3339("2026-07-10T10:00:00Z")
+            .unwrap()
+            .timestamp();
+        let lines = vec![
+            // The child's own session_meta, then the replayed parent history:
+            // token_counts with rewritten (fresh) timestamps and a replayed
+            // task_started still carrying the parent's old started_at.
+            json!({"timestamp": "2026-07-10T10:00:00Z", "type": "session_meta",
+                   "payload": {"parent_thread_id": "abc", "thread_source": "subagent"}})
+            .to_string(),
+            json!({"timestamp": "2026-07-10T10:00:00Z", "type": "turn_context",
+                   "payload": {"model": "gpt-5.6-terra"}})
+            .to_string(),
+            token_count_line("2026-07-10T10:00:01Z", Some((50_000.0, 5_000.0)), (50_000.0, 5_000.0)),
+            json!({"timestamp": "2026-07-10T10:00:02Z", "type": "event_msg",
+                   "payload": {"type": "task_started", "started_at": spawn_epoch - 3600}})
+            .to_string(),
+            token_count_line("2026-07-10T10:00:03Z", Some((30_000.0, 3_000.0)), (80_000.0, 8_000.0)),
+            // First live turn: started_at at/after the child's creation.
+            json!({"timestamp": "2026-07-10T10:00:05Z", "type": "event_msg",
+                   "payload": {"type": "task_started", "started_at": spawn_epoch + 5}})
+            .to_string(),
+            token_count_line("2026-07-10T10:00:09Z", Some((1_000.0, 100.0)), (81_000.0, 8_100.0)),
+        ];
+        let data = codex_run(&lines);
+        // Only the live turn counts — 88k replayed tokens stay out.
+        assert_eq!(tokens_sum(&data), 1_100.0);
+        assert!(data.unpriced.is_empty());
+    }
+
+    #[test]
+    fn codex_root_session_with_null_parent_counts_normally() {
+        let lines = vec![
+            json!({"timestamp": "2026-07-10T10:00:00Z", "type": "session_meta",
+                   "payload": {"forked_from_id": null, "parent_thread_id": null}})
+            .to_string(),
+            json!({"timestamp": "2026-07-10T10:00:00Z", "type": "turn_context",
+                   "payload": {"model": "gpt-5.6-terra"}})
+            .to_string(),
+            token_count_line("2026-07-10T10:00:01Z", Some((1_000.0, 100.0)), (1_000.0, 100.0)),
+        ];
+        assert_eq!(tokens_sum(&codex_run(&lines)), 1_100.0);
+    }
+
+    #[test]
+    fn codex_stale_snapshot_reemission_skipped() {
+        let lines = vec![
+            json!({"timestamp": "2026-07-10T10:00:00Z", "type": "turn_context",
+                   "payload": {"model": "gpt-5.6-terra"}})
+            .to_string(),
+            token_count_line("2026-07-10T10:00:01Z", Some((1_000.0, 100.0)), (1_000.0, 100.0)),
+            // Same cumulative totals re-emitted (Codex does this) — not new
+            // usage even though it repeats a last_token_usage.
+            token_count_line("2026-07-10T10:00:02Z", Some((1_000.0, 100.0)), (1_000.0, 100.0)),
+        ];
+        assert_eq!(tokens_sum(&codex_run(&lines)), 1_100.0);
+    }
+
+    #[test]
+    fn codex_totals_delta_when_last_usage_absent() {
+        let lines = vec![
+            json!({"timestamp": "2026-07-10T10:00:00Z", "type": "turn_context",
+                   "payload": {"model": "gpt-5.6-terra"}})
+            .to_string(),
+            token_count_line("2026-07-10T10:00:01Z", None, (1_000.0, 100.0)),
+            token_count_line("2026-07-10T10:00:02Z", None, (3_000.0, 300.0)),
+        ];
+        // 1100 from the first cumulative snapshot, 2200 recovered as a delta.
+        assert_eq!(tokens_sum(&codex_run(&lines)), 3_300.0);
+    }
+
+    #[test]
+    fn codex_fast_tier_applies_provider_multiplier() {
+        let turn = json!({"timestamp": "2026-07-10T10:00:00Z", "type": "turn_context",
+                          "payload": {"model": "gpt-5.6-terra"}})
+        .to_string();
+        let usage = token_count_line("2026-07-10T10:00:01Z", Some((1_000.0, 100.0)), (1_000.0, 100.0));
+        let standard = codex_run(&[turn.clone(), usage.clone()]);
+        let fast = codex_run(&[
+            turn,
+            json!({"timestamp": "2026-07-10T10:00:00Z", "type": "event_msg",
+                   "payload": {"type": "thread_settings_applied",
+                               "thread_settings": {"service_tier": "fast"}}})
+            .to_string(),
+            usage,
+        ]);
+        // gpt-5.6-terra's Codex priority multiplier is exactly 2x, whatever
+        // catalog resolved the base rates.
+        assert!(cost_sum(&standard) > 0.0);
+        assert!((cost_sum(&fast) / cost_sum(&standard) - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn codex_dated_base_strips_snapshot_stamps() {
+        assert_eq!(codex_dated_base("gpt-5.6-sol-2026-06-01"), "gpt-5.6-sol");
+        assert_eq!(codex_dated_base("gpt-5.6-sol-20260601"), "gpt-5.6-sol");
+        assert_eq!(codex_dated_base("gpt-5.6-sol"), "gpt-5.6-sol");
+        assert_eq!(codex_dated_base("gpt-4-0125-preview"), "gpt-4-0125-preview");
+    }
+
+    // ---- Claude: advisor iterations, sidechain dedup, synthetic ----------
+
+    fn claude_run(lines: &[String]) -> FileData {
+        let mut st = ClaudeFileState::default();
+        let mut data = FileData::default();
+        for line in lines {
+            claude_line(&mut st, line, &mut data);
+        }
+        data
+    }
+
+    #[test]
+    fn claude_advisor_iterations_expand_once() {
+        // Two ordinary message iterations (already inside the parent totals)
+        // and one advisor_message that must become its own entry.
+        let line = json!({"type": "assistant", "timestamp": "2026-07-10T10:00:00Z",
+            "requestId": "req_1",
+            "message": {"id": "msg_1", "model": "claude-fable-5-20260115",
+                "usage": {"input_tokens": 2.0, "output_tokens": 491.0,
+                    "cache_read_input_tokens": 1000.0,
+                    "iterations": [
+                        {"type": "message", "input_tokens": 1.0, "output_tokens": 200.0},
+                        {"type": "advisor_message", "model": "claude-haiku-4-5",
+                         "input_tokens": 10.0, "output_tokens": 2.0,
+                         "cache_read_input_tokens": 4.0},
+                        {"type": "message", "input_tokens": 1.0, "output_tokens": 291.0}
+                    ]}}})
+        .to_string();
+        let once = claude_run(&[line.clone()]);
+        let models: HashSet<&str> = once.days.keys().map(|(_, m)| m.as_str()).collect();
+        assert!(models.iter().any(|m| m.contains("fable")));
+        assert!(models.iter().any(|m| m.contains("haiku")));
+        // Parent 1493 + advisor 16; the plain message iterations add nothing.
+        assert_eq!(tokens_sum(&once), 1_509.0);
+        // A replayed copy of the same line (same message + request id) is
+        // dropped, advisors included.
+        let twice = claude_run(&[line.clone(), line]);
+        assert_eq!(tokens_sum(&twice), 1_509.0);
+    }
+
+    #[test]
+    fn claude_sidechain_replay_is_deduped() {
+        let parent = json!({"type": "assistant", "timestamp": "2026-07-10T10:00:00Z",
+            "requestId": "req_1",
+            "message": {"id": "msg_1", "model": "claude-haiku-4-5",
+                        "usage": {"input_tokens": 100.0, "output_tokens": 10.0}}})
+        .to_string();
+        // Sidechain log replays the same message under a fresh request id.
+        let replay = json!({"type": "assistant", "timestamp": "2026-07-10T10:00:01Z",
+            "requestId": "req_2", "isSidechain": true,
+            "message": {"id": "msg_1", "model": "claude-haiku-4-5",
+                        "usage": {"input_tokens": 100.0, "output_tokens": 10.0}}})
+        .to_string();
+        assert_eq!(tokens_sum(&claude_run(&[parent.clone(), replay.clone()])), 110.0);
+        // Reverse arrival order still counts the message exactly once.
+        assert_eq!(tokens_sum(&claude_run(&[replay, parent.clone()])), 110.0);
+        // A genuine retry (no sidechain involved) keeps both.
+        let retry = json!({"type": "assistant", "timestamp": "2026-07-10T10:00:02Z",
+            "requestId": "req_3",
+            "message": {"id": "msg_1", "model": "claude-haiku-4-5",
+                        "usage": {"input_tokens": 100.0, "output_tokens": 10.0}}})
+        .to_string();
+        assert_eq!(tokens_sum(&claude_run(&[parent, retry])), 220.0);
+    }
+
+    #[test]
+    fn claude_synthetic_model_never_priced() {
+        let bare = json!({"type": "assistant", "timestamp": "2026-07-10T10:00:00Z",
+            "requestId": "req_1",
+            "message": {"id": "msg_1", "model": "<synthetic>",
+                        "usage": {"input_tokens": 5.0, "output_tokens": 5.0}}})
+        .to_string();
+        let data = claude_run(&[bare]);
+        assert!(data.days.is_empty());
+        assert!(data.unpriced.is_empty()); // a placeholder, not an unknown model
+
+        let carried = json!({"type": "assistant", "timestamp": "2026-07-10T10:00:00Z",
+            "requestId": "req_2", "costUSD": 0.5,
+            "message": {"id": "msg_2", "model": "<synthetic>",
+                        "usage": {"input_tokens": 5.0, "output_tokens": 5.0}}})
+        .to_string();
+        let data = claude_run(&[carried]);
+        assert_eq!(cost_sum(&data), 0.5);
+        assert!(data.days.keys().all(|(_, m)| m == "unattributed"));
+    }
+
+    #[test]
+    fn claude_unknown_speed_marks_foreign_log_shape() {
+        let line = json!({"type": "assistant", "timestamp": "2026-07-10T10:00:00Z",
+            "requestId": "req_1",
+            "message": {"id": "msg_1", "model": "claude-haiku-4-5",
+                        "usage": {"input_tokens": 100.0, "output_tokens": 10.0,
+                                  "speed": "turbo"}}})
+        .to_string();
+        assert!(claude_run(&[line]).days.is_empty());
+    }
+
     /// Live probe over this machine's real logs + Cursor export. Prints
     /// aggregates and the CSV header only. Run via
     /// `cargo test --lib spend -- --ignored --nocapture`.

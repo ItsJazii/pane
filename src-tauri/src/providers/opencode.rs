@@ -135,7 +135,10 @@ pub fn collect_cost_events() -> Vec<(f64, f64, f64, String)> {
     with_db_copy(|db| {
         Ok(read_messages(db)?
             .into_iter()
-            .filter(|r| r.cost > 0.0)
+            // Free models record cost 0 with real token counts — the
+            // tokens are usage facts and count at their true $0 price.
+            // Rows with neither cost nor tokens (aborted turns) drop.
+            .filter(|r| r.cost > 0.0 || r.tokens > 0.0)
             .map(|r| (r.ts, r.cost, r.tokens, r.model))
             .collect())
     })

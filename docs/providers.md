@@ -25,7 +25,12 @@ Ground rules that apply to every provider:
 - **Calls:** `api.anthropic.com/api/oauth/usage` (usage windows);
   `platform.claude.com/v1/oauth/token` (refresh, written back).
 - **Shows:** Session + Weekly windows, per-model weeklies, Extra Usage
-  overage; local spend from `~\.claude\projects\` logs.
+  overage; local spend from `~\.claude\projects\` logs. Persisted
+  `claude -p` runs count too (`--no-session-persistence` runs write no
+  log to read). Advisor work nested in a message's `usage.iterations`
+  counts once under the advisor's own model; ordinary iterations stay
+  inside the parent totals. Sidechain (subagent) logs that replay the
+  parent's message under a fresh request id are deduplicated.
 
 ## Codex (Codex CLI)
 
@@ -34,7 +39,14 @@ Ground rules that apply to every provider:
   credits); `.../wham/rate-limit-reset-credits` (reset credits, and
   `/consume` only when you click Use on a credit); OpenAI token refresh.
 - **Shows:** Session/Weekly, Spark windows, credit balance, redeemable
-  reset credits; local spend from `~\.codex\sessions\` logs.
+  reset credits; local spend from `~\.codex\sessions\` logs. Child
+  sessions (subagent spawns and forks) replay the parent's entire token
+  history at spawn — those replayed lines are skipped, so subagent-heavy
+  use doesn't inflate spend. Turns that ran on the fast/priority service
+  tier (recorded per session in the rollout itself, never inferred from
+  `config.toml`) price at each model's Codex priority multiplier, and
+  supported GPT-5.4/5.5/5.6 requests above 272k prompt tokens use
+  OpenAI's long-context rates for the whole request.
 
 ## Cursor
 
