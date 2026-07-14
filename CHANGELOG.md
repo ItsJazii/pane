@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Codex subagent replays no longer inflate spend** — when Codex spawns
+  a subagent (or forks a session), the child's rollout file replays the
+  parent's entire token history with fresh timestamps. Pane counted
+  those replayed lines as real usage; they're now skipped via the log's
+  own markers (the Mac app shipped the same fix after a ~20x inflation
+  report). Re-emitted stale snapshots are skipped too, and turns that
+  only report cumulative totals are recovered as deltas.
+- **Codex fast/priority turns price at fast rates** — the service tier
+  is read per session from the rollout's `thread_settings_applied`
+  lines (never from `config.toml`, which would retroactively reprice
+  history when toggled) and applies each model's Codex priority
+  multiplier (GPT-5.5 ×2.5; GPT-5.4 and the GPT-5.6 family ×2).
+  Supported Codex models switch to OpenAI's long-context rates above
+  272k prompt tokens — the OpenAI boundary, not Anthropic's 200k.
+- **Claude advisor usage counts under the advisor's model** — Fable-era
+  logs nest advisor work in `usage.iterations`; advisor-message entries
+  now count once under their own model without double-counting the
+  parent totals. `<synthetic>` placeholder turns are never priced,
+  sidechain logs replaying a parent message under a fresh request id
+  are deduplicated, and persisted `claude -p` runs count like
+  interactive usage.
+
 ## 0.4.9 — 2026-07-11
 
 ### Added
