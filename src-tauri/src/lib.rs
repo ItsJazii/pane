@@ -479,11 +479,28 @@ where
     if snap.status == "error" {
         let err = snap.error.clone().unwrap_or_default();
         let rate_limited = err.contains("429");
+        // A vendor-stated Retry-After wins over our fixed backoff — bench
+        // for exactly that long (capped at an hour) instead of knocking on
+        // a door the server said stays shut.
+        let retry_after_ms = err
+            .split("retry_after_s=")
+            .nth(1)
+            .and_then(|rest| {
+                rest.chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+                    .parse::<i64>()
+                    .ok()
+            })
+            .map(|s| (s * 1000).min(3_600_000));
+        let bench_ms = retry_after_ms.unwrap_or(if rate_limited { 300_000 } else { 60_000 });
         map.insert(
             id.to_string(),
             FailState {
-                until_ms: now + if rate_limited { 300_000 } else { 60_000 },
-                note: if rate_limited {
+                until_ms: now + bench_ms,
+                note: if let Some(ms) = retry_after_ms {
+                    format!("rate limited — the vendor asked to wait ~{}m", (ms / 60_000).max(1))
+                } else if rate_limited {
                     format!("rate limited — cooling down for a few minutes ({err})")
                 } else {
                     err
