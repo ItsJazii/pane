@@ -24,6 +24,9 @@
   sidechain logs replaying a parent message under a fresh request id
   are deduplicated, and persisted `claude -p` runs count like
   interactive usage.
+- **OpenCode free-model usage shows up** — messages on free models
+  record a real cost of $0 with real token counts; those tokens now
+  appear in the token totals and Usage Trend instead of vanishing.
 
 ## 0.4.9 — 2026-07-11
 
