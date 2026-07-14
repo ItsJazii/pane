@@ -1,8 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.4.10 — 2026-07-14
 
 ### Fixed
+- **Claude card recovers faster from rate-limit cooldowns** — when
+  Anthropic's usage endpoint returns 429 (a plan change can trigger a
+  ~25-minute cooldown), Pane now honors the vendor's own Retry-After
+  timing instead of knocking every 5 minutes, and the card's note says
+  how long the wait is.
 - **Codex subagent replays no longer inflate spend** — when Codex spawns
   a subagent (or forks a session), the child's rollout file replays the
   parent's entire token history with fresh timestamps. Pane counted
