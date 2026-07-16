@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Kimi K3 prices everywhere** — K3 usage through Devin, Cursor, the
+  Kimi Code CLI, or the API now bills at Moonshot's published rates
+  ($3 in / $15 out / $0.30 cache hit per MTok) via a built-in fallback,
+  in every slug spelling the tools use. The live catalogs win
+  automatically once they learn the model.
+
 ## 0.4.15 — 2026-07-16
 
 ### Added
