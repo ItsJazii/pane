@@ -87,6 +87,45 @@ interface ProviderSpend {
   unpriced_models: string[];
 }
 
+/// How to get each provider signed in again, for the ⚠ Outdated tooltip.
+const RELOGIN: Record<string, string> = {
+  claude: "run `claude` in a terminal and sign in",
+  codex: "run `codex login` in a terminal",
+  grok: "run `grok` in a terminal and sign in",
+  copilot: "run `gh auth login` in a terminal",
+  cursor: "open Cursor and sign in again",
+  devin: "run `devin` in a terminal and sign in",
+  opencode: "run `opencode auth login` in a terminal",
+  kiro: "open Kiro and sign in again",
+  antigravity: "open Antigravity and sign in again",
+  ollama: "make sure Ollama is running",
+};
+
+/// The ⚠ Outdated tooltip: what went wrong, what fixes it, and the
+/// reassurance that the visible numbers are the last good ones. Errors are
+/// classified into sign-in / rate-limit / vendor-outage / connection
+/// buckets so the fix is concrete instead of a bare HTTP code.
+function staleHelp(s: Snapshot): string {
+  const w = (s.warning ?? "The last refresh failed").replace(/[.\s]+$/, "");
+  const lw = w.toLowerCase();
+  const relogin =
+    RELOGIN[s.id] ?? "add the API key again in Settings (or sign in with the tool once)";
+  let fix = "Pane keeps retrying automatically — nothing to do unless this persists.";
+  if (/run `|open the/.test(lw)) {
+    // The provider's own message already says what to do.
+    fix = "Pane recovers automatically once that's done.";
+  } else if (/http 40[13]|invalid_grant|expired|no refresh token|sign[- ]?in|log ?in|credentials/.test(lw)) {
+    fix = `Fix: ${relogin} — Pane picks it up on the next refresh.`;
+  } else if (/http 429|rate limit/.test(lw)) {
+    fix = "The vendor is rate-limiting; Pane waits exactly as long as it asked, then retries by itself.";
+  } else if (/http 5\d\d/.test(lw)) {
+    fix = "The vendor's API is having trouble; Pane retries automatically until it recovers.";
+  } else if (/error sending request|timed? ?out|connect|network|dns|proxy/.test(lw)) {
+    fix = "Pane couldn't reach the vendor — check your internet connection (or the proxy in Settings).";
+  }
+  return `${w}.\n${fix}\nShowing the last good data meanwhile.`;
+}
+
 /// ⚠ shown when some events have no known model price — their tokens are
 /// counted, but no dollars are guessed, so dollar totals under-report.
 function unpricedWarn(sp: ProviderSpend | undefined): string {
@@ -702,7 +741,7 @@ function renderCard(s: Snapshot): string {
   }
 
   const stale = s.stale
-    ? `<span class="stale" title="${escapeHtml(`${s.warning ?? "Refresh failed"} — showing the last good data.`)}">⚠ Outdated</span>`
+    ? `<span class="stale" title="${escapeHtml(staleHelp(s))}">⚠ Outdated</span>`
     : "";
   const links = (PROVIDER_LINKS[s.id] ?? [])
     .map((l) => `<button class="quick-link" data-link="${escapeHtml(l.url)}">${escapeHtml(l.label)}</button>`)
