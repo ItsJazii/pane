@@ -988,6 +988,8 @@ function renderTotalSpend(): string {
 
   const center = spendCenter(entries);
   const exact = `${center.exact} — computed locally from session logs. Click to show ${METRIC_NAMES[nextSpendMetric(false)]}.`;
+  // An empty window still draws the ring — a zeroed track with $0.00 in the
+  // center — so the card doesn't collapse to bare text between periods.
   const body = entries.length
     ? `
       <div class="donut-wrap" title="${escapeHtml(exact)}">
@@ -998,7 +1000,15 @@ function renderTotalSpend(): string {
         </svg>
         <div class="legend">${legend}</div>
       </div>`
-    : `<p class="placeholder" style="margin-top:8px">No spend in this period.</p>`;
+    : `
+      <div class="donut-wrap donut-empty" title="No spend recorded in this period.">
+        <svg width="96" height="96" viewBox="0 0 96 96">
+          <path class="seg donut-zero" data-full="1" fill-rule="evenodd" d="${sectorPath(0, TAU)}"/>
+          <text class="donut-total" x="48" y="50" text-anchor="middle" font-size="14" font-weight="600">${center.primary}</text>
+          <text class="donut-sub" x="48" y="62" text-anchor="middle" font-size="8">${center.sub}</text>
+        </svg>
+        <div class="legend"><p class="placeholder" style="margin:0">No spend in this period.</p></div>
+      </div>`;
 
   const contributors = lastSpend.map((s) => s.name).join(", ");
   return `

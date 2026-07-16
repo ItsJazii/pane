@@ -1422,6 +1422,15 @@ body.drawer-open #drawer {
   cursor: pointer;
 }
 
+/* Empty-window ring: a quiet track instead of a vanished card. */
+.total-spend path.seg.donut-zero {
+  fill: var(--muted);
+  cursor: default;
+}
+.donut-wrap.donut-empty .donut-total {
+  opacity: 0.55;
+}
+
 /* First-run welcome card. */
 .welcome-card {
   border-color: #3f3f46;

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Total Spend always draws its ring** — a period with no usage now
+  shows a quiet zeroed track with $0.00 in the center instead of
+  collapsing to a bare "No spend in this period" line.
+- **Dead Claude sign-in says what to do** — when another app rotates
+  the Claude Code refresh token (leaving Pane's copy invalid), the card
+  now says "run `claude` in a terminal once and Pane recovers
+  automatically" instead of "token refresh failed: HTTP 400".
+
 ## 0.4.10 — 2026-07-14
 
 ### Fixed

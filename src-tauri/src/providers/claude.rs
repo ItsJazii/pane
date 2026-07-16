@@ -72,7 +72,19 @@ async fn fetch() -> Result<Snapshot, String> {
             .await
             .map_err(|e| format!("token refresh: {e}"))?;
         if !resp.status().is_success() {
-            return Err(format!("token refresh failed: HTTP {}", resp.status()));
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            // A rejected refresh token isn't transient: another app (Claude
+            // Code itself, or a second machine) rotated it and this copy is
+            // dead. Only a fresh CLI sign-in mints a working pair — say so
+            // instead of leaving a bare HTTP code on the card.
+            if body.contains("invalid_grant") {
+                return Err(
+                    "Claude sign-in was rotated by another app — run `claude` in a terminal once and Pane recovers automatically"
+                        .into(),
+                );
+            }
+            return Err(format!("token refresh failed: HTTP {status}"));
         }
         let tok: Value = resp.json().await.map_err(|e| format!("token refresh parse: {e}"))?;
         let new_access = tok
