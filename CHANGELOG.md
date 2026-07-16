@@ -10,6 +10,11 @@
   the Claude Code refresh token (leaving Pane's copy invalid), the card
   now says "run `claude` in a terminal once and Pane recovers
   automatically" instead of "token refresh failed: HTTP 400".
+- **⚠ Outdated tooltips explain the problem and the fix** — hovering
+  the warning now classifies what went wrong (sign-in expired, vendor
+  rate limit, vendor outage, no connection) and says exactly what to
+  do about it — including the right re-login command per provider —
+  instead of showing a bare error code.
 
 ## 0.4.10 — 2026-07-14
 
