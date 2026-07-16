@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.16 — 2026-07-16
 
 ### Added
 - **Kimi K3 prices everywhere** — K3 usage through Devin, Cursor, the
