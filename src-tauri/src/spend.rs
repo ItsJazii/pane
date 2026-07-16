@@ -1028,7 +1028,8 @@ fn devin() -> ProviderSpend {
 /// reordered.
 fn devin_model(raw: &str) -> String {
     let mut base = raw;
-    for suffix in ["-xhigh", "-light", "-low", "-medium", "-high"] {
+    // Effort tiers and Max/Ultra modes bill at the base model's rates.
+    for suffix in ["-xhigh", "-light", "-low", "-medium", "-high", "-max", "-ultra"] {
         if let Some(b) = raw.strip_suffix(suffix) {
             base = b;
             break;
@@ -1455,6 +1456,16 @@ mod tests {
         let data = claude_run(&[carried]);
         assert_eq!(cost_sum(&data), 0.5);
         assert!(data.days.keys().all(|(_, m)| m == "unattributed"));
+    }
+
+    #[test]
+    fn devin_model_normalizes_fable_and_modes() {
+        assert_eq!(devin_model("claude-5-fable-medium"), "claude-fable-5");
+        assert_eq!(devin_model("claude-5-fable-max"), "claude-fable-5");
+        assert_eq!(devin_model("claude-5-fable-high"), "claude-fable-5");
+        assert_eq!(devin_model("gpt-5-6-sol-max"), "gpt-5.6-sol");
+        assert_eq!(devin_model("claude-opus-4-8-medium"), "claude-opus-4-8");
+        assert_eq!(devin_model("gpt-4-0125-preview"), "gpt-4-0125-preview");
     }
 
     #[test]

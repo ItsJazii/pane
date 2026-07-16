@@ -15,6 +15,12 @@
   "Almost Out" notification the quota providers get.
 
 ### Fixed
+- **Devin usage counts under the model that actually ran** — Devin
+  rewrites a session's model label whenever you switch models, which
+  retroactively relabeled (and mispriced) everything the session ran
+  before. Each message's own recorded model now wins, so switching to
+  Fable (or anything else) mid-session shows up correctly, priced at
+  the right rates. Fable's Max mode slug also normalizes now.
 - **Grok no longer shows the same meter twice** — the billing payload
   repeats one percentage under several keys; the card now keeps one
   row per label, and layouts saved while the duplicate existed repair
