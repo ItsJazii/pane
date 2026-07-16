@@ -36,7 +36,13 @@ async fn fetch() -> Result<Snapshot, String> {
 
     // balance_infos rows carry stringified decimals per currency (CNY/USD).
     let mut metrics = Vec::new();
-    for row in doc.get("balance_infos").and_then(Value::as_array).unwrap_or(&vec![]) {
+    for (i, row) in doc
+        .get("balance_infos")
+        .and_then(Value::as_array)
+        .unwrap_or(&vec![])
+        .iter()
+        .enumerate()
+    {
         let currency = row.get("currency").and_then(Value::as_str).unwrap_or("?");
         let total = row
             .get("total_balance")
@@ -44,6 +50,13 @@ async fn fetch() -> Result<Snapshot, String> {
             .and_then(|s| s.parse::<f64>().ok())
             .unwrap_or(0.0);
         let sign = if currency == "CNY" { "¥" } else { "$" };
+        // Usage line + low-credit notifications for the primary currency,
+        // metered against the highest balance seen (top-ups raise it).
+        if i == 0 {
+            if let Some(meter) = super::credit_meter(ID, sign, total) {
+                metrics.push(meter);
+            }
+        }
         metrics.push(Metric::text(&format!("Balance ({currency})"), format!("{sign}{total:.2}")));
     }
     if metrics.is_empty() {

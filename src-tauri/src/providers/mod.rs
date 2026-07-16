@@ -226,6 +226,47 @@ pub fn credential_string(target: &str) -> Option<String> {
     Some(text)
 }
 
+/// Percent-used meter for pay-as-you-go balances. These APIs report only
+/// what's left — never "of how much" — so Pane remembers the highest
+/// balance it has ever seen per provider (a top-up raises it automatically)
+/// and meters usage against that high-water mark. Persisted so restarts
+/// keep the story. As a progress row it also feeds the notification rules
+/// ("Almost Out" fires under 10% remaining) like every other meter.
+pub fn credit_meter(provider: &str, sign: &str, balance: f64) -> Option<Metric> {
+    if !balance.is_finite() || balance < 0.0 {
+        return None;
+    }
+    // Providers refresh concurrently and this is a read-modify-write on a
+    // shared file — serialize it, or one card's just-raised high-water
+    // mark can be overwritten by another's stale copy.
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = LOCK.lock();
+    let path = config_dir().join("credit_baselines.json");
+    let mut doc: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    let high = doc.get(provider).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+    if balance > high {
+        doc[provider] = serde_json::Value::from(balance);
+        let _ = std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&doc).unwrap_or_default(),
+        );
+    }
+    let high = high.max(balance);
+    if high <= 0.0 {
+        return None;
+    }
+    let used = ((1.0 - balance / high) * 100.0).clamp(0.0, 100.0);
+    Some(Metric::progress(
+        "Credits used",
+        used,
+        Some(format!("{sign}{balance:.2} of {sign}{high:.2} left")),
+    ))
+}
+
 /// API key lookup: our saved config file first, then environment variables.
 pub fn stored_api_key(provider: &str, env_vars: &[&str]) -> Option<String> {
     let path = config_dir().join(format!("{provider}.json"));

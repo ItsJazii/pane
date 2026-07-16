@@ -8,6 +8,16 @@
   scanned from the Kimi Code CLI's local session logs (one usage record
   per turn). Models the price catalogs don't know yet count their
   tokens with the usual ⚠ until pricing lands.
+- **Credit meters for pay-as-you-go cards** — Moonshot and DeepSeek get
+  a "Credits used" percent bar metered against the highest balance Pane
+  has seen (a top-up raises it automatically), so balance cards read
+  like every other card — and the low-credit case now fires the same
+  "Almost Out" notification the quota providers get.
+
+### Fixed
+- **Grok no longer shows the same meter twice** — the billing payload
+  repeats one percentage under several keys; the card now keeps one
+  row per label.
 
 ## 0.4.14 — 2026-07-16
 

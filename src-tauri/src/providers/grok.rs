@@ -199,7 +199,11 @@ fn collect_billing_metrics(node: &Value, parent_key: &str, metrics: &mut Vec<Met
                         } else {
                             "Usage"
                         };
-                        metrics.push(Metric::progress(label, n, None));
+                        // The undocumented payload repeats the same percent
+                        // under several keys/nestings — one row per label.
+                        if !metrics.iter().any(|m| m.label == label) {
+                            metrics.push(Metric::progress(label, n, None));
+                        }
                     } else if lower.contains("credit") || lower.contains("balance") {
                         metrics.push(Metric::text(key, format!("{n:.2}")));
                     }
