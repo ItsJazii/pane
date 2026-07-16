@@ -258,6 +258,7 @@ const SPEND_COLORS: Record<string, string> = {
   opencode: "#b7b1b1",
   devin: "#38bdf8",
   cursor: "var(--spend-cursor)", // brand black, theme-flipped in CSS
+  moonshot: "#e0b354", // moon gold
   __others__: "#8b8b94", // the folded small-spenders wedge
 };
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Moonshot/Kimi spend** — the Moonshot card gains Today / Yesterday /
+  30-day dollars and tokens, a per-model breakdown, and the usage trend,
+  scanned from the Kimi Code CLI's local session logs (one usage record
+  per turn). Models the price catalogs don't know yet count their
+  tokens with the usual ⚠ until pricing lands.
+
 ## 0.4.14 — 2026-07-16
 
 ### Changed
