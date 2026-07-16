@@ -826,12 +826,18 @@ type DonutEntry = {
   /// Present on the synthetic "Others" entry: the folded-in providers,
   /// largest first, for the hover breakdown.
   parts?: { name: string; w: SpendWindow }[];
+  /// The dollar bar the parts fell under (period-specific).
+  foldLimit?: number;
 };
 
 const OTHERS_ID = "__others__";
 /// Providers under this many dollars (in the visible window) fold into
-/// one "Others" wedge; hovering it lists who spent what.
-const OTHERS_FOLD_USD = 10;
+/// one "Others" wedge; hovering it lists who spent what. The bar scales
+/// with the period — $1 barely registers in a day but $10 would swallow
+/// most of a quiet day's ring, while a month works the other way.
+function othersFoldUsd(tab: SpendTab): number {
+  return tab === "last30" ? 5 : 1;
+}
 
 function donutEntries(tab: SpendTab): DonutEntry[] {
   const all: DonutEntry[] = lastSpend
@@ -852,7 +858,8 @@ function donutEntries(tab: SpendTab): DonutEntry[] {
   // Small spenders fold into a single "Others" wedge — but only when
   // there are at least two of them (a group of one is just a rename) and
   // at least one named provider remains (an all-Others ring says nothing).
-  const small = all.filter((e) => e.w.cost < OTHERS_FOLD_USD);
+  const limit = othersFoldUsd(tab);
+  const small = all.filter((e) => e.w.cost < limit);
   if (small.length < 2 || small.length === all.length) return all;
 
   const others: DonutEntry = {
@@ -866,8 +873,9 @@ function donutEntries(tab: SpendTab): DonutEntry[] {
       models: [],
     },
     parts: small.map((e) => ({ name: e.s.name, w: e.w })),
+    foldLimit: limit,
   };
-  return [...all.filter((e) => e.w.cost >= OTHERS_FOLD_USD), others].sort(
+  return [...all.filter((e) => e.w.cost >= limit), others].sort(
     (a, b) => spendVal(b.w) - spendVal(a.w),
   );
 }
@@ -997,7 +1005,7 @@ function donutPop(g: { a0: number; a1: number }): { tx: string; ty: string } {
 function othersBreakdown(e: DonutEntry): string {
   if (!e.parts) return "";
   return (
-    `Under $${OTHERS_FOLD_USD} each:\n` +
+    `Under $${e.foldLimit ?? 1} each:\n` +
     e.parts.map((p) => `${p.name}  ${fmtSpendVal(p.w)}`).join("\n")
   );
 }

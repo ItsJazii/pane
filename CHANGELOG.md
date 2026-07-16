@@ -9,6 +9,12 @@
   in every slug spelling the tools use. The live catalogs win
   automatically once they learn the model.
 
+### Changed
+- **"Others" thresholds scale with the period** — Today and Yesterday
+  fold providers under $1 into the grey Others wedge; 30 Days folds
+  under $5 (was a flat $10 everywhere, which swallowed most of a quiet
+  day's ring). The hover breakdown states the active bar.
+
 ## 0.4.15 — 2026-07-16
 
 ### Added
