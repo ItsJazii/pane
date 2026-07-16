@@ -478,6 +478,12 @@ fn resolve(s: &Store, model: &str, depth: u8) -> Option<Price> {
     if let Some(p) = s.modelsdev.get(&canonical) {
         return Some(*p);
     }
+    // Vendor-documented rates for models the live catalogs haven't learned
+    // yet — consulted after every online source so a real catalog entry
+    // always wins the moment one ships. Keep this list tiny and sourced.
+    if let Some(p) = builtin_price(&canonical) {
+        return Some(p);
+    }
     // Slug tails no catalog carries under their own name, billed at the
     // base model's per-token rates: reasoning-effort tiers (they change how
     // many tokens burn, not the unit price) and Cursor's Max/Ultra modes
@@ -493,12 +499,45 @@ fn resolve(s: &Store, model: &str, depth: u8) -> Option<Price> {
     None
 }
 
+/// Kimi K3 — platform.kimi.ai/docs/pricing/chat-k3 (USD/MTok): input $3,
+/// cache hit $0.30, output $15; no published cache-write rate, so writes
+/// bill at the input rate. The `-code` spelling follows the K2.7 pattern
+/// (the supplement priced k2.7 and k2.7-code identically); "moonshot/" and
+/// "moonshot-ai/" prefixed spellings match how the CLIs log it.
+fn builtin_price(canonical: &str) -> Option<Price> {
+    let bare = canonical
+        .strip_prefix("moonshot/")
+        .or_else(|| canonical.strip_prefix("moonshot-ai/"))
+        .unwrap_or(canonical);
+    match bare {
+        "kimi-k3" | "kimi-k3-code" => Some(Price::flat(3.0, 15.0, 0.3, 3.0)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{request_cost, Price, Usage};
 
     fn usage(input: f64, output: f64, cache_read: f64, w5m: f64, w1h: f64) -> Usage {
         Usage { input, output, cache_read, cache_write_5m: w5m, cache_write_1h: w1h }
+    }
+
+    #[test]
+    fn kimi_k3_builtin_prices_every_spelling() {
+        // Vendor-documented rates (platform.kimi.ai): $3 in, $15 out, $0.30
+        // cache hit — resolvable however each tool spells the slug.
+        for slug in [
+            "kimi-k3",                    // Cursor / Devin bare
+            "kimi-k3-code",               // Kimi Code CLI variant
+            "moonshot/kimi-k3",           // catalog-style prefix
+            "moonshot-ai/kimi-k3-code",   // Kimi CLI's own prefix
+            "kimi-k3-high",               // effort tier → peels to base
+            "kimi-k3-max",                // mode → peels to base
+        ] {
+            let p = super::lookup(slug).unwrap_or_else(|| panic!("{slug} did not price"));
+            assert_eq!((p.input, p.output, p.cache_read), (3.0, 15.0, 0.3), "{slug}");
+        }
     }
 
     #[test]
