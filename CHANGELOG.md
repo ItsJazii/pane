@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Cursor spend updates within minutes, not an hour** — the dashboard
+  usage export was cached for a full hour, so a live Cursor session
+  could work invisibly for up to 60 minutes while every other provider
+  updated in minutes. The cache is now 5 minutes, and a failed refetch
+  serves the last good export instead of blanking the Cursor spend
+  rows entirely.
+
 ## 0.4.12 — 2026-07-16
 
 ### Added
