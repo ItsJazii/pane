@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.14 — 2026-07-16
 
 ### Changed
 - **Small spenders fold into "Others"** — Total Spend providers under
