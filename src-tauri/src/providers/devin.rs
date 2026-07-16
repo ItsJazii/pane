@@ -296,9 +296,19 @@ fn read_usage_events(db: &std::path::Path) -> Result<Vec<UsageEvent>, String> {
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
             .map(|dt| dt.timestamp_millis())
             .unwrap_or(node_created_s * 1000);
+        // The message's own generation_model is the truth: the session-level
+        // model is rewritten in place on every switch, which retroactively
+        // relabels (and misprices) everything the session ran before. Older
+        // records without the field fall back to the session model.
+        let event_model = md
+            .get("generation_model")
+            .and_then(Value::as_str)
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or(&model)
+            .to_string();
         out.push(UsageEvent {
             ts_ms,
-            model: model.clone(),
+            model: event_model,
             input: num("input_tokens"),
             output: num("output_tokens"),
             cache_read: num("cache_read_tokens"),
