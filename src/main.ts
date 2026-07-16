@@ -397,6 +397,10 @@ function defaultProviderLayout(s: Snapshot | undefined, spend: ProviderSpend | u
     order.push(m.label);
     if (m.kind !== "progress") onDemand.push(m.label); // balances etc. tuck away
   }
+  // Balance-only providers (Moonshot, DeepSeek…) have no progress rows at
+  // all — tucking everything would leave an empty card with a floating
+  // caret, so their text rows stay visible.
+  if (order.length > 0 && onDemand.length === order.length) onDemand.length = 0;
   if (spend) {
     order.push(TREND_KEY); // trend stays always-visible, like the Mac
     for (const [label] of SPEND_KEYS) {
@@ -467,6 +471,20 @@ function ensureLayout(): void {
           L.onDemand.push(label);
           changed = true;
         }
+      }
+    }
+    // Repair saved layouts where EVERY visible row sits behind the caret
+    // (balance-only cards defaulted that way before this rule existed):
+    // an all-tucked card renders as an empty panel with a floating ⌄, so
+    // its own metric rows are promoted back to always-visible.
+    const alwaysVisible = L.metricOrder.filter(
+      (k) => !L.onDemand.includes(k) && !L.hidden.includes(k),
+    );
+    if (alwaysVisible.length === 0) {
+      const own = new Set(s.metrics.map((m) => m.label));
+      if (s.metrics.length > 0 && L.onDemand.some((k) => own.has(k))) {
+        L.onDemand = L.onDemand.filter((k) => !own.has(k));
+        changed = true;
       }
     }
   }

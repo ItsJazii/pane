@@ -10,6 +10,13 @@
   a group of one is just a rename — and if everyone is under $10 the
   ring stays fully named rather than turning into one grey blob.)
 
+### Fixed
+- **Balance-only cards show their rows** — providers with no usage
+  meters (Moonshot, DeepSeek, and other pay-as-you-go cards) tucked
+  every row behind the "show more" caret, leaving an empty panel with
+  a floating arrow. Their Balance/Voucher rows now stay visible, and
+  already-saved layouts repair themselves on the next refresh.
+
 ## 0.4.13 — 2026-07-16
 
 ### Fixed
