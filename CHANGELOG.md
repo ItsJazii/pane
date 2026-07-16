@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.13 — 2026-07-16
 
 ### Fixed
 - **Cursor spend updates within minutes, not an hour** — the dashboard
