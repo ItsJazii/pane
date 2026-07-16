@@ -236,6 +236,11 @@ pub fn credit_meter(provider: &str, sign: &str, balance: f64) -> Option<Metric> 
     if !balance.is_finite() || balance < 0.0 {
         return None;
     }
+    // Providers refresh concurrently and this is a read-modify-write on a
+    // shared file — serialize it, or one card's just-raised high-water
+    // mark can be overwritten by another's stale copy.
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = LOCK.lock();
     let path = config_dir().join("credit_baselines.json");
     let mut doc: serde_json::Value = std::fs::read_to_string(&path)
         .ok()
