@@ -258,6 +258,7 @@ const SPEND_COLORS: Record<string, string> = {
   opencode: "#b7b1b1",
   devin: "#38bdf8",
   cursor: "var(--spend-cursor)", // brand black, theme-flipped in CSS
+  __others__: "#8b8b94", // the folded small-spenders wedge
 };
 
 function spendColor(id: string): string {
@@ -790,10 +791,21 @@ const DONUT_IN = 30; // inner radius — 14 thick, centered on r=37
 const DONUT_PAD = 2.2 / 37; // angular gap between neighbors (~2px mid-ring)
 const DONUT_MIN = 0.07; // slimmest visible sliver (~2.6px mid-ring)
 
-type DonutEntry = { s: ProviderSpend; w: SpendWindow };
+type DonutEntry = {
+  s: ProviderSpend;
+  w: SpendWindow;
+  /// Present on the synthetic "Others" entry: the folded-in providers,
+  /// largest first, for the hover breakdown.
+  parts?: { name: string; w: SpendWindow }[];
+};
+
+const OTHERS_ID = "__others__";
+/// Providers under this many dollars (in the visible window) fold into
+/// one "Others" wedge; hovering it lists who spent what.
+const OTHERS_FOLD_USD = 10;
 
 function donutEntries(tab: SpendTab): DonutEntry[] {
-  return lastSpend
+  const all: DonutEntry[] = lastSpend
     .filter((s) => !config.disabled.includes(s.id)) // disabled = gone everywhere
     .map((s) => ({ s, w: s[tab] }))
     // Membership, order, and wedge share all follow the active metric so
@@ -807,6 +819,28 @@ function donutEntries(tab: SpendTab): DonutEntry[] {
           : e.w.cost > 0.005,
     )
     .sort((a, b) => spendVal(b.w) - spendVal(a.w));
+
+  // Small spenders fold into a single "Others" wedge — but only when
+  // there are at least two of them (a group of one is just a rename) and
+  // at least one named provider remains (an all-Others ring says nothing).
+  const small = all.filter((e) => e.w.cost < OTHERS_FOLD_USD);
+  if (small.length < 2 || small.length === all.length) return all;
+
+  const others: DonutEntry = {
+    s: {
+      id: OTHERS_ID,
+      name: "Others",
+    } as ProviderSpend,
+    w: {
+      cost: small.reduce((sum, e) => sum + e.w.cost, 0),
+      tokens: small.reduce((sum, e) => sum + e.w.tokens, 0),
+      models: [],
+    },
+    parts: small.map((e) => ({ name: e.s.name, w: e.w })),
+  };
+  return [...all.filter((e) => e.w.cost >= OTHERS_FOLD_USD), others].sort(
+    (a, b) => spendVal(b.w) - spendVal(a.w),
+  );
 }
 
 /// The donut meters dollars or raw tokens — a click on the ring toggles.
@@ -930,11 +964,20 @@ function donutPop(g: { a0: number; a1: number }): { tx: string; ty: string } {
   return { tx: `${(2.5 * Math.sin(mid)).toFixed(2)}px`, ty: `${(-2.5 * Math.cos(mid)).toFixed(2)}px` };
 }
 
+/// Hover text for the "Others" wedge/row: who's inside and what each spent.
+function othersBreakdown(e: DonutEntry): string {
+  if (!e.parts) return "";
+  return (
+    `Under $${OTHERS_FOLD_USD} each:\n` +
+    e.parts.map((p) => `${p.name}  ${fmtSpendVal(p.w)}`).join("\n")
+  );
+}
+
 function legendHtml(entries: DonutEntry[]): string {
   return entries
     .map(
       (e) => `
-        <div class="legend-row" data-pid="${e.s.id}">
+        <div class="legend-row" data-pid="${e.s.id}"${e.parts ? ` title="${escapeHtml(othersBreakdown(e))}"` : ""}>
           <span class="dot" style="background:${spendColor(e.s.id)}"></span>
           <span class="legend-name">${escapeHtml(e.s.name)}</span>
           <span class="legend-val">${fmtSpendVal(e.w)}</span>
@@ -964,6 +1007,7 @@ function switchSpendTab(tab: SpendTab): void {
     renderAll();
     return;
   }
+  const entryById = new Map(entries.map((en) => [en.s.id, en]));
   for (const p of paths) {
     const g = geo.get(p.dataset.pid ?? "");
     if (g) {
@@ -974,6 +1018,23 @@ function switchSpendTab(tab: SpendTab): void {
       p.style.setProperty("--ty", pop.ty);
     } else {
       p.style.opacity = "0";
+    }
+    // The Others wedge bakes its breakdown into an SVG <title>; the legend
+    // rebuilds below but this child wouldn't, so sync it to the new period
+    // (and drop it from any wedge that no longer carries a breakdown).
+    const en = entryById.get(p.dataset.pid ?? "");
+    const text = en?.parts ? othersBreakdown(en) : "";
+    const t = p.querySelector("title");
+    if (text) {
+      if (t) {
+        t.textContent = text;
+      } else {
+        const nt = document.createElementNS("http://www.w3.org/2000/svg", "title");
+        nt.textContent = text;
+        p.appendChild(nt);
+      }
+    } else if (t) {
+      t.remove();
     }
   }
   const totalEl = card.querySelector(".donut-total");
@@ -1015,8 +1076,9 @@ function renderTotalSpend(): string {
       const g = geo.get(e.s.id)!;
       const pop = donutPop(g);
       const full = g.a1 - g.a0 >= TAU - 0.0001 ? ` data-full="1"` : "";
+      const hint = e.parts ? `<title>${escapeHtml(othersBreakdown(e))}</title>` : "";
       return `<path class="seg" data-pid="${e.s.id}"${full} fill-rule="evenodd"
-        d="${sectorPath(g.a0, g.a1)}" style="fill:${spendColor(e.s.id)};--tx:${pop.tx};--ty:${pop.ty}"/>`;
+        d="${sectorPath(g.a0, g.a1)}" style="fill:${spendColor(e.s.id)};--tx:${pop.tx};--ty:${pop.ty}">${hint}</path>`;
     })
     .join("");
 
