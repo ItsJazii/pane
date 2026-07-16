@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.15 — 2026-07-16
 
 ### Added
 - **Moonshot/Kimi spend** — the Moonshot card gains Today / Yesterday /
