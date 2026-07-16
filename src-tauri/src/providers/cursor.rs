@@ -96,30 +96,43 @@ pub async fn snapshot() -> Snapshot {
 }
 
 /// The dashboard's usage-events CSV export — the raw material for Cursor
-/// spend tiles. Best-effort: any failure just means no Cursor spend row.
-/// Cached for an hour; the export can be sizable and changes slowly.
+/// spend tiles. Cached briefly so live usage shows up within minutes like
+/// every other spend source (the 31-day export is only a few KB); a failed
+/// refetch serves the last good copy instead of blanking the Cursor rows.
 pub async fn fetch_usage_csv() -> Option<String> {
     use std::sync::{Mutex, OnceLock};
     static CACHE: OnceLock<Mutex<(i64, String)>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new((0, String::new())));
     let now = chrono::Utc::now().timestamp_millis();
     if let Ok(c) = cache.lock() {
-        if now - c.0 < 3_600_000 && !c.1.is_empty() {
+        if now - c.0 < 300_000 && !c.1.is_empty() {
             return Some(c.1.clone());
         }
     }
+    // Any failure below falls back to the last good export, however old —
+    // stale spend beats a Cursor card that loses its rows on one bad fetch.
+    let stale = || {
+        cache
+            .lock()
+            .ok()
+            .filter(|c| !c.1.is_empty())
+            .map(|c| c.1.clone())
+    };
 
     // Prefer a token refreshed by fetch() this run — the stored one may
     // have expired since Cursor last wrote it.
-    let token = refreshed_token()
+    let Some(token) = refreshed_token()
         .lock()
         .ok()
         .and_then(|t| t.clone())
-        .or_else(|| read_state_values().ok()?.0.map(|t| unquote(&t)))?;
+        .or_else(|| read_state_values().ok()?.0.map(|t| unquote(&t)))
+    else {
+        return stale();
+    };
     if token.is_empty() {
-        return None;
+        return stale();
     }
-    let sub = jwt_sub(&token)?;
+    let Some(sub) = jwt_sub(&token) else { return stale() };
     let user_id = sub.split('|').next_back().unwrap_or(&sub).to_string();
     let cookie = format!("WorkosCursorSessionToken={user_id}%3A%3A{token}");
 
@@ -128,7 +141,7 @@ pub async fn fetch_usage_csv() -> Option<String> {
     // parser prices (same query Cursor's dashboard sends).
     let end = chrono::Utc::now().timestamp_millis();
     let start = end - 31 * 24 * 3_600_000;
-    let resp = http()
+    let resp = match http()
         .get(format!(
             "https://cursor.com/api/dashboard/export-usage-events-csv?startDate={start}&endDate={end}&strategy=tokens"
         ))
@@ -136,14 +149,17 @@ pub async fn fetch_usage_csv() -> Option<String> {
         .header("Accept", "text/csv")
         .send()
         .await
-        .ok()?;
+    {
+        Ok(r) => r,
+        Err(_) => return stale(),
+    };
     if !resp.status().is_success() {
         eprintln!("[pane] cursor csv: HTTP {}", resp.status());
-        return None;
+        return stale();
     }
-    let body = resp.text().await.ok()?;
+    let Ok(body) = resp.text().await else { return stale() };
     if body.trim().is_empty() {
-        return None;
+        return stale();
     }
     if let Ok(mut c) = cache.lock() {
         *c = (now, body.clone());
