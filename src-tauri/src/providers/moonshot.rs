@@ -54,7 +54,13 @@ async fn fetch() -> Result<Snapshot, String> {
             continue;
         };
         let sign = if url.contains(".cn") { "¥" } else { "$" };
-        let mut metrics = vec![Metric::text("Balance", format!("{sign}{available:.2}"))];
+        let mut metrics = Vec::new();
+        // A percent bar against the highest balance ever seen — gives the
+        // card a usage line and feeds the low-credit notifications.
+        if let Some(meter) = super::credit_meter(ID, sign, available) {
+            metrics.push(meter);
+        }
+        metrics.push(Metric::text("Balance", format!("{sign}{available:.2}")));
         if let Some(v) = voucher {
             if v > 0.0 {
                 metrics.push(Metric::text("Vouchers", format!("{sign}{v:.2}")));

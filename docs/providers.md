@@ -135,9 +135,11 @@ Ground rules that apply to every provider:
 - **Calls:** `api.deepseek.com/user/balance`;
   `api.moonshot.ai|cn/v1/users/me/balance`;
   `api.elevenlabs.io/v1/user/subscription`.
-- **Shows:** balances / character quota with reset pacing; Moonshot
-  adds Today / Yesterday / 30-day spend, model breakdown, and the
-  usage trend from Kimi Code sessions.
+- **Shows:** balances / character quota with reset pacing; Moonshot and
+  DeepSeek add a "Credits used" percent bar metered against the highest
+  balance Pane has seen locally (top-ups raise it; feeds the Almost Out
+  notification); Moonshot adds Today / Yesterday / 30-day spend, model
+  breakdown, and the usage trend from Kimi Code sessions.
 
 ## Ollama
 
