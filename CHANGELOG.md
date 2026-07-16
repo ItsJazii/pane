@@ -17,7 +17,8 @@
 ### Fixed
 - **Grok no longer shows the same meter twice** — the billing payload
   repeats one percentage under several keys; the card now keeps one
-  row per label.
+  row per label, and layouts saved while the duplicate existed repair
+  themselves on the next refresh.
 
 ## 0.4.14 — 2026-07-16
 

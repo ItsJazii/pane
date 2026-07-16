@@ -395,6 +395,7 @@ function defaultProviderLayout(s: Snapshot | undefined, spend: ProviderSpend | u
   const order: string[] = [];
   const onDemand: string[] = [];
   for (const m of s?.metrics ?? []) {
+    if (order.includes(m.label)) continue; // one row per label
     order.push(m.label);
     if (m.kind !== "progress") onDemand.push(m.label); // balances etc. tuck away
   }
@@ -473,6 +474,15 @@ function ensureLayout(): void {
           changed = true;
         }
       }
+    }
+    // Repair layouts saved while a provider emitted duplicate labels (old
+    // Grok billing bug): the label landed in metricOrder twice and the
+    // card rendered the same row twice.
+    const seenKeys = new Set<string>();
+    const dedupedOrder = L.metricOrder.filter((k) => !seenKeys.has(k) && (seenKeys.add(k), true));
+    if (dedupedOrder.length !== L.metricOrder.length) {
+      L.metricOrder = dedupedOrder;
+      changed = true;
     }
     // Repair saved layouts where EVERY visible row sits behind the caret
     // (balance-only cards defaulted that way before this rule existed):
