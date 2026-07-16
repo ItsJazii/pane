@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- **Small spenders fold into "Others"** — Total Spend providers under
+  $10 in the visible period group into one grey wedge and legend row;
+  hovering it lists exactly who spent what. Providers at $10 or more
+  keep their own name and color. (A lone small spender stays named —
+  a group of one is just a rename — and if everyone is under $10 the
+  ring stays fully named rather than turning into one grey blob.)
+
 ## 0.4.13 — 2026-07-16
 
 ### Fixed
