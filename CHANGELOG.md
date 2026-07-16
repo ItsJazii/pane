@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.12 — 2026-07-16
 
 ### Added
 - **MiniMax spend** — the MiniMax card now shows Today / Yesterday /
