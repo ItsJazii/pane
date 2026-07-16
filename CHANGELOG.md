@@ -1,8 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.4.11 — 2026-07-16
 
 ### Fixed
+- **⚠ Outdated tooltips explain the problem and the fix** — hovering
+  the warning now classifies what went wrong (sign-in expired, vendor
+  rate limit, vendor outage, no connection) and says exactly what to
+  do about it — including the right re-login command per provider —
+  instead of showing a bare error code.
 - **Total Spend always draws its ring** — a period with no usage now
   shows a quiet zeroed track with $0.00 in the center instead of
   collapsing to a bare "No spend in this period" line.
@@ -10,11 +15,6 @@
   the Claude Code refresh token (leaving Pane's copy invalid), the card
   now says "run `claude` in a terminal once and Pane recovers
   automatically" instead of "token refresh failed: HTTP 400".
-- **⚠ Outdated tooltips explain the problem and the fix** — hovering
-  the warning now classifies what went wrong (sign-in expired, vendor
-  rate limit, vendor outage, no connection) and says exactly what to
-  do about it — including the right re-login command per provider —
-  instead of showing a bare error code.
 
 ## 0.4.10 — 2026-07-14
 
