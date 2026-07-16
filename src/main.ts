@@ -1007,6 +1007,7 @@ function switchSpendTab(tab: SpendTab): void {
     renderAll();
     return;
   }
+  const entryById = new Map(entries.map((en) => [en.s.id, en]));
   for (const p of paths) {
     const g = geo.get(p.dataset.pid ?? "");
     if (g) {
@@ -1017,6 +1018,23 @@ function switchSpendTab(tab: SpendTab): void {
       p.style.setProperty("--ty", pop.ty);
     } else {
       p.style.opacity = "0";
+    }
+    // The Others wedge bakes its breakdown into an SVG <title>; the legend
+    // rebuilds below but this child wouldn't, so sync it to the new period
+    // (and drop it from any wedge that no longer carries a breakdown).
+    const en = entryById.get(p.dataset.pid ?? "");
+    const text = en?.parts ? othersBreakdown(en) : "";
+    const t = p.querySelector("title");
+    if (text) {
+      if (t) {
+        t.textContent = text;
+      } else {
+        const nt = document.createElementNS("http://www.w3.org/2000/svg", "title");
+        nt.textContent = text;
+        p.appendChild(nt);
+      }
+    } else if (t) {
+      t.remove();
     }
   }
   const totalEl = card.querySelector(".donut-total");
