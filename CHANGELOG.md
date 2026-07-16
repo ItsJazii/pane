@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **MiniMax spend** — the MiniMax card now shows Today / Yesterday /
+  30-day dollars and tokens like the other CLIs, fed by two local
+  sources: the MiniMax Agent CLI's own per-turn usage store (its
+  recorded cost is used as-is), and any Claude Code sessions run
+  against MiniMax's Anthropic-compatible endpoint — that usage used to
+  be counted (mislabeled) under the Claude card and now moves to the
+  MiniMax card where it belongs.
+
 ## 0.4.11 — 2026-07-16
 
 ### Fixed

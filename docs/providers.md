@@ -93,9 +93,16 @@ Ground rules that apply to every provider:
 ## MiniMax
 
 - **Reads:** pasted key (Settings), `MINIMAX_API_KEY`, or
-  `%USERPROFILE%\.minimax\config.yaml`.
+  `%USERPROFILE%\.minimax\config.yaml`; local spend from
+  `%USERPROFILE%\.minimax\sqlite.db` (the Agent CLI's per-turn
+  token_usage table, snapshotted via SQLite's backup API — never
+  modified) and from Claude Code sessions that ran against MiniMax's
+  Anthropic-compatible endpoint (those log MiniMax models into
+  `~\.claude\projects\` and are re-routed here from the Claude card).
 - **Calls:** `api.minimax.io/v1/token_plan/remains` (+ regional fallbacks).
-- **Shows:** 5-hour Session + Weekly plan windows.
+- **Shows:** 5-hour Session + Weekly plan windows; Today / Yesterday /
+  30-day spend with per-model breakdown (the CLI's own cost_usd is
+  preferred; catalog pricing otherwise).
 
 ## OpenRouter
 

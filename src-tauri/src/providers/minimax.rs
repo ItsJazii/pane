@@ -175,6 +175,124 @@ fn parse_remains(doc: &Value) -> Option<Snapshot> {
     Some(Snapshot::ok(ID, NAME, Some("Coding Plan".into()), metrics))
 }
 
+// ---------------------------------------------------------------------------
+// Local spend: the MiniMax Agent CLI's ~/.minimax/sqlite.db keeps a
+// token_usage table with one row per turn — model, token buckets, and the
+// CLI's own cost_usd. Same snapshot/cache machinery as the Devin store:
+// the app writes to the WAL continuously, so raw file copies tear.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+pub struct UsageEvent {
+    pub ts_ms: i64,
+    pub model: String,
+    pub input: f64,
+    pub output: f64,
+    pub reasoning: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+    pub cost_usd: f64,
+}
+
+fn agent_db_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".minimax").join("sqlite.db"))
+}
+
+type FileStamp = (std::time::SystemTime, u64);
+
+fn file_stamp(path: &std::path::Path) -> FileStamp {
+    std::fs::metadata(path)
+        .map(|m| (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len()))
+        .unwrap_or((std::time::UNIX_EPOCH, 0))
+}
+
+/// Per-turn token usage from the MiniMax Agent CLI's local store. Cached on
+/// the (db, WAL) stamps; a busy/locked db serves the last good events.
+pub fn collect_usage_events() -> Vec<UsageEvent> {
+    use std::sync::Mutex;
+    static CACHE: Mutex<Option<(FileStamp, FileStamp, Vec<UsageEvent>)>> = Mutex::new(None);
+
+    let Some(db_path) = agent_db_path() else { return Vec::new() };
+    if !db_path.exists() {
+        return Vec::new();
+    }
+    let db_stamp = file_stamp(&db_path);
+    let wal_stamp = file_stamp(&db_path.with_extension("db-wal"));
+
+    if let Ok(cache) = CACHE.lock() {
+        if let Some((d, w, events)) = cache.as_ref() {
+            if *d == db_stamp && *w == wal_stamp {
+                return events.clone();
+            }
+        }
+    }
+
+    let tmp_base = std::env::temp_dir().join(format!("pane-minimax-{}", std::process::id()));
+    let tmp_db = tmp_base.with_extension("db");
+    let events = snapshot_db(&db_path, &tmp_db).and_then(|()| read_usage_events(&tmp_db));
+    for suffix in ["db", "db-wal", "db-shm"] {
+        let _ = std::fs::remove_file(tmp_base.with_extension(suffix));
+    }
+
+    match events {
+        Ok(events) => {
+            if let Ok(mut cache) = CACHE.lock() {
+                *cache = Some((db_stamp, wal_stamp, events.clone()));
+            }
+            events
+        }
+        Err(_) => CACHE
+            .lock()
+            .ok()
+            .and_then(|c| c.as_ref().map(|(_, _, e)| e.clone()))
+            .unwrap_or_default(),
+    }
+}
+
+/// Consistent point-in-time copy via SQLite's backup API (reads through the
+/// WAL with proper locks, retrying briefly while the writer is busy).
+fn snapshot_db(src_path: &std::path::Path, dst_path: &std::path::Path) -> Result<(), String> {
+    let _ = std::fs::remove_file(dst_path);
+    let src = rusqlite::Connection::open_with_flags(
+        src_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|e| format!("open live db: {e}"))?;
+    let mut dst =
+        rusqlite::Connection::open(dst_path).map_err(|e| format!("open snapshot: {e}"))?;
+    let backup = rusqlite::backup::Backup::new(&src, &mut dst)
+        .map_err(|e| format!("backup init: {e}"))?;
+    backup
+        .run_to_completion(256, std::time::Duration::from_millis(10), None)
+        .map_err(|e| format!("backup run: {e}"))
+}
+
+fn read_usage_events(db: &std::path::Path) -> Result<Vec<UsageEvent>, String> {
+    let conn = rusqlite::Connection::open(db).map_err(|e| format!("open db copy: {e}"))?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT ts, model, input_tokens, output_tokens, reasoning_tokens,
+                    cache_read_tokens, cache_write_tokens, cost_usd
+             FROM token_usage",
+        )
+        .map_err(|e| format!("query token_usage: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(UsageEvent {
+                ts_ms: row.get::<_, i64>(0)?,
+                model: row.get::<_, String>(1)?,
+                input: row.get::<_, f64>(2).unwrap_or(0.0),
+                output: row.get::<_, f64>(3).unwrap_or(0.0),
+                reasoning: row.get::<_, f64>(4).unwrap_or(0.0),
+                cache_read: row.get::<_, f64>(5).unwrap_or(0.0),
+                cache_write: row.get::<_, f64>(6).unwrap_or(0.0),
+                cost_usd: row.get::<_, f64>(7).unwrap_or(0.0),
+            })
+        })
+        .map_err(|e| format!("read token_usage: {e}"))?;
+    Ok(rows.flatten().collect())
+}
+
 #[cfg(test)]
 mod tests {
     /// Live probe with this machine's real key — run manually via

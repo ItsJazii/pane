@@ -469,10 +469,42 @@ fn claude_line(st: &mut ClaudeFileState, line: &str, data: &mut FileData) {
     }
 }
 
+/// Move every event whose model starts with `prefix` out of `data` into a
+/// new FileData (unpriced tallies included). Used to re-route usage that a
+/// CLI logged on another vendor's behalf.
+fn split_models(data: &mut FileData, prefix: &str) -> FileData {
+    let mut out = FileData::default();
+    data.days.retain(|(day, model), v| {
+        if model.starts_with(prefix) {
+            out.days.insert((*day, model.clone()), *v);
+            false
+        } else {
+            true
+        }
+    });
+    let moved: Vec<String> = data
+        .unpriced
+        .keys()
+        .filter(|m| m.starts_with(prefix))
+        .cloned()
+        .collect();
+    for m in moved {
+        if let Some(c) = data.unpriced.remove(&m) {
+            out.unpriced.insert(m, c);
+        }
+    }
+    out
+}
+
 /// Claude Code writes one JSONL per session under ~/.claude/projects. Each
 /// assistant line carries usage token counts and usually a precomputed
 /// costUSD, which we prefer over our own pricing table.
-fn claude() -> ProviderSpend {
+///
+/// Claude Code can also run against MiniMax's Anthropic-compatible endpoint
+/// (ANTHROPIC_BASE_URL); those sessions log MiniMax models into the same
+/// files. That usage is split out and returned separately — it belongs on
+/// the MiniMax card, not Claude's.
+fn claude() -> (ProviderSpend, FileData) {
     let root = std::env::var("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| dirs::home_dir().unwrap_or_default().join(".claude"))
@@ -486,7 +518,44 @@ fn claude() -> ProviderSpend {
         let data = file_days(&file, &mut |line, data| claude_line(&mut state, line, data));
         merge_data(&mut all, data);
     }
-    build_spend("claude", "Claude", all)
+    let minimax = split_models(&mut all, "MiniMax");
+    (build_spend("claude", "Claude", all), minimax)
+}
+
+/// MiniMax spend: the Agent CLI's local token_usage store (its own cost_usd
+/// preferred, catalog-priced otherwise) plus whatever Claude Code logged
+/// while pointed at MiniMax's endpoint (passed in from the Claude scan).
+fn minimax(extra: FileData) -> ProviderSpend {
+    let mut data = extra;
+    for ev in providers::minimax::collect_usage_events() {
+        let Some(ts) = DateTime::from_timestamp_millis(ev.ts_ms) else { continue };
+        let tokens = ev.input + ev.output + ev.reasoning + ev.cache_read + ev.cache_write;
+        if tokens <= 0.0 && ev.cost_usd <= 0.0 {
+            continue;
+        }
+        // Rows carry provider-prefixed slugs ("minimax/MiniMax-M3") — the
+        // bare model is what the card, catalogs, and the Claude-side split
+        // all use.
+        let model = ev.model.strip_prefix("minimax/").unwrap_or(&ev.model).to_string();
+        if ev.cost_usd > 0.0 {
+            add_event(&mut data, ts, &model, ev.cost_usd, tokens);
+            continue;
+        }
+        match pricing::lookup(&model) {
+            Some(p) => {
+                let u = pricing::Usage {
+                    input: ev.input,
+                    output: ev.output + ev.reasoning,
+                    cache_read: ev.cache_read,
+                    cache_write_5m: ev.cache_write,
+                    cache_write_1h: 0.0,
+                };
+                add_event(&mut data, ts, &model, pricing::request_cost(&p, &u, true), tokens);
+            }
+            None => note_unpriced(&mut data, ts, &model, tokens),
+        }
+    }
+    build_spend("minimax", "MiniMax", data)
 }
 
 /// One `token_count` usage object, tolerating the older field spellings
@@ -1326,6 +1395,23 @@ mod tests {
     }
 
     #[test]
+    fn split_models_reroutes_minimax_usage() {
+        let mut data = FileData::default();
+        data.days.insert((1000, "claude-fable-5".into()), (5.0, 100.0));
+        data.days.insert((1000, "MiniMax-M3".into()), (0.5, 50.0));
+        data.days.insert((1001, "MiniMax-M2.7".into()), (0.2, 20.0));
+        data.unpriced.insert("MiniMax-Unknown".into(), 3);
+        data.unpriced.insert("mystery-model".into(), 1);
+
+        let mm = split_models(&mut data, "MiniMax");
+        assert_eq!(data.days.len(), 1);
+        assert_eq!(data.unpriced.len(), 1);
+        assert_eq!(mm.days.len(), 2);
+        assert_eq!(mm.days[&(1000, "MiniMax-M3".to_string())], (0.5, 50.0));
+        assert_eq!(mm.unpriced.get("MiniMax-Unknown"), Some(&3));
+    }
+
+    #[test]
     fn claude_unknown_speed_marks_foreign_log_shape() {
         let line = json!({"type": "assistant", "timestamp": "2026-07-10T10:00:00Z",
             "requestId": "req_1",
@@ -1392,7 +1478,8 @@ fn split_csv_row(line: &str) -> Vec<String> {
 
 pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
     pricing::ensure_fresh();
-    let mut list = vec![claude(), codex(), grok(), opencode(), devin()];
+    let (claude_sp, minimax_extra) = claude();
+    let mut list = vec![claude_sp, codex(), grok(), opencode(), devin(), minimax(minimax_extra)];
     if let Some(csv) = cursor_csv {
         list.push(cursor_from_csv(&csv));
     }
