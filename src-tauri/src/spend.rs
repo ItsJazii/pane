@@ -1053,6 +1053,69 @@ fn devin_model(raw: &str) -> String {
     base.to_string()
 }
 
+/// One Kimi Code CLI wire.jsonl line → spend event. usage.record rows are
+/// self-contained: model, token buckets, epoch-ms time. Only the "turn"
+/// scope counts — other scopes would double-report the same tokens.
+fn moonshot_line(line: &str, data: &mut FileData) {
+    if !line.contains("\"usage.record\"") {
+        return;
+    }
+    let Ok(v) = serde_json::from_str::<Value>(line) else { return };
+    if v.get("type").and_then(Value::as_str) != Some("usage.record") {
+        return;
+    }
+    if v.get("usageScope").and_then(Value::as_str) != Some("turn") {
+        return;
+    }
+    let Some(ts) = parse_ts(v.get("time")) else { return };
+    let model_raw = v.get("model").and_then(Value::as_str).unwrap_or("unknown");
+    let model = model_raw
+        .strip_prefix("moonshot-ai/")
+        .unwrap_or(model_raw)
+        .to_string();
+    let u = v.get("usage").cloned().unwrap_or(Value::Null);
+    let num = |k: &str| u.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+    let (input, output) = (num("inputOther"), num("output"));
+    let (cache_read, cache_write) = (num("inputCacheRead"), num("inputCacheCreation"));
+    let tokens = input + output + cache_read + cache_write;
+    if tokens <= 0.0 {
+        return;
+    }
+    // Catalogs key Kimi models as "moonshot/<slug>"; try the bare slug
+    // first (alias/fuzzy chain), then the prefixed spelling.
+    let price = pricing::lookup(&model).or_else(|| pricing::lookup(&format!("moonshot/{model}")));
+    match price {
+        Some(p) => {
+            let usage = pricing::Usage {
+                input,
+                output,
+                cache_read,
+                cache_write_5m: cache_write,
+                cache_write_1h: 0.0,
+            };
+            add_event(data, ts, &model, pricing::request_cost(&p, &usage, true), tokens);
+        }
+        None => note_unpriced(data, ts, &model, tokens),
+    }
+}
+
+/// Moonshot spend: Kimi Code CLI sessions under ~/.kimi-code/sessions —
+/// each agent's wire.jsonl logs one usage.record per turn.
+fn moonshot() -> ProviderSpend {
+    let root = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".kimi-code")
+        .join("sessions");
+    let mut files = Vec::new();
+    recent_jsonl_files(&root, &mut files);
+    let mut all = FileData::default();
+    for file in files {
+        let data = file_days(&file, &mut |line, data| moonshot_line(line, data));
+        merge_data(&mut all, data);
+    }
+    build_spend("moonshot", "Moonshot", all)
+}
+
 /// Cursor spend from the dashboard's usage-events CSV export (fetched by the
 /// async caller — this stays a pure parser). Column layout is discovered
 /// from the header row; rows with an explicit cost win, token-only rows are
@@ -1395,6 +1458,23 @@ mod tests {
     }
 
     #[test]
+    fn moonshot_counts_turn_records_only() {
+        let mut data = FileData::default();
+        let turn = json!({"type": "usage.record", "model": "moonshot-ai/kimi-test-model",
+            "usage": {"inputOther": 400.0, "output": 200.0, "inputCacheRead": 300.0,
+                      "inputCacheCreation": 100.0},
+            "usageScope": "turn", "time": 1784208630652i64})
+        .to_string();
+        let session_scope = turn.replace("\"turn\"", "\"session\"");
+        moonshot_line(&turn, &mut data);
+        moonshot_line(&session_scope, &mut data);
+        // One event; unknown model → tokens counted, dollars honest zero.
+        assert_eq!(data.days.values().map(|v| v.1).sum::<f64>(), 1_000.0);
+        assert_eq!(data.unpriced.get("kimi-test-model"), Some(&1));
+        assert!(data.days.keys().all(|(_, m)| m == "kimi-test-model"));
+    }
+
+    #[test]
     fn split_models_reroutes_minimax_usage() {
         let mut data = FileData::default();
         data.days.insert((1000, "claude-fable-5".into()), (5.0, 100.0));
@@ -1479,7 +1559,15 @@ fn split_csv_row(line: &str) -> Vec<String> {
 pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
     pricing::ensure_fresh();
     let (claude_sp, minimax_extra) = claude();
-    let mut list = vec![claude_sp, codex(), grok(), opencode(), devin(), minimax(minimax_extra)];
+    let mut list = vec![
+        claude_sp,
+        codex(),
+        grok(),
+        opencode(),
+        devin(),
+        minimax(minimax_extra),
+        moonshot(),
+    ];
     if let Some(csv) = cursor_csv {
         list.push(cursor_from_csv(&csv));
     }

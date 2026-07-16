@@ -128,11 +128,16 @@ Ground rules that apply to every provider:
 ## DeepSeek / Moonshot / ElevenLabs / Venice-class key providers
 
 - **Reads:** pasted key or env var only (`DEEPSEEK_API_KEY`,
-  `MOONSHOT_API_KEY`/`KIMI_API_KEY`, `ELEVENLABS_API_KEY`).
+  `MOONSHOT_API_KEY`/`KIMI_API_KEY`, `ELEVENLABS_API_KEY`). Moonshot
+  additionally reads local spend from the Kimi Code CLI's session logs
+  (`%USERPROFILE%\.kimi-code\sessions\**\wire.jsonl` — one usage.record
+  per turn with model and token buckets).
 - **Calls:** `api.deepseek.com/user/balance`;
   `api.moonshot.ai|cn/v1/users/me/balance`;
   `api.elevenlabs.io/v1/user/subscription`.
-- **Shows:** balances / character quota with reset pacing.
+- **Shows:** balances / character quota with reset pacing; Moonshot
+  adds Today / Yesterday / 30-day spend, model breakdown, and the
+  usage trend from Kimi Code sessions.
 
 ## Ollama
 
