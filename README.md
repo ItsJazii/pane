@@ -124,8 +124,11 @@ pricing keep their measured tokens in the counts, but no dollars are
 ever guessed for them — a ⚠ on the provider's spend row says the real
 cost runs a little higher than shown.
 
-**5. Staying local.** All of the above happens on your machine. There is no
-Pane server, no account, and no telemetry — see [Privacy](#privacy--security).
+**5. Staying local.** All of the above happens on your machine. There is
+no account and no usage telemetry — your quotas, spend, and provider data
+never leave your PC. The only thing counted is the update check every few
+hours: anonymous, country-level, no IPs stored — see
+[Privacy](#privacy--security).
 
 ## Providers (18 and counting)
 
@@ -197,8 +200,9 @@ Pane reads credential files. You should not take our word for how it
 treats them — verify it:
 
 - **[docs/privacy.md](docs/privacy.md)** — the complete list of every
-  network call Pane can make. Zero telemetry: no analytics, no crash
-  reporting, no install pings, none of it exists in the codebase.
+  network call Pane can make. No analytics, no crash reporting, no
+  event tracking; the update check counts anonymous daily installs by
+  country (no IPs stored), and that document explains exactly how.
 - **[docs/providers.md](docs/providers.md)** — per provider: exactly which
   files are read on your PC and exactly which endpoints they're sent to.
 - **[SECURITY.md](SECURITY.md)** — how to report vulnerabilities
