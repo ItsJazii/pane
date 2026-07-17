@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.18 — 2026-07-17
 
 ### Fixed
 - **Update checks report the real app version** — Tauri's
