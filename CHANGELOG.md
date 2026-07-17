@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Update checks report the real app version** — Tauri's
+  `{{current_version}}` URL template arrives percent-encoded and never
+  substitutes in query strings, so 0.4.17 installs literally sent
+  "currentversion". The endpoint URL is now built in Rust with the
+  actual version stamped in.
+
 ## 0.4.17 — 2026-07-17
 
 ### Changed
