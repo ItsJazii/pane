@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- **Update checks go through pane.jazii.dev first** (GitHub stays as
+  the automatic fallback, and every update remains signature-verified).
+  The endpoint serves the same manifest and counts anonymous daily
+  installs — distinct-install estimate, country code, app version, and
+  nothing else; no IP addresses are stored. Full mechanics in
+  docs/privacy.md ("The update check").
+
 ## 0.4.16 — 2026-07-16
 
 ### Added

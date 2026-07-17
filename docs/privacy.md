@@ -11,13 +11,37 @@ This is the complete list. Anything not listed here does not happen.
 |---|---|---|
 | Each provider's own API (Anthropic, OpenAI/ChatGPT, cursor.com, GitHub, x.ai, Devin, MiniMax, OpenRouter, Z.ai, Google, DeepSeek, Moonshot, ElevenLabs, Codebuff, Kilo…) | Every refresh (default 1 min), only for providers you have enabled | That provider's own token/key, exactly as its official tool would send it. Full per-provider detail: [providers.md](providers.md) |
 | `raw.githubusercontent.com` (LiteLLM), `models.dev`, `robinebers.github.io` | ~Daily | Anonymous GET for public model price tables (no identifying data) |
-| `github.com/ItsJazii/pane/releases` | On launch + every 4 h | Anonymous GET for the update manifest; the download only happens if you click the update banner |
+| `pane.jazii.dev/api/update` (falls back to `github.com/ItsJazii/pane/releases`) | On launch + every 4 h | Anonymous GET for the update manifest, carrying the app version. See "The update check" below for exactly what this counts. |
 | `127.0.0.1:11434` (your own PC) | Every refresh, if Ollama is enabled | Local-only query of your Ollama server |
 
-Notably absent: analytics, crash reporting, install pings, A/B flags,
-"anonymous usage statistics" — none of it exists in the codebase. The Mac
-app this project was inspired by ships PostHog telemetry (disclosed and
-toggleable); Pane deliberately ports everything **except** that.
+Notably absent: analytics, crash reporting, A/B flags, in-app event
+tracking — none of it exists in the codebase. The Mac app this project
+was inspired by ships PostHog telemetry (disclosed and toggleable); Pane
+deliberately ports everything **except** that.
+
+## The update check
+
+Pane has to ask *somewhere* "is there a newer version?" — that request
+existed from day one. As of 0.4.17 it goes to `pane.jazii.dev` (which
+serves the same signed manifest; GitHub remains the automatic fallback,
+and every update is still signature-verified against the key baked into
+the app). The server counts, per day: **how many distinct installs
+checked in, from which country, on which version.** That's the entire
+list. Concretely:
+
+- **No IP addresses are stored.** Uniqueness comes from a salted one-way
+  hash folded into a [HyperLogLog](https://en.wikipedia.org/wiki/HyperLogLog)
+  — a counter that can say "≈37 distinct installs today" but is
+  mathematically incapable of listing them.
+- **Country** is the two-letter code the CDN edge derives; nothing
+  finer (no city, no region, no coordinates).
+- **Version** is the `?v=` parameter the updater sends.
+- Nothing else: no machine ids, no usernames, no usage data — your
+  quotas, spend, and provider data never leave your PC, same as always.
+
+The counting code is public in the site repo, and the request itself is
+identical either way — the only thing that changed is who serves the
+manifest first.
 
 ## What stays on your PC
 

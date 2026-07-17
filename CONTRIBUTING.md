@@ -25,7 +25,13 @@ vulnerability reporting).
   [docs/providers.md](docs/providers.md) documenting exactly what it
   reads and calls.
 - No telemetry, analytics, or "phone home" code — PRs adding any will be
-  declined regardless of intent. See [docs/privacy.md](docs/privacy.md).
+  declined regardless of intent. The single, deliberate exception is the
+  update check, which counts anonymous daily installs (country-level, no
+  IPs stored) — documented in full in
+  [docs/privacy.md](docs/privacy.md) ("The update check"). That
+  exception is not a precedent: usage data, quotas, and spend never
+  leave the user's PC, and PRs widening what the update check carries
+  will be declined.
 - No new dependencies without a stated reason.
 
 ## Building
