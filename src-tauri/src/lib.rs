@@ -762,12 +762,36 @@ async fn codex_redeem_credit(credit_id: String) -> Result<String, String> {
     providers::codex::redeem_credit(&credit_id).await
 }
 
+/// Updater with the app version stamped into the endpoint by us. Tauri's
+/// `{{current_version}}` template arrives percent-encoded and never gets
+/// substituted in query strings, so 0.4.17 installs literally reported
+/// "?v={{current_version}}" — the version is now formatted in Rust.
+/// GitHub stays as the automatic fallback; the pubkey comes from config.
+fn build_updater(
+    app: &tauri::AppHandle,
+) -> Result<tauri_plugin_updater::Updater, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let version = app.package_info().version.to_string();
+    let endpoints = vec![
+        format!("https://pane.jazii.dev/api/update?v={version}")
+            .parse()
+            .map_err(|e| format!("endpoint parse: {e}"))?,
+        "https://github.com/ItsJazii/pane/releases/latest/download/latest.json"
+            .parse()
+            .map_err(|e| format!("endpoint parse: {e}"))?,
+    ];
+    app.updater_builder()
+        .endpoints(endpoints)
+        .map_err(|e| e.to_string())?
+        .build()
+        .map_err(|e| e.to_string())
+}
+
 /// Downloads and installs a pending update, then restarts the app. Only
 /// called from the frontend banner after check_for_update announced one.
 #[tauri::command]
 async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri_plugin_updater::UpdaterExt;
-    let updater = app.updater().map_err(|e| e.to_string())?;
+    let updater = build_updater(&app)?;
     match updater.check().await.map_err(|e| e.to_string())? {
         Some(update) => {
             update
@@ -788,8 +812,7 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
 /// shows an Update button when this returns a newer version.
 #[tauri::command]
 async fn check_update(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    use tauri_plugin_updater::UpdaterExt;
-    let updater = app.updater().map_err(|e| e.to_string())?;
+    let updater = build_updater(&app)?;
     updater
         .check()
         .await
@@ -803,9 +826,8 @@ async fn check_update(app: tauri::AppHandle) -> Result<Option<String>, String> {
 fn spawn_update_checker(app: &tauri::AppHandle) {
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        use tauri_plugin_updater::UpdaterExt;
         loop {
-            if let Ok(updater) = handle.updater() {
+            if let Ok(updater) = build_updater(&handle) {
                 match updater.check().await {
                     Ok(Some(update)) => {
                         let _ = handle.emit("update-available", update.version.clone());
