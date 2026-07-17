@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.17 — 2026-07-17
 
 ### Changed
 - **Update checks go through pane.jazii.dev first** (GitHub stays as
