@@ -96,7 +96,6 @@ const RELOGIN: Record<string, string> = {
   cursor: "open Cursor and sign in again",
   devin: "run `devin` in a terminal and sign in",
   opencode: "run `opencode auth login` in a terminal",
-  kiro: "open Kiro and sign in again",
   antigravity: "open Antigravity and sign in again",
   ollama: "make sure Ollama is running",
 };
@@ -197,7 +196,6 @@ const ALL_PROVIDERS: [string, string][] = [
   ["ollama", "Ollama"],
   ["codebuff", "Codebuff"],
   ["kilo", "Kilo"],
-  ["kiro", "Kiro"],
 ];
 
 // Same quick links the Mac app ships (status pages + vendor dashboards).
@@ -242,7 +240,6 @@ const PROVIDER_LINKS: Record<string, { label: string; url: string }[]> = {
   ollama: [{ label: "Library", url: "https://ollama.com/library" }],
   codebuff: [{ label: "Dashboard", url: "https://www.codebuff.com/profile" }],
   kilo: [{ label: "Dashboard", url: "https://app.kilo.ai/" }],
-  kiro: [{ label: "Dashboard", url: "https://kiro.dev/" }],
 };
 
 // Brand palette for the Total Spend ring (Mac parity); unknown providers

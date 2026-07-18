@@ -1,6 +1,21 @@
 # Changelog
 
-## 0.4.19 — 2026-07-18
+## Unreleased
+
+### Fixed
+- **Disabled providers now do nothing at all** — disabling a provider
+  only hid its card; the work still ran invisibly on every refresh
+  (network calls, file reads, and for Kiro: spawning kiro-cli, whose
+  own auto-updater downloaded a fresh ~25 MB installer to %TEMP% each
+  time — gigabytes within days once Amazon shipped an update). Disabled
+  providers are now skipped before anything runs.
+
+### Removed
+- **Kiro support** — the experimental Kiro provider worked by invoking
+  kiro-cli, and a CLI that self-updates on every invocation is a side
+  effect Pane cannot control. Rather than throttle it, the provider is
+  gone entirely; the card disappears and saved layouts clean themselves
+  up.
 
 ### Added
 - **Grok usage bar shows its reset countdown** — the aggregate credit

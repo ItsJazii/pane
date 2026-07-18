@@ -361,7 +361,7 @@ struct StripEntry {
 /// allowlist for update_tray_strip: ids from the frontend are validated
 /// against this before being spliced into tray icon ids, and stale strip
 /// icons are removed for exactly this set.
-const STRIP_PROVIDER_IDS: [&str; 18] = [
+const STRIP_PROVIDER_IDS: [&str; 17] = [
     "claude",
     "codex",
     "cursor",
@@ -379,7 +379,6 @@ const STRIP_PROVIDER_IDS: [&str; 18] = [
     "ollama",
     "codebuff",
     "kilo",
-    "kiro",
 ];
 
 #[tauri::command]
@@ -529,34 +528,42 @@ async fn fetch_usage(app: tauri::AppHandle) -> Vec<providers::Snapshot> {
     // combined state machine on the calling thread's stack — at 28 providers
     // that overflowed the main thread's 1 MB stack and killed the app.
     type BoxedSnap = std::pin::Pin<Box<dyn std::future::Future<Output = providers::Snapshot> + Send>>;
-    let futs: Vec<BoxedSnap> = vec![
-        Box::pin(guarded("claude", "Claude", providers::claude::snapshot())),
-        Box::pin(guarded("codex", "Codex", providers::codex::snapshot())),
-        Box::pin(guarded("cursor", "Cursor", providers::cursor::snapshot())),
-        Box::pin(guarded("opencode", "OpenCode", providers::opencode::snapshot())),
-        Box::pin(guarded("copilot", "Copilot", providers::copilot::snapshot())),
-        Box::pin(guarded("grok", "Grok", providers::grok::snapshot())),
-        Box::pin(guarded("devin", "Devin", providers::devin::snapshot())),
-        Box::pin(guarded("minimax", "MiniMax", providers::minimax::snapshot())),
-        Box::pin(guarded("openrouter", "OpenRouter", providers::openrouter::snapshot())),
-        Box::pin(guarded("zai", "Z.ai", providers::zai::snapshot())),
-        Box::pin(guarded("antigravity", "Antigravity", providers::antigravity::snapshot())),
-        Box::pin(guarded("deepseek", "DeepSeek", providers::deepseek::snapshot())),
-        Box::pin(guarded("moonshot", "Moonshot", providers::moonshot::snapshot())),
-        Box::pin(guarded("elevenlabs", "ElevenLabs", providers::elevenlabs::snapshot())),
-        Box::pin(guarded("ollama", "Ollama", providers::ollama::snapshot())),
-        Box::pin(guarded("codebuff", "Codebuff", providers::codebuff::snapshot())),
-        Box::pin(guarded("kilo", "Kilo", providers::kilo::snapshot())),
-        Box::pin(guarded("kiro", "Kiro", providers::kiro::snapshot())),
+    // Disabled providers are skipped BEFORE anything is spawned — a merely
+    // post-filtered provider still did all its work invisibly: network
+    // calls, file reads, and in Kiro's case spawning a CLI whose own
+    // auto-updater downloaded a fresh installer to %TEMP% on every refresh
+    // (gigabytes within days). Futures are lazy, so building and dropping
+    // a disabled entry here runs none of its code.
+    let futs: Vec<(&str, BoxedSnap)> = vec![
+        ("claude", Box::pin(guarded("claude", "Claude", providers::claude::snapshot()))),
+        ("codex", Box::pin(guarded("codex", "Codex", providers::codex::snapshot()))),
+        ("cursor", Box::pin(guarded("cursor", "Cursor", providers::cursor::snapshot()))),
+        ("opencode", Box::pin(guarded("opencode", "OpenCode", providers::opencode::snapshot()))),
+        ("copilot", Box::pin(guarded("copilot", "Copilot", providers::copilot::snapshot()))),
+        ("grok", Box::pin(guarded("grok", "Grok", providers::grok::snapshot()))),
+        ("devin", Box::pin(guarded("devin", "Devin", providers::devin::snapshot()))),
+        ("minimax", Box::pin(guarded("minimax", "MiniMax", providers::minimax::snapshot()))),
+        ("openrouter", Box::pin(guarded("openrouter", "OpenRouter", providers::openrouter::snapshot()))),
+        ("zai", Box::pin(guarded("zai", "Z.ai", providers::zai::snapshot()))),
+        ("antigravity", Box::pin(guarded("antigravity", "Antigravity", providers::antigravity::snapshot()))),
+        ("deepseek", Box::pin(guarded("deepseek", "DeepSeek", providers::deepseek::snapshot()))),
+        ("moonshot", Box::pin(guarded("moonshot", "Moonshot", providers::moonshot::snapshot()))),
+        ("elevenlabs", Box::pin(guarded("elevenlabs", "ElevenLabs", providers::elevenlabs::snapshot()))),
+        ("ollama", Box::pin(guarded("ollama", "Ollama", providers::ollama::snapshot()))),
+        ("codebuff", Box::pin(guarded("codebuff", "Codebuff", providers::codebuff::snapshot()))),
+        ("kilo", Box::pin(guarded("kilo", "Kilo", providers::kilo::snapshot()))),
     ];
-    let handles: Vec<_> = futs.into_iter().map(tauri::async_runtime::spawn).collect();
+    let handles: Vec<_> = futs
+        .into_iter()
+        .filter(|(id, _)| !disabled.iter().any(|d| d == id))
+        .map(|(_, fut)| tauri::async_runtime::spawn(fut))
+        .collect();
     let mut all = Vec::with_capacity(handles.len());
     for h in handles {
         if let Ok(snap) = h.await {
             all.push(snap);
         }
     }
-    all.retain(|s| !disabled.iter().any(|d| *d == s.id));
 
     for s in &all {
         eprintln!(

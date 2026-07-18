@@ -9,7 +9,6 @@ pub mod devin;
 pub mod elevenlabs;
 pub mod grok;
 pub mod kilo;
-pub mod kiro;
 pub mod minimax;
 pub mod moonshot;
 pub mod ollama;
