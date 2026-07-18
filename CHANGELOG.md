@@ -9,9 +9,13 @@
   own auto-updater downloaded a fresh ~25 MB installer to %TEMP% each
   time — gigabytes within days once Amazon shipped an update). Disabled
   providers are now skipped before anything runs.
-- **Kiro checks at most every 30 minutes even when enabled** — the CLI
-  self-update-checks on every invocation, so Pane no longer invokes it
-  per refresh; in-between refreshes serve the cached reading.
+
+### Removed
+- **Kiro support** — the experimental Kiro provider worked by invoking
+  kiro-cli, and a CLI that self-updates on every invocation is a side
+  effect Pane cannot control. Rather than throttle it, the provider is
+  gone entirely; the card disappears and saved layouts clean themselves
+  up.
 
 ### Added
 - **Grok usage bar shows its reset countdown** — the aggregate credit

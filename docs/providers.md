@@ -166,13 +166,6 @@ Ground rules that apply to every provider:
 - **Calls:** `app.kilo.ai/api/trpc/user.getCreditBlocks,kiloPass.getState`.
 - **Shows:** credit blocks, Kilo Pass window, tier.
 
-## Kiro *(experimental)*
-
-- **Reads:** nothing directly — runs `kiro-cli chat --no-interactive
-  /usage` (windowless) and parses its output.
-- **Calls:** none of its own; the CLI talks to its own backend.
-- **Shows:** credits, bonus credits, reset date, plan.
-
 ---
 
 Provider request formats were researched from two MIT-licensed macOS

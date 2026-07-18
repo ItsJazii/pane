@@ -8,7 +8,7 @@ One click on the tray icon answers the questions every AI power user keeps
 asking: *How much of my Claude session is left? When does my Codex weekly
 reset? What did today actually cost me?*
 
-**[pane.jazii.dev](https://pane.jazii.dev)** · [Install](#install) · [How it works](#how-it-works) · [Providers](#providers-18-and-counting) · [Features](#features) · [Privacy](#privacy--security) · [Credits](#credits)
+**[pane.jazii.dev](https://pane.jazii.dev)** · [Install](#install) · [How it works](#how-it-works) · [Providers](#providers-17-and-counting) · [Features](#features) · [Privacy](#privacy--security) · [Credits](#credits)
 
 <img src="docs/promo.png" width="760" alt="Pane — track all your AI subscription limits in one tray app: Total Spend donut with per-provider slices, usage cards with pace bars" />
 
@@ -130,7 +130,7 @@ never leave your PC. The only thing counted is the update check every few
 hours: anonymous, country-level, no IPs stored — see
 [Privacy](#privacy--security).
 
-## Providers (18 and counting)
+## Providers (17 and counting)
 
 | Provider | How Pane connects |
 |---|---|
@@ -151,7 +151,6 @@ hours: anonymous, country-level, no IPs stored — see
 | Ollama | Local server on :11434 — installed + loaded models, no key |
 | Codebuff | `codebuff login` credentials file or API key → credits + weekly limit |
 | Kilo | Kilo CLI login file or API key → credit blocks + Kilo Pass |
-| Kiro *(experimental)* | Reads `kiro-cli /usage` output → credits + bonus credits |
 
 *OpenCode has no public usage API yet
 ([anomalyco/opencode#10448](https://github.com/anomalyco/opencode/issues/10448));
