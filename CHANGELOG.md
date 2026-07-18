@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.4.19 — 2026-07-18
+
+### Added
+- **Grok usage bar shows its reset countdown** — the aggregate credit
+  meter now carries the billing period's real end time and duration,
+  so it paces and counts down like the other cards. Contributed by
+  @JaminYe — Pane's first outside contribution. 🎉
 
 ### Changed
 - **OpenCode Go meters say "this PC only"** — Go quotas are counted
