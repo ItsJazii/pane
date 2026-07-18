@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.20 — 2026-07-18
 
 ### Fixed
 - **Disabled providers now do nothing at all** — disabling a provider
