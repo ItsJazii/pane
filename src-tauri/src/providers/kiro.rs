@@ -3,11 +3,32 @@ use super::{Metric, Snapshot};
 const ID: &str = "kiro";
 const NAME: &str = "Kiro";
 
+/// kiro-cli runs its own update check on every invocation and downloads a
+/// fresh installer to %TEMP% when one is pending — invoking it per refresh
+/// flooded temp with gigabytes of MSIs. Real invocations are therefore
+/// spaced at least 30 minutes apart; refreshes in between serve the cached
+/// snapshot (credits don't move fast enough for anyone to notice).
+const MIN_RUN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
 pub async fn snapshot() -> Snapshot {
-    match fetch().await {
+    use std::sync::Mutex;
+    static CACHE: Mutex<Option<(std::time::Instant, Snapshot)>> = Mutex::new(None);
+
+    if let Ok(cache) = CACHE.lock() {
+        if let Some((at, snap)) = cache.as_ref() {
+            if at.elapsed() < MIN_RUN_INTERVAL {
+                return snap.clone();
+            }
+        }
+    }
+    let snap = match fetch().await {
         Ok(s) => s,
         Err(e) => Snapshot::error(ID, NAME, e),
+    };
+    if let Ok(mut cache) = CACHE.lock() {
+        *cache = Some((std::time::Instant::now(), snap.clone()));
     }
+    snap
 }
 
 async fn run_cli(args: &[&str], secs: u64) -> Option<String> {
