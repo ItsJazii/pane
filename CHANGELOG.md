@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Grok no longer shows "Outdated" right after its weekly reset** —
+  xAI's billing API omits the usage-percent field entirely while usage
+  is 0%, which Pane misread as a broken response and kept showing last
+  week's 100%-used bar with an ⚠ Outdated tag. A fresh window with no
+  usage now correctly renders as a 0% bar with the new reset countdown.
+
 ## 0.4.20 — 2026-07-18
 
 ### Fixed
