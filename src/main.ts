@@ -830,10 +830,9 @@ type DonutEntry = {
 const OTHERS_ID = "__others__";
 /// Providers under this many dollars (in the visible window) fold into
 /// one "Others" wedge; hovering it lists who spent what. The bar scales
-/// with the period — $1 barely registers in a day but $10 would swallow
-/// most of a quiet day's ring, while a month works the other way.
+/// with the period — a day's ring earns a slice at $5, a month's at $10.
 function othersFoldUsd(tab: SpendTab): number {
-  return tab === "last30" ? 5 : 1;
+  return tab === "last30" ? 10 : 5;
 }
 
 function donutEntries(tab: SpendTab): DonutEntry[] {
@@ -852,12 +851,13 @@ function donutEntries(tab: SpendTab): DonutEntry[] {
     )
     .sort((a, b) => spendVal(b.w) - spendVal(a.w));
 
-  // Small spenders fold into a single "Others" wedge — but only when
-  // there are at least two of them (a group of one is just a rename) and
-  // at least one named provider remains (an all-Others ring says nothing).
+  // Small spenders fold into a single "Others" wedge — even a lone one,
+  // so under-threshold providers never claim their own legend row. Only
+  // exception: at least one named provider must remain, because an
+  // all-Others ring says nothing.
   const limit = othersFoldUsd(tab);
   const small = all.filter((e) => e.w.cost < limit);
-  if (small.length < 2 || small.length === all.length) return all;
+  if (small.length === 0 || small.length === all.length) return all;
 
   const others: DonutEntry = {
     s: {
