@@ -830,10 +830,9 @@ type DonutEntry = {
 const OTHERS_ID = "__others__";
 /// Providers under this many dollars (in the visible window) fold into
 /// one "Others" wedge; hovering it lists who spent what. The bar scales
-/// with the period — $1 barely registers in a day but $10 would swallow
-/// most of a quiet day's ring, while a month works the other way.
+/// with the period — a day's ring earns a slice at $5, a month's at $10.
 function othersFoldUsd(tab: SpendTab): number {
-  return tab === "last30" ? 5 : 1;
+  return tab === "last30" ? 10 : 5;
 }
 
 function donutEntries(tab: SpendTab): DonutEntry[] {
