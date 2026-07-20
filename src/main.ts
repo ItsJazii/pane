@@ -851,12 +851,13 @@ function donutEntries(tab: SpendTab): DonutEntry[] {
     )
     .sort((a, b) => spendVal(b.w) - spendVal(a.w));
 
-  // Small spenders fold into a single "Others" wedge — but only when
-  // there are at least two of them (a group of one is just a rename) and
-  // at least one named provider remains (an all-Others ring says nothing).
+  // Small spenders fold into a single "Others" wedge — even a lone one,
+  // so under-threshold providers never claim their own legend row. Only
+  // exception: at least one named provider must remain, because an
+  // all-Others ring says nothing.
   const limit = othersFoldUsd(tab);
   const small = all.filter((e) => e.w.cost < limit);
-  if (small.length < 2 || small.length === all.length) return all;
+  if (small.length === 0 || small.length === all.length) return all;
 
   const others: DonutEntry = {
     s: {
