@@ -1,11 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.4.22 — 2026-07-20
 
 ### Changed
 - **"Others" wedge folds more aggressively** — providers now fold into
   the Others slice under $5 on Today/Yesterday (was $1) and under $10 on
   Last 30 Days (was $5), keeping the ring focused on the big spenders.
+  A lone under-threshold provider folds too (it used to keep its own
+  legend row); the ring only stays unfolded when everyone is small.
 
 ## 0.4.21 — 2026-07-19
 
