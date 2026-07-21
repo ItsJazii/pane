@@ -558,6 +558,62 @@ fn minimax(extra: FileData) -> ProviderSpend {
     build_spend("minimax", "MiniMax", data)
 }
 
+/// Which spend slice a Hermes row belongs to. Hermes (Nous Research's
+/// desktop agent) routes chats through whichever backend the user connected,
+/// so its ledger rows are filed under the provider that actually billed
+/// them; routes Pane has no slice for stay under Hermes's own name.
+fn hermes_bucket(billing_provider: &str) -> (&'static str, &'static str) {
+    let lower = billing_provider.to_lowercase();
+    if lower.contains("minimax") {
+        ("minimax", "MiniMax")
+    } else if lower.contains("openrouter") {
+        ("openrouter", "OpenRouter")
+    } else {
+        ("hermes", "Hermes")
+    }
+}
+
+/// Hermes spend, grouped per target slice. Rows are cumulative per
+/// (session, model, route) — the app updates them in place while a session
+/// runs — so every refresh rebuilds from the full table instead of
+/// accumulating deltas. The whole session lands on its last-active day.
+fn hermes() -> Vec<(&'static str, &'static str, FileData)> {
+    let mut buckets: Vec<(&'static str, &'static str, FileData)> = Vec::new();
+    for ev in providers::hermes::collect_usage_events() {
+        let Some(ts) = DateTime::from_timestamp_millis(ev.ts_ms) else { continue };
+        let tokens = ev.input + ev.output + ev.reasoning + ev.cache_read + ev.cache_write;
+        if tokens <= 0.0 && ev.cost_usd <= 0.0 {
+            continue;
+        }
+        let (id, name) = hermes_bucket(&ev.billing_provider);
+        let data = match buckets.iter_mut().find(|(bid, _, _)| *bid == id) {
+            Some((_, _, data)) => data,
+            None => {
+                buckets.push((id, name, FileData::default()));
+                &mut buckets.last_mut().unwrap().2
+            }
+        };
+        if ev.cost_usd > 0.0 {
+            add_event(data, ts, &ev.model, ev.cost_usd, tokens);
+            continue;
+        }
+        match pricing::lookup(&ev.model) {
+            Some(p) => {
+                let u = pricing::Usage {
+                    input: ev.input,
+                    output: ev.output + ev.reasoning,
+                    cache_read: ev.cache_read,
+                    cache_write_5m: ev.cache_write,
+                    cache_write_1h: 0.0,
+                };
+                add_event(data, ts, &ev.model, pricing::request_cost(&p, &u, true), tokens);
+            }
+            None => note_unpriced(data, ts, &ev.model, tokens),
+        }
+    }
+    buckets
+}
+
 /// One `token_count` usage object, tolerating the older field spellings
 /// (`prompt_tokens`, `cache_read_input_tokens`, …) the Mac scanner accepts.
 #[derive(Clone, PartialEq)]
@@ -1231,6 +1287,17 @@ mod tests {
         d.days.values().map(|v| v.0).sum()
     }
 
+    // ---- Hermes: billing-route buckets -----------------------------------
+
+    #[test]
+    fn hermes_routes_land_in_the_right_slice() {
+        assert_eq!(hermes_bucket("minimax-oauth").0, "minimax");
+        assert_eq!(hermes_bucket("MiniMax").0, "minimax");
+        assert_eq!(hermes_bucket("openrouter").0, "openrouter");
+        assert_eq!(hermes_bucket("nous-api").0, "hermes");
+        assert_eq!(hermes_bucket("").0, "hermes");
+    }
+
     // ---- Codex: child-session replay gate --------------------------------
 
     #[test]
@@ -1569,7 +1636,17 @@ fn split_csv_row(line: &str) -> Vec<String> {
 
 pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
     pricing::ensure_fresh();
-    let (claude_sp, minimax_extra) = claude();
+    let (claude_sp, mut minimax_extra) = claude();
+    // Hermes rows going to an existing slice merge into it (MiniMax via the
+    // extra-data path); the rest become their own spend entries.
+    let mut hermes_rest = Vec::new();
+    for (id, name, data) in hermes() {
+        if id == "minimax" {
+            merge_data(&mut minimax_extra, data);
+        } else {
+            hermes_rest.push(build_spend(id, name, data));
+        }
+    }
     let mut list = vec![
         claude_sp,
         codex(),
@@ -1579,6 +1656,7 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
         minimax(minimax_extra),
         moonshot(),
     ];
+    list.extend(hermes_rest);
     if let Some(csv) = cursor_csv {
         list.push(cursor_from_csv(&csv));
     }

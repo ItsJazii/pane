@@ -146,6 +146,17 @@ Ground rules that apply to every provider:
   notification); Moonshot adds Today / Yesterday / 30-day spend, model
   breakdown, and the usage trend from Kimi Code sessions.
 
+## Hermes (spend only — no card)
+
+- **Reads:** the Hermes desktop app's local ledger
+  (`%LOCALAPPDATA%\hermes\state.db`, `session_model_usage` table — model,
+  billing route, token buckets, and the app's own cost per session).
+- **Calls:** nothing. This is a purely local spend source.
+- **Shows:** each session's tokens/cost in the Total Spend donut under
+  the backend that billed it — MiniMax-routed sessions join the MiniMax
+  slice, OpenRouter-routed join OpenRouter, anything else appears as a
+  Hermes slice.
+
 ## Ollama
 
 - **Reads:** nothing.

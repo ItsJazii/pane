@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Hermes desktop spend** — Pane now reads the local usage ledger of
+  Nous Research's Hermes app (`%LOCALAPPDATA%\hermes\state.db`, this PC
+  only, nothing sent anywhere). Each session is filed under the backend
+  that actually billed it: MiniMax-routed chats merge into the MiniMax
+  spend slice, OpenRouter-routed into OpenRouter, and anything else shows
+  as a Hermes slice.
+
+### Fixed
+- **Kimi K3 cache reads were overpriced ~10×** — models.dev lists the
+  same model under many resellers and Pane took the alphabetically first
+  entry, which for kimi-k3 was a stub with no cache pricing; cache hits
+  then defaulted to the full $3.00 input rate instead of $0.30. The
+  catalog entry with the most complete pricing wins now.
+
 ## 0.4.22 — 2026-07-20
 
 ### Changed
