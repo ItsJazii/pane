@@ -11,6 +11,11 @@
   as a Hermes slice.
 
 ### Fixed
+- **Symlinked session logs count their real age** — the spend scanner
+  follows symlinks/junctions when walking log directories, but judged a
+  linked file's recency by the link's own timestamp; logs relocated to
+  another drive could silently vanish from the 31-day window. The
+  target file's timestamp decides now.
 - **Kimi K3 cache reads were overpriced ~10×** — models.dev lists the
   same model under many resellers and Pane took the alphabetically first
   entry, which for kimi-k3 was a stub with no cache pricing; cache hits

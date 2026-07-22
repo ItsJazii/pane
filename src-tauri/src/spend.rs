@@ -195,6 +195,10 @@ fn build_spend(id: &'static str, name: &'static str, data: FileData) -> Provider
 }
 
 /// All .jsonl files under `root` modified in the last 31 days.
+/// Symlinks and junctions are followed throughout: `is_dir()` resolves
+/// links when recursing, and the recency check below reads the *target*
+/// file's mtime — a link's own (usually ancient) timestamp must not hide
+/// logs a user relocated to another drive.
 fn recent_jsonl_files(root: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(root) else { return };
     let cutoff = SystemTime::now() - Duration::from_secs(31 * 86_400);
@@ -203,7 +207,7 @@ fn recent_jsonl_files(root: &Path, out: &mut Vec<PathBuf>) {
         if path.is_dir() {
             recent_jsonl_files(&path, out);
         } else if path.extension().is_some_and(|e| e == "jsonl") {
-            if let Ok(meta) = entry.metadata() {
+            if let Ok(meta) = fs::metadata(&path) {
                 if meta.modified().map(|m| m >= cutoff).unwrap_or(true) {
                     out.push(path);
                 }
