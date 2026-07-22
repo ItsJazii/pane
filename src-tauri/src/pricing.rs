@@ -155,6 +155,32 @@ pub fn generation() -> u64 {
     GENERATION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Stable fingerprint of the on-disk catalog files. The persistent spend
+/// cache stores costs priced under a specific catalog set; when any catalog
+/// file changes (a refresh rewrote it), the stamp changes and the whole
+/// persisted cache is discarded rather than served with stale prices.
+pub fn catalog_stamp() -> String {
+    SOURCES
+        .iter()
+        .map(|(source, _)| {
+            let path = dir().join(format!("{source}.json"));
+            match std::fs::metadata(&path) {
+                Ok(m) => {
+                    let ms = m
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    format!("{source}:{ms}:{}", m.len())
+                }
+                Err(_) => format!("{source}:absent"),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
 fn dir() -> PathBuf {
     providers::config_dir().join("pricing")
 }

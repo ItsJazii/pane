@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Changed
+- **Instant startup for the spend engine** — per-file parse summaries now
+  persist across launches (`%APPDATA%\Pane\spend_cache.json`, a few MB at
+  most), so a fresh start re-parses only logs that changed instead of
+  re-reading every session file ever written. The cache is discarded
+  whenever the pricing catalogs update, so costs are never served stale.
+
 ### Added
 - **Hermes desktop spend** — Pane now reads the local usage ledger of
   Nous Research's Hermes app (`%LOCALAPPDATA%\hermes\state.db`, this PC
