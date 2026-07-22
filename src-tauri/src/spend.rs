@@ -606,7 +606,10 @@ fn hermes() -> Vec<(&'static str, &'static str, FileData)> {
                     cache_write_5m: ev.cache_write,
                     cache_write_1h: 0.0,
                 };
-                add_event(data, ts, &ev.model, pricing::request_cost(&p, &u, true), tokens);
+                // Rows aggregate a whole session's requests, so no single
+                // request can be proven long-context — stay on base rates
+                // (same reasoning as the Cursor CSV scanner).
+                add_event(data, ts, &ev.model, pricing::request_cost(&p, &u, false), tokens);
             }
             None => note_unpriced(data, ts, &ev.model, tokens),
         }
