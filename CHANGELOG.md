@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.23 — 2026-07-22
 
 ### Changed
 - **Instant startup for the spend engine** — per-file parse summaries now
