@@ -3,6 +3,12 @@
 ## Unreleased
 
 ### Fixed
+- **DeepSeek V4 pro/flash now price** — DeepSeek's V4 pro and flash
+  models (including dated snapshots like `deepseek-v4-pro-0813` and
+  `deepseek-v4-flash-0731`) weren't in any public catalog, so usage
+  through Hermes/AihubMix counted tokens but showed $0 and folded out of
+  the spend ring. Their AihubMix rates are baked in until the catalogs
+  learn them (self-retiring), and cached history repricies.
 - **Grok 4.6 prices from day one** — xAI's launch-day rates
   ($2 in / $0.50 cached / $6 out per MTok, doubling for ≥200k-token
   prompts; the fast variant at 2x) are baked in until the public

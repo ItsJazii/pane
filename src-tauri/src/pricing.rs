@@ -166,7 +166,7 @@ pub fn generation() -> u64 {
 /// fingerprinted below — an app update that reprices the same files would
 /// otherwise leave history at the old dollars until upstream happens to
 /// rewrite a catalog.
-const CORRECTIONS_REV: u32 = 3; // 3: zero-rate catalog placeholders no longer price at $0.00
+const CORRECTIONS_REV: u32 = 4; // 4: deepseek-v4 pro/flash builtin prices
 
 /// Stable fingerprint of the effective pricing inputs: the on-disk catalog
 /// files plus this binary's corrections revision. The persistent spend
@@ -669,8 +669,28 @@ fn builtin_price(canonical: &str) -> Option<Price> {
         .strip_prefix("moonshot/")
         .or_else(|| canonical.strip_prefix("moonshot-ai/"))
         .or_else(|| canonical.strip_prefix("xai/"))
+        .or_else(|| canonical.strip_prefix("deepseek/"))
+        // Cursor's CSV brands third-party slugs ("cursor-grok-4.6-xhigh");
+        // the supplement's alias rules normally translate these, but a
+        // launch-day model needs the baked rates before the supplement
+        // learns the new slug.
+        .or_else(|| canonical.strip_prefix("cursor-"))
         .unwrap_or(canonical);
+    // DeepSeek ships dated snapshots ("deepseek-v4-pro-0813"); price them as
+    // the base model so a new date doesn't silently go unpriced.
+    let bare = match bare.strip_suffix(|c: char| c.is_ascii_digit()) {
+        Some(_) if bare.starts_with("deepseek-") => bare.rsplit_once('-').map_or(bare, |(h, t)| {
+            if t.chars().all(|c| c.is_ascii_digit()) && t.len() >= 4 { h } else { bare }
+        }),
+        _ => bare,
+    };
     match bare {
+        // AihubMix DeepSeek V4 family (USD/MTok, aihubmix.com/model/…): no
+        // cache-write rate published, so writes bill at the input rate.
+        // Used through Hermes/AihubMix; public catalogs don't carry these
+        // slugs yet. pro: /deepseek-v4-pro-0813 · flash: /deepseek-v4-flash.
+        "deepseek-v4-pro" => Some(Price::flat(0.464, 0.928, 0.004, 0.464)),
+        "deepseek-v4-flash" => Some(Price::flat(0.142, 0.284, 0.0284, 0.142)),
         "kimi-k3" | "kimi-k3-code" => Some(Price::flat(3.0, 15.0, 0.3, 3.0)),
         // Alibaba Model Studio, GA'd 2026-08-03 (USD/MTok): input $2,
         // output $6, implicit cache read $0.25, explicit cache write $2.50.
@@ -742,6 +762,25 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_v4_pro_is_priced_including_dated_snapshots() {
+        let store = super::Store::default();
+        // Bare slug and the AihubMix dated snapshot both price identically.
+        for slug in ["deepseek-v4-pro", "deepseek-v4-pro-0813", "deepseek/deepseek-v4-pro-0813"] {
+            let p = super::resolve(&store, slug, 0).unwrap_or_else(|| panic!("{slug} unpriced"));
+            assert!((p.input - 0.464).abs() < 1e-9, "{slug}");
+            assert!((p.output - 0.928).abs() < 1e-9, "{slug}");
+            assert!((p.cache_read - 0.004).abs() < 1e-9, "{slug}");
+        }
+        // The flash sibling is priced too (both are Hermes-logged slugs),
+        // including its dated snapshot.
+        let flash = super::resolve(&store, "deepseek-v4-flash-0731", 0).unwrap();
+        assert!((flash.input - 0.142).abs() < 1e-9);
+        assert!((flash.output - 0.284).abs() < 1e-9);
+        // A slug outside the family stays unpriced (no over-broad match).
+        assert!(super::resolve(&store, "deepseek-v9-imaginary", 0).is_none());
+    }
+
+    #[test]
     fn priority_slugs_price_at_base_times_priority_multiplier() {
         let mut store = super::Store::default();
         store
@@ -790,7 +829,11 @@ mod tests {
         // ≥200k prompts — resolvable in every spelling before the public
         // catalogs learn the model. Empty store = builtin only.
         let store = super::Store::default();
-        for slug in ["grok-4.6", "grok-4-6", "xai/grok-4.6", "grok-4.6-high"] {
+        // cursor-grok-4.6-xhigh is the exact slug Cursor's CSV logged on
+        // launch day — 20.6M real tokens showed $0.00 until it resolved.
+        for slug in
+            ["grok-4.6", "grok-4-6", "xai/grok-4.6", "grok-4.6-high", "cursor-grok-4.6-xhigh"]
+        {
             let p = super::resolve(&store, slug, 0)
                 .unwrap_or_else(|| panic!("{slug} did not price"));
             assert_eq!((p.input, p.output, p.cache_read, p.cache_write), (2.0, 6.0, 0.5, 2.0), "{slug}");
