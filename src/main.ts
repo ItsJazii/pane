@@ -4220,10 +4220,15 @@ window.addEventListener("DOMContentLoaded", () => {
       e.preventDefault();
       undoLayout();
     }
-    // Esc backs out of Customize/Settings (Mac parity).
-    if (e.key === "Escape") {
-      setDrawer(false);
-      setSettings(false);
+    // Esc backs out of Customize/Settings; on the dashboard it hides the
+    // popover (Mac parity). IME candidate cancel must not close anything.
+    if (e.key === "Escape" && !e.isComposing && e.keyCode !== 229) {
+      if (customizeOpen || document.body.classList.contains("settings-open")) {
+        setDrawer(false);
+        setSettings(false);
+      } else {
+        void invoke("hide_popover");
+      }
     }
     // Ctrl+R refreshes data — and must NOT reload the webview.
     if (e.ctrlKey && e.key.toLowerCase() === "r") {
