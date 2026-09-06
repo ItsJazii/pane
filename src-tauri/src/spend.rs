@@ -1349,7 +1349,18 @@ fn codex_line(st: &mut CodexFileState, line: &str, data: &mut FileData) {
         _ => (rate_source.clone(), false),
     };
     let lower = rate_source.to_lowercase();
-    let base_price = probe_lookup(&rate_model);
+    // Date-stamped Codex names ("gpt-6-astra-2026-09-01") miss the exact
+    // builtin. Strip the stamp before the price lookup so Astra (and any
+    // later dated GPT) uses the baked card, not generic GPT-5 rates.
+    // The breakdown still records the original `model` name.
+    let dated = codex_dated_base(&rate_model.to_lowercase());
+    let base_price = probe_lookup(&rate_model).or_else(|| {
+        if !rate_model.eq_ignore_ascii_case(&dated) {
+            probe_lookup(&dated)
+        } else {
+            None
+        }
+    });
     let price = base_price
         .or_else(|| if alias_fast { probe_lookup(&rate_source) } else { None })
         .or_else(|| {
@@ -1366,8 +1377,6 @@ fn codex_line(st: &mut CodexFileState, line: &str, data: &mut FileData) {
         note_unpriced(data, ts, &model, tokens);
         return;
     };
-
-    let dated = codex_dated_base(&rate_model.to_lowercase());
     let mut threshold = 200_000.0;
     if let Some((i, o, cr)) = codex_long_context(&dated) {
         p.input_200k = Some(i);
@@ -2164,6 +2173,24 @@ mod tests {
         assert_ne!(doc.version, PERSIST_VERSION);
     }
 
+    /// Astra/Gemini baked rates bumped CORRECTIONS_REV. A cache written
+    /// under 10 would load without probe replay and keep unpriced totals
+    /// if the revision still matched.
+    #[test]
+    fn stale_corrections_revision_is_not_current() {
+        assert!(
+            pricing::corrections_rev() >= 11,
+            "Astra/Gemini rates must bump CORRECTIONS_REV"
+        );
+        let stale = r#"{"version":3,"pricing_stamp":"x","corrections":10,"entries":[]}"#;
+        let doc: PersistFile = serde_json::from_str(stale).unwrap();
+        assert_ne!(
+            doc.corrections,
+            pricing::corrections_rev(),
+            "rev 10 must not match the live corrections revision"
+        );
+    }
+
     // ---- Price probes: catalog-refresh revalidation ------------------------
 
     /// Probes replay against the live catalog: an unknown model recorded as
@@ -2460,6 +2487,71 @@ mod tests {
         assert_eq!(codex_dated_base("gpt-6-astra-2026-09-01"), "gpt-6-astra");
         assert_eq!(codex_long_context("gpt-6-astra"), Some((20.0, 75.0, 2.0)));
         assert_eq!(codex_priority_multiplier("gpt-6-astra", "gpt-6-astra"), 2.0);
+    }
+
+    fn dated_astra_session(model: &str, input: f64, output: f64, fast: bool) -> FileData {
+        let mut lines = vec![
+            json!({"timestamp": "2026-09-01T10:00:00Z", "type": "turn_context",
+                   "payload": {"model": model}})
+            .to_string(),
+        ];
+        if fast {
+            lines.push(
+                json!({"timestamp": "2026-09-01T10:00:00Z", "type": "event_msg",
+                       "payload": {"type": "thread_settings_applied",
+                                   "thread_settings": {"service_tier": "fast"}}})
+                .to_string(),
+            );
+        }
+        lines.push(token_count_line(
+            "2026-09-01T10:00:01Z",
+            Some((input, output)),
+            (input, output),
+        ));
+        codex_run(&lines)
+    }
+
+    /// Date-stamped Astra must use the baked $10/$50 card (and $20/$75
+    /// above 272k), not generic GPT-5 rates. Fast is 2×. The breakdown
+    /// keeps the dated name.
+    #[test]
+    fn dated_astra_uses_builtin_rates_below_and_above_272k() {
+        let low_in = 1_000.0;
+        let high_in = 273_000.0;
+        let out = 1_000.0;
+        let expect_low = (low_in * 10.0 + out * 50.0) / 1e6;
+        let expect_high = (high_in * 20.0 + out * 75.0) / 1e6;
+        let generic_low = (low_in * 1.25 + out * 10.0) / 1e6;
+
+        for model in ["gpt-6-astra-2026-09-01", "gpt-6-astra-20260901"] {
+            let standard = dated_astra_session(model, low_in, out, false);
+            assert!(standard.unpriced.is_empty(), "{model}: {:?}", standard.unpriced);
+            assert!(
+                standard.days.keys().all(|(_, m)| m == model),
+                "{model} breakdown renamed: {:?}",
+                standard.days.keys().collect::<Vec<_>>()
+            );
+            let got = cost_sum(&standard);
+            assert!(
+                (got - expect_low).abs() < 1e-9,
+                "{model} low cost {got}, want {expect_low} (generic GPT would be {generic_low})"
+            );
+
+            let fast = dated_astra_session(model, low_in, out, true);
+            assert!((cost_sum(&fast) / got - 2.0).abs() < 1e-9, "{model} fast low");
+
+            let high = dated_astra_session(model, high_in, out, false);
+            let got_high = cost_sum(&high);
+            assert!(
+                (got_high - expect_high).abs() < 1e-9,
+                "{model} high cost {got_high}, want {expect_high}"
+            );
+            let fast_high = dated_astra_session(model, high_in, out, true);
+            assert!(
+                (cost_sum(&fast_high) / got_high - 2.0).abs() < 1e-9,
+                "{model} fast high"
+            );
+        }
     }
 
     // ---- Claude: advisor iterations, sidechain dedup, synthetic ----------

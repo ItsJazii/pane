@@ -166,7 +166,7 @@ pub fn generation() -> u64 {
 /// fingerprinted below — an app update that reprices the same files would
 /// otherwise leave history at the old dollars until upstream happens to
 /// rewrite a catalog.
-const CORRECTIONS_REV: u32 = 10; // 10: AihubMix Qwen3.8-Max-0902 snapshot pricing
+const CORRECTIONS_REV: u32 = 11; // 11: GPT-6 Astra + Gemini 3.8 Flash baked rates
 
 /// The corrections revision on its own — the spend cache treats a changed
 /// revision as a hard discard (the *code* that prices changed), while a

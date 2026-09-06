@@ -7,7 +7,9 @@
   still missing from the baked price table, so Cursor/Codex/Claude
   tiles dropped them into the unpriced ⚠ bucket. Astra is OpenAI's
   $10/$50 list (long-context $20/$75 above 272k on Codex); Gemini 3.8
-  Flash is Google's $0.75/$3.75 introductory API rate.
+  Flash is Google's $0.75/$3.75 introductory API rate. Dated Codex
+  slugs (`gpt-6-astra-2026-09-01`) use the same Astra card. Cached
+  unpriced totals from before this update are discarded.
 - **Esc on the dashboard hides the popover.** Customize and Settings
   still back out first. IME candidate-window Esc is ignored.
 - **Devin spend no longer fills the C: temp folder.** Pane used to copy
