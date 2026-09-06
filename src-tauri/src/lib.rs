@@ -2484,6 +2484,20 @@ fn set_webview_memory_level(window: &tauri::WebviewWindow, low: bool) {
     });
 }
 
+/// Hide the dashboard without the tray-click reopen dance. Esc on the
+/// dashboard (and the hide half of the tray toggle) both land here so
+/// the webview still drops to the low-memory target.
+#[tauri::command]
+fn hide_popover(app: tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    if window.is_visible().unwrap_or(false) {
+        let _ = window.hide();
+        set_webview_memory_level(&window, true);
+    }
+}
+
 fn toggle_popover(app: &tauri::AppHandle, click: tauri::PhysicalPosition<f64>) {
     let Some(window) = app.get_webview_window("main") else {
         return;
@@ -2558,7 +2572,8 @@ pub fn run() {
             set_shortcut,
             codex_redeem_credit,
             install_update,
-            check_update
+            check_update,
+            hide_popover
         ])
         .setup(|app| {
             spawn_update_checker(app.handle());

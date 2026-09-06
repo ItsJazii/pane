@@ -3,6 +3,13 @@
 ## Unreleased
 
 ### Fixed
+- **GPT-6 Astra and Gemini 3.8 Flash spend again.** Those slugs were
+  still missing from the baked price table, so Cursor/Codex/Claude
+  tiles dropped them into the unpriced ⚠ bucket. Astra is OpenAI's
+  $10/$50 list (long-context $20/$75 above 272k on Codex); Gemini 3.8
+  Flash is Google's $0.75/$3.75 introductory API rate.
+- **Esc on the dashboard hides the popover.** Customize and Settings
+  still back out first. IME candidate-window Esc is ignored.
 - **Devin spend no longer fills the C: temp folder.** Pane used to copy
   the whole Devin CLI sessions database into `%TEMP%\pane-devin-<pid>.db`
   on every spend refresh. That file is often multiple GB and stays in

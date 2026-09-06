@@ -1182,7 +1182,8 @@ fn codex_priority_multiplier(dated: &str, rate_model: &str) -> f64 {
     }
     match dated {
         "gpt-5.5" | "gpt-5.5-pro" => 2.5,
-        "gpt-5.4" | "gpt-5.4-pro" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" => 2.0,
+        "gpt-5.4" | "gpt-5.4-pro" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna"
+        | "gpt-6-astra" => 2.0,
         _ => {
             let m = probe_fast_multiplier(rate_model);
             if m == 1.0 { 2.0 } else { m }
@@ -1202,6 +1203,7 @@ fn codex_long_context(dated: &str) -> Option<(f64, f64, f64)> {
         // base rates (terra used to share gpt-5.4's row).
         "gpt-5.6-terra" => Some((4.0, 18.0, 0.4)),
         "gpt-5.6-luna" => Some((0.4, 1.8, 0.04)),
+        "gpt-6-astra" => Some((20.0, 75.0, 2.0)),
         _ => None,
     }
 }
@@ -2455,6 +2457,9 @@ mod tests {
         assert_eq!(codex_dated_base("gpt-5.6-sol-20260601"), "gpt-5.6-sol");
         assert_eq!(codex_dated_base("gpt-5.6-sol"), "gpt-5.6-sol");
         assert_eq!(codex_dated_base("gpt-4-0125-preview"), "gpt-4-0125-preview");
+        assert_eq!(codex_dated_base("gpt-6-astra-2026-09-01"), "gpt-6-astra");
+        assert_eq!(codex_long_context("gpt-6-astra"), Some((20.0, 75.0, 2.0)));
+        assert_eq!(codex_priority_multiplier("gpt-6-astra", "gpt-6-astra"), 2.0);
     }
 
     // ---- Claude: advisor iterations, sidechain dedup, synthetic ----------

@@ -858,6 +858,24 @@ fn builtin_price(canonical: &str) -> Option<Price> {
             cache_write_200k: Some(4.0),
             ..Price::flat(2.0, 6.0, 0.5, 2.0)
         }),
+        // GPT-6 Astra — OpenAI list (developers.openai.com/api/docs/models/gpt-6-astra):
+        // $10 / $50 / $1 cache read / $12.50 cache write. Prompts above
+        // 272k (Codex path) or 200k (generic request_cost) bill the
+        // whole request at $20 / $75 / $2 / $25. Public catalogs do not
+        // carry this slug yet; without a baked row, spend tiles go blank.
+        "gpt-6-astra" => Some(Price {
+            input_200k: Some(20.0),
+            output_200k: Some(75.0),
+            cache_read_200k: Some(2.0),
+            cache_write_200k: Some(25.0),
+            ..Price::flat(10.0, 50.0, 1.0, 12.5)
+        }),
+        // Gemini 3.8 Flash — Google API list through 2026-12-31
+        // (ai.google.dev/gemini-api/docs/pricing): $0.75 in / $3.75 out /
+        // $0.075 cache read / $0.75 cache write. Cursor effort tails
+        // (-high, -xhigh) peel in resolve(); preview is its own SKU.
+        "gemini-3.8-flash" | "gemini-3-8-flash" | "gemini-3.8-flash-preview"
+        | "cursor-gemini-3.8-flash" => Some(Price::flat(0.75, 3.75, 0.075, 0.75)),
         _ => None,
     }
 }
@@ -1083,6 +1101,43 @@ mod tests {
         let fast = super::resolve(&store, "grok-4.6-fast", 0).unwrap();
         assert_eq!((fast.input, fast.output, fast.cache_read), (4.0, 12.0, 1.0));
         assert_eq!(fast.input_200k, Some(8.0));
+    }
+
+    #[test]
+    fn gpt6_astra_and_gemini_38_flash_price_before_catalogs() {
+        let store = super::Store::default();
+        for slug in ["gpt-6-astra", "openai/gpt-6-astra", "gpt-6-astra-high"] {
+            let p = super::resolve(&store, slug, 0)
+                .unwrap_or_else(|| panic!("{slug} did not price"));
+            assert_eq!(
+                (p.input, p.output, p.cache_read, p.cache_write),
+                (10.0, 50.0, 1.0, 12.5),
+                "{slug}"
+            );
+            assert_eq!(
+                (p.input_200k, p.output_200k, p.cache_read_200k),
+                (Some(20.0), Some(75.0), Some(2.0)),
+                "{slug}"
+            );
+        }
+        let fast = super::resolve(&store, "gpt-6-astra-fast", 0).unwrap();
+        assert_eq!((fast.input, fast.output, fast.cache_read), (20.0, 100.0, 2.0));
+
+        for slug in [
+            "gemini-3.8-flash",
+            "google/gemini-3.8-flash",
+            "gemini-3.8-flash-high",
+            "gemini-3.8-flash-preview",
+            "cursor-gemini-3.8-flash",
+        ] {
+            let p = super::resolve(&store, slug, 0)
+                .unwrap_or_else(|| panic!("{slug} did not price"));
+            assert_eq!(
+                (p.input, p.output, p.cache_read, p.cache_write),
+                (0.75, 3.75, 0.075, 0.75),
+                "{slug}"
+            );
+        }
     }
 
     #[test]
