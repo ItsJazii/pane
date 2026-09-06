@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.47 — 2026-09-07
 
 ### Fixed
 - **GPT-6 Astra and Gemini 3.8 Flash spend again.** Those slugs were
