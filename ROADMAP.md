@@ -1,13 +1,13 @@
 # Roadmap — full Mac parity (and beyond)
 
-**Status (v0.4.46, 2026-09-02): every wave below is shipped, and the
+**Status (v0.4.47, 2026-09-07): every wave below is shipped, and the
 post-launch releases keep going.** Pane has full feature parity with the
 macOS original plus 22 providers, multi-site One/New API key management,
 Kimi Code plan keys without a CLI login, resilient modern Cursor plan
 fallbacks, English/Chinese/Russian UI, signed CI updates, live model
 pricing, and a Mac-parity design pass (inset cards, wedge spend donut,
-in-popover drag reorder, curated share cards). The primary site is now
-`trypane.xyz`; app-side updater migration is on main for the next release.
+in-popover drag reorder, curated share cards). The primary site is
+`trypane.xyz`, and this cut ships the app-side updater order.
 What comes next is demand-driven — open an issue for the provider or
 feature you're missing. Candidates on deck: Windsurf and JetBrains AI
 providers, a Re-detect Tools button, tray "Bars" icon style, and code
