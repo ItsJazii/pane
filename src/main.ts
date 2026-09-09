@@ -1129,7 +1129,7 @@ function renderTrend(spend: ProviderSpend): string {
       const h = v > 0 ? Math.max(2, (v / max) * 30) : 1;
       return `<g class="trend-day">
         <rect class="${v > 0 ? "trend-bar" : "trend-zero"}" x="${i * 10}" y="${32 - h}" width="7" height="${h}" rx="1.5"/>
-        <rect class="trend-hit" data-trend="${spend.id}|${i}" x="${i * 10 - 1.5}" y="0" width="10" height="32" fill="transparent"/>
+        <rect class="trend-hit" data-trend="${escapeHtml(spend.id)}|${i}" x="${i * 10 - 1.5}" y="0" width="10" height="32" fill="transparent"/>
       </g>`;
     })
     .join("");
@@ -1162,7 +1162,7 @@ function renderSpendRow(
       : t("card.noData");
   const warn = key === "last30" ? unpricedWarn(sp) : "";
   return `
-    <div class="metric-text spend-row" data-spend="${providerId}|${key}">
+    <div class="metric-text spend-row" data-spend="${escapeHtml(providerId)}|${key}">
       <span>${escapeHtml(displayMetricLabel(label))} ${warn}</span>
       <span class="detail">${text}</span>
     </div>`;
@@ -1211,7 +1211,7 @@ function renderCard(s: Snapshot): string {
     if (onDemandHtml.trim()) {
       const anim = L.expanded && animateExpandId === s.id ? " anim" : "";
       caret = `
-        <button class="card-caret" data-caret="${s.id}" title="${L.expanded ? t("card.showLess") : t("card.showMore")}">${L.expanded ? "⌃" : "⌄"}</button>
+        <button class="card-caret" data-caret="${escapeHtml(s.id)}" title="${L.expanded ? t("card.showLess") : t("card.showMore")}">${L.expanded ? "⌃" : "⌄"}</button>
         ${L.expanded ? `<div class="on-demand${anim}">${onDemandHtml}</div>` : ""}`;
     }
   } else {
@@ -1235,10 +1235,10 @@ function renderCard(s: Snapshot): string {
   const linksRow = links ? `<div class="quick-links">${links}</div>` : "";
   const share =
     s.status === "ok"
-      ? `<button class="share-btn" data-share="${s.id}" title="${escapeHtml(t("card.share"))}">⧉</button>`
+      ? `<button class="share-btn" data-share="${escapeHtml(s.id)}" title="${escapeHtml(t("card.share"))}">⧉</button>`
       : "";
   return `
-    <article class="provider${muted}" data-provider="${s.id}">
+    <article class="provider${muted}" data-provider="${escapeHtml(s.id)}">
       <div class="provider-head">
         <span class="drag-grip" title="${escapeHtml(t("card.drag"))}">⠿</span>
         <span class="provider-name">${escapeHtml(s.name)}</span>
@@ -1470,7 +1470,7 @@ function legendHtml(entries: DonutEntry[]): string {
   return entries
     .map(
       (e) => `
-        <div class="legend-row" data-pid="${e.s.id}"${e.parts ? ` title="${escapeHtml(othersBreakdown(e))}"` : ""}>
+        <div class="legend-row" data-pid="${escapeHtml(e.s.id)}"${e.parts ? ` title="${escapeHtml(othersBreakdown(e))}"` : ""}>
           <span class="dot" style="background:${spendColor(e.s.id)}"></span>
           <span class="legend-name">${escapeHtml(e.s.name)}</span>
           <span class="legend-val">${fmtSpendVal(e.w)}</span>
@@ -1571,7 +1571,7 @@ function renderTotalSpend(): string {
       const pop = donutPop(g);
       const full = g.a1 - g.a0 >= TAU - 0.0001 ? ` data-full="1"` : "";
       const hint = e.parts ? `<title>${escapeHtml(othersBreakdown(e))}</title>` : "";
-      return `<path class="seg" data-pid="${e.s.id}"${full} fill-rule="evenodd"
+      return `<path class="seg" data-pid="${escapeHtml(e.s.id)}"${full} fill-rule="evenodd"
         d="${sectorPath(g.a0, g.a1)}" style="fill:${spendColor(e.s.id)};--tx:${pop.tx};--ty:${pop.ty}">${hint}</path>`;
     })
     .join("");
@@ -1627,8 +1627,10 @@ function renderTotalSpend(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Footer update flow — every popover open re-checks; the version stamp
-// becomes "Checking for updates…" and then an Update button on a hit.
+// Footer update flow — popover opens re-check, but the backend gates the
+// launch + every-4-h cadence per docs/privacy.md (invoke is a cheap cache
+// read inside the window). The version stamp becomes "Checking for
+// updates…" and then an Update button on a hit.
 // ---------------------------------------------------------------------------
 
 let buildText = "";
@@ -2347,11 +2349,11 @@ function renderCustomize(): string {
         const starred = L.starred.includes(key);
         const visible = !L.hidden.includes(key);
         return `
-          <div class="cust-row" draggable="true" data-cust-row="${id}|${escapeHtml(key)}">
+          <div class="cust-row" draggable="true" data-cust-row="${escapeHtml(id)}|${escapeHtml(key)}">
             <span class="grip" title="${escapeHtml(t("customize.dragRows"))}">⠿</span>
-            <label class="toggle mini"><input type="checkbox" data-visible="${id}|${escapeHtml(key)}"${visible ? " checked" : ""} /></label>
+            <label class="toggle mini"><input type="checkbox" data-visible="${escapeHtml(id)}|${escapeHtml(key)}"${visible ? " checked" : ""} /></label>
             <span class="cust-label">${escapeHtml(displayMetricLabel(key))}</span>
-            ${starrable ? `<button class="star${starred ? " on" : ""}" data-star="${id}|${escapeHtml(key)}" title="${escapeHtml(t("customize.star"))}">★</button>` : ""}
+            ${starrable ? `<button class="star${starred ? " on" : ""}" data-star="${escapeHtml(id)}|${escapeHtml(key)}" title="${escapeHtml(t("customize.star"))}">★</button>` : ""}
           </div>`;
       };
 
@@ -2359,22 +2361,22 @@ function renderCustomize(): string {
       const onDemand = L.metricOrder.filter((k) => L.onDemand.includes(k));
       const rows = L.metricOrder.length
         ? `${always.map(row).join("")}
-           <div class="cust-divider" data-divider="${id}">${escapeHtml(t("customize.onDemand"))}</div>
+           <div class="cust-divider" data-divider="${escapeHtml(id)}">${escapeHtml(t("customize.onDemand"))}</div>
            ${onDemand.map(row).join("")}`
         : `<p class="placeholder">${escapeHtml(t("customize.noData"))}</p>`;
 
       const open = custExpanded.has(id);
       return `
-        <article class="provider customize-block${enabled ? "" : " muted"}${open ? " open" : ""}" data-cust-provider="${id}" draggable="true">
+        <article class="provider customize-block${enabled ? "" : " muted"}${open ? " open" : ""}" data-cust-provider="${escapeHtml(id)}" draggable="true">
           <div class="provider-head">
             <span class="grip" title="${escapeHtml(t("customize.dragProviders"))}">⠿</span>
-            <button class="cust-expand" data-cust-expand="${id}" title="${open ? t("customize.collapse") : t("customize.expand")}">
+            <button class="cust-expand" data-cust-expand="${escapeHtml(id)}" title="${open ? t("customize.collapse") : t("customize.expand")}">
               <span class="provider-name">${escapeHtml(name)}</span>
               <span class="chev">⌄</span>
             </button>
             <span class="spacer"></span>
-            <button class="mini-btn" data-reset="${id}" title="${escapeHtml(t("customize.resetLayoutTip"))}">${escapeHtml(t("customize.resetLayout"))}</button>
-            <label class="toggle mini" title="${escapeHtml(t("customize.enable"))}"><input type="checkbox" data-enable="${id}"${enabled ? " checked" : ""} /></label>
+            <button class="mini-btn" data-reset="${escapeHtml(id)}" title="${escapeHtml(t("customize.resetLayoutTip"))}">${escapeHtml(t("customize.resetLayout"))}</button>
+            <label class="toggle mini" title="${escapeHtml(t("customize.enable"))}"><input type="checkbox" data-enable="${escapeHtml(id)}"${enabled ? " checked" : ""} /></label>
           </div>
           <div class="acc-body"><div class="acc-inner cust-rows">${rows}</div></div>
         </article>`;
