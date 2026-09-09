@@ -32,7 +32,7 @@ fn find_token() -> Option<String> {
     let mut usernames: Vec<String> = Vec::new();
     if let Ok(appdata) = std::env::var("APPDATA") {
         let hosts = PathBuf::from(appdata).join("GitHub CLI").join("hosts.yml");
-        if let Ok(raw) = std::fs::read_to_string(&hosts) {
+        if let Ok(raw) = super::read_small_text(&hosts, MAX_CRED_BYTES, "hosts.yml") {
             if let Some(tok) = hosts_yml_token(&raw, &mut usernames) {
                 return Some(tok);
             }

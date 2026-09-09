@@ -103,10 +103,14 @@ pub fn discover_extra_accounts() -> Vec<ClaudeAccount> {
         if dir == default {
             continue;
         }
-        let has_oauth = std::fs::read_to_string(dir.join(".credentials.json"))
-            .ok()
-            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-            .is_some_and(|doc| doc.get("claudeAiOauth").is_some());
+        let has_oauth = super::read_small_text(
+            &dir.join(".credentials.json"),
+            MAX_CRED_BYTES,
+            "credentials",
+        )
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .is_some_and(|doc| doc.get("claudeAiOauth").is_some());
         if !has_oauth {
             continue;
         }
@@ -189,14 +193,14 @@ async fn fetch(dir: &std::path::Path, id: &str, name: &str) -> Result<Snapshot, 
         if refresh.is_empty() {
             return Err("token expired and no refresh token present — run `claude` and log in again".into());
         }
-        // Refresh rotates the CLI's refresh token. If we can't write it back
-        // (a planted symlink), don't call the token endpoint — that would
-        // sign the CLI out from under the user; a still-valid access token
-        // just skips the refresh.
-        let writable = is_regular_file(&path);
+        // Refresh rotates the CLI's refresh token. If the write-back can't
+        // safely replace the live file (planted symlink, read-only dir),
+        // don't call the token endpoint — that would sign the CLI out from
+        // under the user; a still-valid access token just skips the refresh.
+        let writable = can_stage_write(&path);
         if !writable && access.is_empty() {
             return Err(
-                "Claude credentials are not a regular file — run `claude` in a terminal".into(),
+                "Claude credentials cannot be updated safely — run `claude` in a terminal".into(),
             );
         }
         if writable {
@@ -249,7 +253,11 @@ async fn fetch(dir: &std::path::Path, id: &str, name: &str) -> Result<Snapshot, 
                 backup_credentials(&path);
                 let tmp = path.with_extension("json.tmp");
                 std::fs::write(&tmp, serde_json::to_string_pretty(&doc).unwrap_or(raw))
-                    .and_then(|_| std::fs::rename(&tmp, &path))
+                    .map_err(|e| format!("write refreshed credentials: {e}"))?;
+                // Lock the new pair down to this user before it replaces the
+                // live file (the preflight probe proved this fs accepts it).
+                super::onenewapi::store::restrict_owner_only(&tmp)
+                    .and_then(|_| std::fs::rename(&tmp, &path).map_err(|e| e.to_string()))
                     .map_err(|e| format!("write refreshed credentials: {e}"))?;
             }
         }
@@ -370,6 +378,38 @@ fn is_regular_file(path: &std::path::Path) -> bool {
     std::fs::symlink_metadata(path)
         .ok()
         .is_some_and(|m| m.is_file() && !m.file_type().is_symlink())
+}
+
+/// Refresh preflight: the write-back must be able to replace the live
+/// file — rotating the refresh token without a working write-back signs
+/// the CLI out. A planted symlink at the predictable tmp path is
+/// unlinked (never its target), then a create + owner-lock probe proves
+/// the directory accepts the full staging chain.
+fn can_stage_write(path: &std::path::Path) -> bool {
+    if !is_regular_file(path) {
+        return false;
+    }
+    let tmp = path.with_extension("json.tmp");
+    match std::fs::symlink_metadata(&tmp) {
+        Ok(m) if m.file_type().is_symlink() => {
+            if std::fs::remove_file(&tmp).is_err() {
+                return false;
+            }
+        }
+        Ok(m) if !m.is_file() => return false,
+        _ => {}
+    }
+    let existed = tmp.is_file();
+    let ok = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(&tmp)
+        .is_ok()
+        && super::onenewapi::store::restrict_owner_only(&tmp).is_ok();
+    if !existed {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    ok
 }
 
 /// Keep a copy of the CLI's own file before touching it, so a bad write can

@@ -239,15 +239,16 @@ async fn load_access(path: &Path, force: bool) -> Result<String, String> {
             "token expired and no refresh token present — run `kimi login` in a terminal".into(),
         );
     }
-    // Refresh rotates the CLI's refresh token. If we can't write it back
-    // (a planted symlink), don't call the token endpoint — that would
-    // sign the CLI out from under the user.
+    // Refresh rotates the CLI's refresh token. If the write-back can't
+    // safely replace the live file (planted symlink, read-only dir),
+    // don't call the token endpoint — that would sign the CLI out from
+    // under the user.
     if !can_write_creds(path) {
         if !access.is_empty() && !force {
             return Ok(access);
         }
         return Err(
-            "Kimi Code credentials are not a regular file — run `kimi login` in a terminal".into(),
+            "Kimi Code credentials cannot be updated safely — run `kimi login` in a terminal".into(),
         );
     }
 
@@ -311,8 +312,36 @@ async fn load_access(path: &Path, force: bool) -> Result<String, String> {
     Ok(access)
 }
 
+/// Refresh preflight: the write-back must be able to replace the live
+/// file — rotating the refresh token without a working write-back signs
+/// the CLI out. A planted symlink at the predictable tmp path is unlinked
+/// (never its target), then a create + owner-lock probe proves the
+/// directory accepts the full staging chain.
 fn can_write_creds(path: &Path) -> bool {
-    is_regular_file(path)
+    if !is_regular_file(path) {
+        return false;
+    }
+    let tmp = path.with_extension("json.tmp");
+    match std::fs::symlink_metadata(&tmp) {
+        Ok(m) if m.file_type().is_symlink() => {
+            if std::fs::remove_file(&tmp).is_err() {
+                return false;
+            }
+        }
+        Ok(m) if !m.is_file() => return false,
+        _ => {}
+    }
+    let existed = tmp.is_file();
+    let ok = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(&tmp)
+        .is_ok()
+        && super::onenewapi::store::restrict_owner_only(&tmp).is_ok();
+    if !existed {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    ok
 }
 
 fn is_regular_file(path: &Path) -> bool {
