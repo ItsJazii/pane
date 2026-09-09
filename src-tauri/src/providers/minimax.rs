@@ -317,6 +317,7 @@ fn read_usage_events(db: &std::path::Path) -> Result<Vec<UsageEvent>, String> {
             "SELECT ts, model, input_tokens, output_tokens, reasoning_tokens,
                     cache_read_tokens, cache_write_tokens, cost_usd
              FROM token_usage
+             ORDER BY ts DESC
              LIMIT {}",
             super::MAX_LEDGER_ROWS
         ))
@@ -338,7 +339,7 @@ fn read_usage_events(db: &std::path::Path) -> Result<Vec<UsageEvent>, String> {
     let events: Vec<UsageEvent> = rows.flatten().collect();
     if events.len() as u64 >= super::MAX_LEDGER_ROWS {
         eprintln!(
-            "[pane] minimax: token_usage hit the {}-row read cap — spend totals are truncated",
+            "[pane] minimax: token_usage hit the {}-row read cap — keeping newest rows, oldest usage is dropped",
             super::MAX_LEDGER_ROWS
         );
     }

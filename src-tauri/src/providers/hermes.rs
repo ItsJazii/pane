@@ -266,6 +266,7 @@ fn read_usage_events(db: &std::path::Path) -> Result<Vec<HermesUsage>, String> {
                 COALESCE(actual_cost_usd, 0.0), COALESCE(estimated_cost_usd, 0.0),
                 {session_expr}, {url_expr}, {task_expr}
          FROM session_model_usage
+         ORDER BY last_seen DESC
          LIMIT {max_rows}"
     );
     let mut stmt = conn
@@ -294,7 +295,7 @@ fn read_usage_events(db: &std::path::Path) -> Result<Vec<HermesUsage>, String> {
     let events: Vec<HermesUsage> = rows.flatten().collect();
     if events.len() as u64 >= super::MAX_LEDGER_ROWS {
         eprintln!(
-            "[pane] hermes: session_model_usage hit the {}-row read cap — spend totals are truncated",
+            "[pane] hermes: session_model_usage hit the {}-row read cap — keeping newest rows, oldest usage is dropped",
             super::MAX_LEDGER_ROWS
         );
     }

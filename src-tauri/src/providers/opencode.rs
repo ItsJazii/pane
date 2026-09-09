@@ -385,7 +385,7 @@ fn read_messages(db: &Path) -> Result<Vec<MessageRow>, String> {
     let conn = super::open_readonly_sqlite(db)?;
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT time_created, data FROM message LIMIT {}",
+            "SELECT time_created, data FROM message ORDER BY time_created DESC LIMIT {}",
             super::MAX_LEDGER_ROWS
         ))
         .map_err(|e| format!("query messages: {e}"))?;
@@ -429,7 +429,7 @@ fn read_messages(db: &Path) -> Result<Vec<MessageRow>, String> {
     }
     if scanned >= super::MAX_LEDGER_ROWS {
         eprintln!(
-            "[pane] opencode: message table hit the {}-row read cap — spend totals are truncated",
+            "[pane] opencode: message table hit the {}-row read cap — keeping newest rows, oldest usage is dropped",
             super::MAX_LEDGER_ROWS
         );
     }
