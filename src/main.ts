@@ -1627,15 +1627,15 @@ function renderTotalSpend(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Footer update flow — popover opens re-check, throttled to every 4 h per
-// docs/privacy.md; the version stamp becomes "Checking for updates…" and
-// then an Update button on a hit.
+// Footer update flow — popover opens re-check, but the backend gates the
+// launch + every-4-h cadence per docs/privacy.md (invoke is a cheap cache
+// read inside the window). The version stamp becomes "Checking for
+// updates…" and then an Update button on a hit.
 // ---------------------------------------------------------------------------
 
 let buildText = "";
 let updateVersion: string | null = null;
 let checkingUpdate = false;
-let lastUpdateCheck = 0;
 
 function renderBuildInfo(): void {
   const el = document.querySelector<HTMLElement>("#build-info");
@@ -1666,11 +1666,6 @@ function renderBuildInfo(): void {
 
 async function checkForUpdate(): Promise<void> {
   if (checkingUpdate || updateVersion) return;
-  // popover-shown fires on every open; the privacy doc promise is launch +
-  // every 4 h. The stamp counts attempts, so offline popover opens don't
-  // hammer the endpoint either.
-  if (Date.now() - lastUpdateCheck < 14_400_000) return;
-  lastUpdateCheck = Date.now();
   checkingUpdate = true;
   renderBuildInfo();
   try {
