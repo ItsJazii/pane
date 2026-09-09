@@ -434,6 +434,15 @@ pub fn stored_api_key(provider: &str, env_vars: &[&str]) -> Option<String> {
 /// never be cloned onto C:.
 pub(crate) const MAX_TEMP_SQLITE_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Row cap for full-table ledger reads (Hermes, MiniMax, OpenCode). Real
+/// ledgers never get near it; a runaway vendor db must not materialize an
+/// unbounded Vec.
+pub(crate) const MAX_LEDGER_ROWS: u64 = 2_000_000;
+
+// Test-only: production callers enforce the cap on the copy as it is
+// written — a size pre-check races the copy. Minimax's test-only snapshot
+// helper still uses this.
+#[cfg(test)]
 pub(crate) fn temp_sqlite_copy_allowed(path: &std::path::Path) -> bool {
     std::fs::metadata(path)
         .map(|m| m.len())

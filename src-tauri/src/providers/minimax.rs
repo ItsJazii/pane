@@ -313,11 +313,13 @@ pub(crate) fn snapshot_db(src_path: &std::path::Path, dst_path: &std::path::Path
 fn read_usage_events(db: &std::path::Path) -> Result<Vec<UsageEvent>, String> {
     let conn = super::open_readonly_sqlite(db)?;
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT ts, model, input_tokens, output_tokens, reasoning_tokens,
                     cache_read_tokens, cache_write_tokens, cost_usd
-             FROM token_usage",
-        )
+             FROM token_usage
+             LIMIT {}",
+            super::MAX_LEDGER_ROWS
+        ))
         .map_err(|e| format!("query token_usage: {e}"))?;
     let rows = stmt
         .query_map([], |row| {
@@ -333,7 +335,14 @@ fn read_usage_events(db: &std::path::Path) -> Result<Vec<UsageEvent>, String> {
             })
         })
         .map_err(|e| format!("read token_usage: {e}"))?;
-    Ok(rows.flatten().collect())
+    let events: Vec<UsageEvent> = rows.flatten().collect();
+    if events.len() as u64 >= super::MAX_LEDGER_ROWS {
+        eprintln!(
+            "[pane] minimax: token_usage hit the {}-row read cap — spend totals are truncated",
+            super::MAX_LEDGER_ROWS
+        );
+    }
+    Ok(events)
 }
 
 #[cfg(test)]

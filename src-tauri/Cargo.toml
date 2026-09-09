@@ -35,7 +35,8 @@ tokio = { version = "1", features = ["macros", "process", "sync", "time"] }
 chrono = "0.4"
 base64 = "0.22"
 dirs = "6"
-rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+getrandom = "0.2"
+rusqlite = { version = "0.40", features = ["bundled", "backup"] }
 toml = "0.8"
 regex = "1"
 prost = "0.13" # Grok GetRemainingResets protobuf codec

@@ -29,8 +29,8 @@ fn read_pair(conn: &rusqlite::Connection) -> Result<(Option<String>, Option<Stri
 }
 
 /// Cursor stores its session token in SQLite. Prefer a live read-only
-/// open (WAL-safe, no temp file). A full copy into `%TEMP%` is the last
-/// resort and is refused when the file is over the shared size cap.
+/// open (WAL-safe, no temp file). A copy into `%TEMP%` is the last resort,
+/// capped as it is written — a size pre-check would race the copy.
 fn read_state_values() -> Result<(Option<String>, Option<String>), String> {
     let Some(db_path) = state_db_path() else {
         return Ok((None, None));
@@ -53,15 +53,7 @@ fn read_state_values() -> Result<(Option<String>, Option<String>), String> {
     .and_then(|conn| read_pair(&conn))
     {
         Ok(pair) => Ok(pair),
-        Err(e) => {
-            if !super::temp_sqlite_copy_allowed(&db_path) {
-                return Err(format!(
-                    "read state.vscdb: {e}; temp copy refused (file over {} bytes)",
-                    super::MAX_TEMP_SQLITE_BYTES
-                ));
-            }
-            read_state_from_capped_copy(&db_path, e.to_string())
-        }
+        Err(e) => read_state_from_capped_copy(&db_path, e.to_string()),
     }
 }
 
@@ -77,7 +69,11 @@ fn read_state_from_capped_copy(
             .map(|d| d.as_nanos())
             .unwrap_or_default()
     ));
-    match std::fs::copy(db_path, &tmp) {
+    match copy_capped(db_path, &tmp, super::MAX_TEMP_SQLITE_BYTES) {
+        Ok(copied) if copied > super::MAX_TEMP_SQLITE_BYTES => Err(format!(
+            "read state.vscdb: {live_err}; temp copy refused (file over {} bytes)",
+            super::MAX_TEMP_SQLITE_BYTES
+        )),
         Ok(_) => {
             let result = rusqlite::Connection::open_with_flags(
                 &tmp,
@@ -87,10 +83,28 @@ fn read_state_from_capped_copy(
             let _ = std::fs::remove_file(&tmp);
             result.map_err(|e| format!("read state.vscdb copy: {e}"))
         }
-        Err(e) => Err(format!(
-            "read state.vscdb: {live_err}; copy: {e}"
-        )),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(format!("read state.vscdb: {live_err}; copy: {e}"))
+        }
     }
+}
+
+/// `std::fs::copy` with a hard byte ceiling: reads through `take(cap + 1)`
+/// so a source that grows — or is swapped — after any size check still
+/// cannot write past the cap. A copy that trips the cap is deleted and the
+/// returned count (> cap) tells the caller to refuse it.
+fn copy_capped(src: &std::path::Path, dst: &std::path::Path, cap: u64) -> std::io::Result<u64> {
+    use std::io::Read as _;
+    let mut reader = std::io::BufReader::new(std::fs::File::open(src)?).take(cap + 1);
+    let mut writer = std::fs::File::create(dst)?;
+    let copied = std::io::copy(&mut reader, &mut writer)?;
+    if copied > cap {
+        // Windows refuses to unlink an open handle.
+        drop(writer);
+        let _ = std::fs::remove_file(dst);
+    }
+    Ok(copied)
 }
 
 /// Values in ItemTable are sometimes stored as JSON strings ("\"abc\"").
@@ -1125,6 +1139,52 @@ mod tests {
     fn bonus_zero_hides() {
         assert!(bonus_metric(&json!({"bonusSpend": 0}), Some(10.0)).is_none());
         assert!(bonus_metric(&json!({}), Some(10.0)).is_none());
+    }
+
+    #[test]
+    fn capped_copy_stops_at_the_cap_and_cleans_up() {
+        let pid = std::process::id();
+        let src = std::env::temp_dir().join(format!("pane-cursor-cap-src-{pid}.bin"));
+        let dst = std::env::temp_dir().join(format!("pane-cursor-cap-dst-{pid}.bin"));
+        std::fs::write(&src, vec![7u8; 4096]).unwrap();
+
+        // Over the cap: the reader stops at cap + 1 and the partial copy
+        // is deleted.
+        let copied = copy_capped(&src, &dst, 1024).unwrap();
+        assert_eq!(copied, 1025);
+        assert!(!dst.exists(), "over-cap temp copy must be removed");
+
+        // Under the cap: a byte-exact copy.
+        let copied = copy_capped(&src, &dst, 8192).unwrap();
+        assert_eq!(copied, 4096);
+        assert_eq!(std::fs::read(&dst).unwrap(), vec![7u8; 4096]);
+
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&dst);
+    }
+
+    #[test]
+    fn temp_copy_fallback_reads_a_real_state_db() {
+        let src = std::env::temp_dir().join(format!(
+            "pane-cursor-state-test-{}.vscdb",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&src);
+        let conn = rusqlite::Connection::open(&src).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT);
+             INSERT INTO ItemTable VALUES
+                ('cursorAuth/accessToken', 'acc'),
+                ('cursorAuth/refreshToken', 'ref');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let (access, refresh) =
+            read_state_from_capped_copy(&src, "live open failed".into()).expect("copy reads");
+        assert_eq!(access.as_deref(), Some("acc"));
+        assert_eq!(refresh.as_deref(), Some("ref"));
+        let _ = std::fs::remove_file(&src);
     }
 }
 

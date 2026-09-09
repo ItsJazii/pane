@@ -384,7 +384,10 @@ pub struct MessageRow {
 fn read_messages(db: &Path) -> Result<Vec<MessageRow>, String> {
     let conn = super::open_readonly_sqlite(db)?;
     let mut stmt = conn
-        .prepare("SELECT time_created, data FROM message")
+        .prepare(&format!(
+            "SELECT time_created, data FROM message LIMIT {}",
+            super::MAX_LEDGER_ROWS
+        ))
         .map_err(|e| format!("query messages: {e}"))?;
 
     let rows = stmt
@@ -393,9 +396,11 @@ fn read_messages(db: &Path) -> Result<Vec<MessageRow>, String> {
         })
         .map_err(|e| format!("read messages: {e}"))?;
 
+    let mut scanned: u64 = 0;
     let mut out = Vec::new();
-    for row in rows.flatten() {
-        let (time_created, data) = row;
+    for row in rows {
+        scanned += 1;
+        let Ok((time_created, data)) = row else { continue };
         let Ok(msg) = serde_json::from_str::<Value>(&data) else { continue };
         if msg.get("role").and_then(Value::as_str) != Some("assistant") {
             continue;
@@ -421,6 +426,12 @@ fn read_messages(db: &Path) -> Result<Vec<MessageRow>, String> {
             .filter_map(|p| msg.pointer(p).and_then(Value::as_f64))
             .sum::<f64>();
         out.push(MessageRow { ts, cost, tokens, provider, model });
+    }
+    if scanned >= super::MAX_LEDGER_ROWS {
+        eprintln!(
+            "[pane] opencode: message table hit the {}-row read cap — spend totals are truncated",
+            super::MAX_LEDGER_ROWS
+        );
     }
     Ok(out)
 }
