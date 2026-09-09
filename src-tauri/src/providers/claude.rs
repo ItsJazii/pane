@@ -308,7 +308,20 @@ async fn fetch(dir: &std::path::Path, id: &str, name: &str) -> Result<Snapshot, 
             continue;
         };
         let Some(percent) = entry.get("percent").and_then(Value::as_f64) else { continue };
-        let label = format!("{name} weekly");
+        // Server display names are arbitrary text that can reach the
+        // telemetry boundary via starred metrics — map them onto the fixed
+        // family vocabulary the legacy seven_day_<model> labels already use.
+        let lower = name.to_ascii_lowercase();
+        let family = if lower.contains("opus") {
+            "Opus"
+        } else if lower.contains("sonnet") {
+            "Sonnet"
+        } else if lower.contains("haiku") {
+            "Haiku"
+        } else {
+            "Model"
+        };
+        let label = format!("{family} weekly");
         if metrics.iter().any(|m| m.label == label) {
             continue;
         }
