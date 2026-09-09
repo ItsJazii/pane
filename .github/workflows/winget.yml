@@ -31,6 +31,10 @@ on:
 jobs:
   winget:
     runs-on: windows-latest
+    # Minimal token scope: the job only reads this repo's release assets.
+    # The fork push and PR are made with WINGET_TOKEN, not GITHUB_TOKEN.
+    permissions:
+      contents: read
     steps:
       # Pinned to a commit SHA (was @v2): this third-party action receives
       # WINGET_TOKEN, so a hijacked tag could exfiltrate it.

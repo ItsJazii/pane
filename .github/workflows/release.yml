@@ -12,6 +12,12 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    # This job sees TAURI_SIGNING_PRIVATE_KEY, and without an environment
+    # gate any run of this workflow — including a dry-run
+    # workflow_dispatch — can use it. Repo admins: add required reviewers
+    # to the `release` environment (Settings → Environments) so a human
+    # approves before the signing key is exposed to a run.
+    environment: release
     permissions:
       contents: write
       # The winget dispatch step creates a workflow_dispatch event, which

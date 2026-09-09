@@ -85,11 +85,14 @@ Ground rules that apply to every provider:
 - **Calls:** `api2.cursor.sh` Connect RPCs (`GetCurrentPeriodUsage`,
   `GetPlanInfo`, `GetCreditGrantsBalance`); the dashboard's
   usage-events CSV export (for spend). `GetCreditGrantsBalance` cents
-  fields may be strings or numbers. When the RPC host is unreachable or
-  hides `planUsage` (Enterprise/team), `cursor.com/api/usage-summary`
-  (web session cookie) supplies the same plan figures; the pre-2025
-  request-count endpoint `cursor.com/api/usage` is the last resort and
-  only counts when it reports a real quota.
+  fields may be strings or numbers. A plan name missing from
+  `GetPlanInfo` falls back to `GET cursor.com/api/auth/stripe`
+  (`membershipType`, same `WorkosCursorSessionToken` web cookie). When
+  the RPC host is unreachable or hides `planUsage` (Enterprise/team),
+  `cursor.com/api/usage-summary` (web session cookie) supplies the same
+  plan figures; the pre-2025 request-count endpoint
+  `cursor.com/api/usage` is the last resort and only counts when it
+  reports a real quota.
 - **Shows:** Cursor Models / Other Models bars; a **Credits** progress
   row when the account has promo grants (`totalCents` vs remaining);
   a **Bonus** text row behind Show more when `planUsage.bonusSpend` is
@@ -204,8 +207,9 @@ Ground rules that apply to every provider:
 - **Reads:** `%USERPROFILE%\.kimi-code\credentials\kimi-code.json` (honors
   `KIMI_CODE_HOME`; falls back to `~\.kimi\credentials\kimi-code.json`).
   That is the official CLI's OAuth login. Refresh tokens rotate on use
-  and are written back beside the CLI's file (`*.pane-bak` first), same
-  as Claude/Codex. **No CLI?** Paste your Kimi For Coding plan key in
+  and are written back beside the CLI's file, like Claude/Codex — but
+  the `*.pane-bak` backup made first is deleted again once the
+  refreshed file is safely in place. **No CLI?** Paste your Kimi For Coding plan key in
   Settings → API keys → **Kimi Code** (stored in `%APPDATA%\Pane\kimi.json`,
   no env var is read). The login is used when both exist; the key is the
   fallback (issue #173). This is the plan key, not the platform.kimi.ai
