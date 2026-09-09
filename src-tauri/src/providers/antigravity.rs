@@ -183,10 +183,14 @@ fn discover_language_servers() -> Vec<LanguageServer> {
 // ---------------------------------------------------------------------------
 
 /// The LS uses a self-signed cert on loopback; this client is only ever
-/// pointed at 127.0.0.1.
+/// pointed at 127.0.0.1. A legit server never redirects (a redirect would
+/// carry the csrf header cross-origin) and plaintext loopback must never
+/// ride a proxy.
 fn ls_client() -> reqwest::Client {
     reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
         .timeout(Duration::from_secs(10))
         .build()
         .unwrap_or_else(|_| super::http())

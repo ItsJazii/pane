@@ -1,4 +1,4 @@
-use super::{http, Metric, Snapshot};
+use super::{http, http_no_redirect, Metric, Snapshot};
 use chrono::{DateTime, Duration, Utc};
 use prost::Message;
 use serde_json::Value;
@@ -12,9 +12,87 @@ const EMPTY_GRPC_WEB_MESSAGE: [u8; 5] = [0, 0, 0, 0, 0];
 const MAX_RESET_CREDITS_BODY: usize = 64 * 1024;
 const PROTO_TIMESTAMP_MIN_SECONDS: i64 = -62_135_596_800;
 const PROTO_TIMESTAMP_MAX_SECONDS: i64 = 253_402_300_799;
+const MAX_AUTH_BYTES: u64 = 64 * 1024;
+const DEFAULT_OIDC_ISSUER: &str = "https://auth.x.ai";
 
 fn auth_path() -> PathBuf {
     dirs::home_dir().unwrap_or_default().join(".grok").join("auth.json")
+}
+
+/// The refresh token is POSTed to `{issuer}/oauth2/token` — a planted
+/// oidc_issuer in auth.json would exfiltrate it. Trust only the vendor
+/// host over https; anything else skips the refresh.
+fn trusted_oidc_issuer(raw: Option<&str>) -> Option<String> {
+    let issuer = raw.unwrap_or(DEFAULT_OIDC_ISSUER).trim_end_matches('/');
+    match reqwest::Url::parse(issuer) {
+        Ok(u) if u.scheme() == "https" && u.host_str() == Some("auth.x.ai") => {
+            Some(issuer.to_string())
+        }
+        _ => None,
+    }
+}
+
+fn is_regular_file(path: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .ok()
+        .is_some_and(|m| m.is_file() && !m.file_type().is_symlink())
+}
+
+/// Proof the refreshed credential pair can replace the live file BEFORE the
+/// rotating token call: any leftover or planted file at the predictable tmp
+/// path is removed outright (a symlink or hardlink redirect is never written
+/// through), a fresh tmp is created with create_new and owner-locked, and it
+/// stays staged until commit so nothing can be planted in the gap. Drop
+/// removes the tmp when the refresh never lands.
+struct StagedTmp(std::path::PathBuf);
+
+impl StagedTmp {
+    fn write(&self, contents: &str) -> std::io::Result<()> {
+        std::fs::write(&self.0, contents)
+    }
+    fn commit(self, live: &std::path::Path) -> std::io::Result<()> {
+        std::fs::rename(&self.0, live)?;
+        std::mem::forget(self);
+        Ok(())
+    }
+}
+
+impl Drop for StagedTmp {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn stage_credentials_tmp(path: &std::path::Path) -> Option<StagedTmp> {
+    if !is_regular_file(path) {
+        return None;
+    }
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::symlink_metadata(&tmp).is_ok() && std::fs::remove_file(&tmp).is_err() {
+        return None;
+    }
+    if std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp).is_err() {
+        return None;
+    }
+    if super::onenewapi::store::restrict_owner_only(&tmp).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return None;
+    }
+    Some(StagedTmp(tmp))
+}
+
+/// Keep a copy of the CLI's own file before touching it, so a bad write can
+/// never cost the user their login. A planted symlink at the backup path is
+/// unlinked first — never write through it.
+fn backup_credentials(path: &std::path::Path) {
+    let bak = path.with_extension("json.pane-bak");
+    if std::fs::symlink_metadata(&bak)
+        .ok()
+        .is_some_and(|m| m.file_type().is_symlink())
+    {
+        let _ = std::fs::remove_file(&bak);
+    }
+    let _ = std::fs::copy(path, &bak);
 }
 
 pub async fn snapshot() -> Snapshot {
@@ -33,7 +111,7 @@ async fn fetch() -> Result<Snapshot, String> {
             "Grok CLI sign-in not found (~\\.grok\\auth.json).",
         ));
     }
-    let raw = std::fs::read_to_string(&path).map_err(|e| format!("read auth.json: {e}"))?;
+    let raw = super::read_small_text(&path, MAX_AUTH_BYTES, "auth.json")?;
     let mut doc: Value = serde_json::from_str(&raw).map_err(|e| format!("parse auth.json: {e}"))?;
 
     // auth.json maps "<issuer>::<account-uuid>" to the account entry.
@@ -53,12 +131,7 @@ async fn fetch() -> Result<Snapshot, String> {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    let issuer = entry
-        .get("oidc_issuer")
-        .and_then(Value::as_str)
-        .unwrap_or("https://auth.x.ai")
-        .trim_end_matches('/')
-        .to_string();
+    let issuer = trusted_oidc_issuer(entry.get("oidc_issuer").and_then(Value::as_str));
     let client_id = entry
         .get("oidc_client_id")
         .and_then(Value::as_str)
@@ -75,19 +148,35 @@ async fn fetch() -> Result<Snapshot, String> {
         if refresh_token.is_empty() || client_id.is_empty() {
             return Err("Grok token expired — run the Grok CLI once to sign in again".into());
         }
+        let Some(issuer) = issuer else {
+            eprintln!(
+                "[pane] grok: auth.json oidc_issuer is not {DEFAULT_OIDC_ISSUER} — skipping token refresh"
+            );
+            return Err("Grok token expired — run the Grok CLI once to sign in again".into());
+        };
+        // Refresh rotates the CLI's token pair. Stage the write-back BEFORE
+        // the token call: if the refreshed pair can't replace the live
+        // file, the rotation would sign the CLI out from under the user.
+        let Some(staged) = stage_credentials_tmp(&path) else {
+            return Err(
+                "Grok credentials cannot be updated safely — run the Grok CLI once to sign in again".into(),
+            );
+        };
         let form = [
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token.as_str()),
             ("client_id", client_id.as_str()),
         ];
-        let mut resp = http()
+        // The form carries the refresh token: never follow redirects — a
+        // 307/308 re-sends the body to the redirect target cross-origin.
+        let mut resp = http_no_redirect()
             .post(format!("{issuer}/oauth2/token"))
             .form(&form)
             .send()
             .await
             .map_err(|e| format!("token refresh: {e}"))?;
         if resp.status().as_u16() == 404 {
-            resp = http()
+            resp = http_no_redirect()
                 .post(format!("{issuer}/oauth/token"))
                 .form(&form)
                 .send()
@@ -119,11 +208,15 @@ async fn fetch() -> Result<Snapshot, String> {
             }
             e["expires_at"] = Value::from((Utc::now() + Duration::seconds(expires_in)).to_rfc3339());
             // Keep a copy of the CLI's own file before touching it, so a bad
-            // write can never cost the user their login.
-            let _ = std::fs::copy(&path, path.with_extension("json.pane-bak"));
-            let tmp = path.with_extension("json.tmp");
-            std::fs::write(&tmp, serde_json::to_string_pretty(&doc).unwrap_or(raw))
-                .and_then(|_| std::fs::rename(&tmp, &path))
+            // write can never cost the user their login. A planted symlink at
+            // the backup path is unlinked first — never write through it.
+            backup_credentials(&path);
+            // The tmp was created fresh and owner-locked at staging.
+            staged
+                .write(&serde_json::to_string_pretty(&doc).unwrap_or(raw))
+                .map_err(|e| format!("write refreshed auth.json: {e}"))?;
+            staged
+                .commit(&path)
                 .map_err(|e| format!("write refreshed auth.json: {e}"))?;
         }
     }
@@ -513,6 +606,34 @@ fn metrics_from_tokens(tokens: Vec<ResetToken>) -> Vec<Metric> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staging_discards_leftover_tmp_and_cleans_up() {
+        let dir = std::env::temp_dir().join(format!("pane-grok-stage-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let live = dir.join("auth.json");
+        std::fs::write(&live, "{}").unwrap();
+
+        // No live credential file → no staging.
+        assert!(stage_credentials_tmp(&dir.join("missing.json")).is_none());
+
+        // A stale leftover (writable or not) at the predictable tmp path is
+        // removed outright — never reused, never written through.
+        let tmp = live.with_extension("json.tmp");
+        std::fs::write(&tmp, b"unrelated data").unwrap();
+        let staged = stage_credentials_tmp(&live).expect("staging must succeed");
+        assert_eq!(std::fs::read_to_string(&tmp).unwrap(), "");
+        staged.write("{\"new\":1}").unwrap();
+        staged.commit(&live).unwrap();
+        assert_eq!(std::fs::read_to_string(&live).unwrap(), "{\"new\":1}");
+
+        // A staged tmp whose refresh never lands is cleaned up on drop.
+        let staged = stage_credentials_tmp(&live).unwrap();
+        drop(staged);
+        assert!(!tmp.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The exact shape xAI returns right after a weekly rollover (captured
     /// live 2026-07-19): zero usage means creditUsagePercent is omitted.
