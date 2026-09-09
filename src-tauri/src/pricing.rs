@@ -166,7 +166,7 @@ pub fn generation() -> u64 {
 /// fingerprinted below — an app update that reprices the same files would
 /// otherwise leave history at the old dollars until upstream happens to
 /// rewrite a catalog.
-const CORRECTIONS_REV: u32 = 11; // 11: GPT-6 Astra + Gemini 3.8 Flash baked rates
+const CORRECTIONS_REV: u32 = 13; // 13: AihubMix DeepSeek V4.1 Flash baked rates
 
 /// The corrections revision on its own — the spend cache treats a changed
 /// revision as a hard discard (the *code* that prices changed), while a
@@ -610,6 +610,18 @@ fn resolve(s: &Store, model: &str, depth: u8) -> Option<Price> {
     // composed slugs like "gpt-5.6-sol-max-fast" reach the -max fallback
     // and alias/fuzzy matching too.
     if let Some(base) = canonical.strip_suffix("-fast") {
+        // Cognition's `-fast` is a Devin mode (`swe-1-6-fast`), not
+        // Cursor's 2× SKU. Price at the SWE/Penguin card. Lightning is
+        // its own 5× slug and never ends in `-fast`.
+        let mut stem = base.rsplit('/').next().unwrap_or(base);
+        for suf in ["-xhigh", "-light", "-low", "-medium", "-high", "-max", "-ultra"] {
+            if let Some(next) = stem.strip_suffix(suf) {
+                stem = next;
+            }
+        }
+        if matches!(stem, "swe-1.7" | "swe-1-7" | "swe-1.6" | "swe-1-6" | "penguin") {
+            return resolve(s, base, depth + 1);
+        }
         // Multipliers are keyed by the plain model name; peel effort/mode
         // tokens off composed bases ("gpt-5.6-sol-max" → "gpt-5.6-sol") so
         // "sol-max-fast" gets sol's real multiplier, not the default.
@@ -826,6 +838,14 @@ fn builtin_price(canonical: &str) -> Option<Price> {
         // retry, so a catalog that learns the base slug outranks them.
         "deepseek-v4-pro" => Some(Price::flat(0.464, 0.928, 0.004, 0.464)),
         "deepseek-v4-flash" => Some(Price::flat(0.154, 0.308, 0.003, 0.154)),
+        // AihubMix DeepSeek V4.1 Flash (aihubmix.com/model/deepseek-v4.1-flash,
+        // listed 2026-09-08): $0.142 in / $0.284 out / $0.0284 cache read.
+        // Cache write is unpublished, so writes bill at input. Its own
+        // SKU — must not inherit v4-flash's $0.154/$0.003 card. The
+        // hyphen spelling covers logs that drop the version dot.
+        "deepseek-v4.1-flash" | "deepseek-v4-1-flash" => {
+            Some(Price::flat(0.142, 0.284, 0.0284, 0.142))
+        }
         // AihubMix GLM-5.3 preview (aihubmix.com/model/coding-glm-5.3):
         // $0.060 in / $0.220 out per MTok. No cache rate is published, so
         // reads/writes bill at the input rate. Only this gateway SKU is
@@ -876,6 +896,19 @@ fn builtin_price(canonical: &str) -> Option<Price> {
         // (-high, -xhigh) peel in resolve(); preview is its own SKU.
         "gemini-3.8-flash" | "gemini-3-8-flash" | "gemini-3.8-flash-preview"
         | "cursor-gemini-3.8-flash" => Some(Price::flat(0.75, 3.75, 0.075, 0.75)),
+        // Cognition SWE / Penguin — LiteLLM Cognition cost map
+        // (docs.litellm.ai/docs/providers/cognition) and Devin's
+        // in-app rate card: $0.50 / $2.50 / $0.20 cache read. Cache
+        // write is unpublished, so writes bill at input. Devin CLI
+        // logs hyphenated slugs (`swe-1-7`, `penguin-max`); dotted
+        // LiteLLM spellings are included too. Lightning is the 5×
+        // Cerebras tier.
+        "swe-1.7" | "swe-1-7" | "swe-1.6" | "swe-1-6" | "penguin" => {
+            Some(Price::flat(0.50, 2.50, 0.20, 0.50))
+        }
+        "swe-1.7-lightning" | "swe-1-7-lightning" => {
+            Some(Price::flat(2.50, 12.50, 1.00, 2.50))
+        }
         _ => None,
     }
 }
@@ -991,6 +1024,19 @@ mod tests {
             let p = super::resolve(&store, slug, 0).unwrap_or_else(|| panic!("{slug} unpriced"));
             assert!((p.input - 0.154).abs() < 1e-9, "{slug}");
             assert!((p.cache_read - 0.003).abs() < 1e-9, "{slug}");
+        }
+        // AihubMix V4.1 Flash is a different SKU ($0.142/$0.284/$0.0284),
+        // not the older v4-flash headline card.
+        for slug in [
+            "deepseek-v4.1-flash",
+            "deepseek-v4-1-flash",
+            "aihubmix/deepseek-v4.1-flash",
+            "deepseek/deepseek-v4.1-flash",
+        ] {
+            let p = super::resolve(&store, slug, 0).unwrap_or_else(|| panic!("{slug} unpriced"));
+            assert!((p.input - 0.142).abs() < 1e-9, "{slug}");
+            assert!((p.output - 0.284).abs() < 1e-9, "{slug}");
+            assert!((p.cache_read - 0.0284).abs() < 1e-9, "{slug}");
         }
         // The trimmer never eats non-date tails or other families.
         assert!(super::resolve(&store, "deepseek-v4", 0).is_none());
@@ -1135,6 +1181,42 @@ mod tests {
             assert_eq!(
                 (p.input, p.output, p.cache_read, p.cache_write),
                 (0.75, 3.75, 0.075, 0.75),
+                "{slug}"
+            );
+        }
+    }
+
+    #[test]
+    fn cognition_swe_and_penguin_price_before_catalogs() {
+        let store = super::Store::default();
+        // Devin hyphen slugs, LiteLLM dots, modes, gateway prefix.
+        // `-fast` stays 1× (a Devin mode, not Cursor's 2× SKU).
+        for slug in [
+            "penguin",
+            "penguin-max",
+            "cognition/penguin",
+            "swe-1-7",
+            "swe-1.7",
+            "swe-1-7-medium",
+            "cognition/swe-1.7",
+            "swe-1-6",
+            "swe-1.6",
+            "swe-1-6-fast",
+        ] {
+            let p = super::resolve(&store, slug, 0)
+                .unwrap_or_else(|| panic!("{slug} did not price"));
+            assert_eq!(
+                (p.input, p.output, p.cache_read, p.cache_write),
+                (0.50, 2.50, 0.20, 0.50),
+                "{slug}"
+            );
+        }
+        for slug in ["swe-1-7-lightning", "swe-1.7-lightning", "cognition/swe-1.7-lightning"] {
+            let p = super::resolve(&store, slug, 0)
+                .unwrap_or_else(|| panic!("{slug} did not price"));
+            assert_eq!(
+                (p.input, p.output, p.cache_read, p.cache_write),
+                (2.50, 12.50, 1.00, 2.50),
                 "{slug}"
             );
         }

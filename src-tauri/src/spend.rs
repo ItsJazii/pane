@@ -1785,8 +1785,10 @@ fn devin() -> ProviderSpend {
 /// reordered.
 fn devin_model(raw: &str) -> String {
     let mut base = raw;
-    // Effort tiers and Max/Ultra modes bill at the base model's rates.
-    for suffix in ["-xhigh", "-light", "-low", "-medium", "-high", "-max", "-ultra"] {
+    // Effort tiers and Max/Ultra/Fast modes bill at the base model's
+    // rates. Cognition's `-fast` is a Devin mode (`swe-1-6-fast`), not
+    // Cursor's 2× SKU — keep `-lightning` so that 5× card stays distinct.
+    for suffix in ["-xhigh", "-light", "-low", "-medium", "-high", "-max", "-ultra", "-fast"] {
         if let Some(b) = raw.strip_suffix(suffix) {
             base = b;
             break;
@@ -2173,21 +2175,21 @@ mod tests {
         assert_ne!(doc.version, PERSIST_VERSION);
     }
 
-    /// Astra/Gemini baked rates bumped CORRECTIONS_REV. A cache written
-    /// under 10 would load without probe replay and keep unpriced totals
-    /// if the revision still matched.
+    /// SWE/Penguin + V4.1 Flash baked rates bumped CORRECTIONS_REV. A
+    /// cache written under 12 would load without probe replay and keep
+    /// unpriced totals if the revision still matched.
     #[test]
     fn stale_corrections_revision_is_not_current() {
         assert!(
-            pricing::corrections_rev() >= 11,
-            "Astra/Gemini rates must bump CORRECTIONS_REV"
+            pricing::corrections_rev() >= 13,
+            "V4.1 Flash rates must bump CORRECTIONS_REV"
         );
-        let stale = r#"{"version":3,"pricing_stamp":"x","corrections":10,"entries":[]}"#;
+        let stale = r#"{"version":3,"pricing_stamp":"x","corrections":12,"entries":[]}"#;
         let doc: PersistFile = serde_json::from_str(stale).unwrap();
         assert_ne!(
             doc.corrections,
             pricing::corrections_rev(),
-            "rev 10 must not match the live corrections revision"
+            "rev 12 must not match the live corrections revision"
         );
     }
 
@@ -2648,6 +2650,10 @@ mod tests {
         assert_eq!(devin_model("gpt-5-6-sol-max"), "gpt-5.6-sol");
         assert_eq!(devin_model("claude-opus-4-8-medium"), "claude-opus-4-8");
         assert_eq!(devin_model("gpt-4-0125-preview"), "gpt-4-0125-preview");
+        assert_eq!(devin_model("penguin-max"), "penguin");
+        assert_eq!(devin_model("swe-1-6-fast"), "swe-1-6");
+        assert_eq!(devin_model("swe-1-7-medium"), "swe-1-7");
+        assert_eq!(devin_model("swe-1-7-lightning"), "swe-1-7-lightning");
     }
 
     #[test]

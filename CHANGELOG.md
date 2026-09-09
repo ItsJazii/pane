@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Devin SWE and Penguin spend again.** Cognition's `swe-1.6` /
+  `swe-1.7` / `penguin` slugs (and the 5× `swe-1.7-lightning` tier)
+  were missing from the baked price table, so the Devin tile dropped
+  them into the unpriced ⚠ bucket. Rates are Cognition's published
+  card: $0.50 / $2.50 / $0.20 cache read; Lightning $2.50 / $12.50 /
+  $1.00. Devin's `-fast` / `-max` / `-medium` modes use the same card.
+- **AihubMix DeepSeek V4.1 Flash spend again.** That slug was missing
+  from the baked table. AihubMix's live card is $0.142 / $0.284 /
+  $0.0284 cache read (aihubmix.com/model/deepseek-v4.1-flash).
+
 ## 0.4.47 — 2026-09-07
 
 ### Fixed
