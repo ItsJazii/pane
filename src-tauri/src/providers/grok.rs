@@ -38,36 +38,47 @@ fn is_regular_file(path: &std::path::Path) -> bool {
         .is_some_and(|m| m.is_file() && !m.file_type().is_symlink())
 }
 
-/// Refresh preflight: the write-back must be able to replace the live
-/// file — rotating the refresh token without a working write-back signs
-/// the CLI out. A planted symlink at the predictable tmp path is
-/// unlinked (never its target), then a create + owner-lock probe proves
-/// the directory accepts the full staging chain.
-fn can_stage_write(path: &std::path::Path) -> bool {
+/// Proof the refreshed credential pair can replace the live file BEFORE the
+/// rotating token call: any leftover or planted file at the predictable tmp
+/// path is removed outright (a symlink or hardlink redirect is never written
+/// through), a fresh tmp is created with create_new and owner-locked, and it
+/// stays staged until commit so nothing can be planted in the gap. Drop
+/// removes the tmp when the refresh never lands.
+struct StagedTmp(std::path::PathBuf);
+
+impl StagedTmp {
+    fn write(&self, contents: &str) -> std::io::Result<()> {
+        std::fs::write(&self.0, contents)
+    }
+    fn commit(self, live: &std::path::Path) -> std::io::Result<()> {
+        std::fs::rename(&self.0, live)?;
+        std::mem::forget(self);
+        Ok(())
+    }
+}
+
+impl Drop for StagedTmp {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn stage_credentials_tmp(path: &std::path::Path) -> Option<StagedTmp> {
     if !is_regular_file(path) {
-        return false;
+        return None;
     }
     let tmp = path.with_extension("json.tmp");
-    match std::fs::symlink_metadata(&tmp) {
-        Ok(m) if m.file_type().is_symlink() => {
-            if std::fs::remove_file(&tmp).is_err() {
-                return false;
-            }
-        }
-        Ok(m) if !m.is_file() => return false,
-        _ => {}
+    if std::fs::symlink_metadata(&tmp).is_ok() && std::fs::remove_file(&tmp).is_err() {
+        return None;
     }
-    let existed = tmp.is_file();
-    let ok = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .open(&tmp)
-        .is_ok()
-        && super::onenewapi::store::restrict_owner_only(&tmp).is_ok();
-    if !existed {
+    if std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp).is_err() {
+        return None;
+    }
+    if super::onenewapi::store::restrict_owner_only(&tmp).is_err() {
         let _ = std::fs::remove_file(&tmp);
+        return None;
     }
-    ok
+    Some(StagedTmp(tmp))
 }
 
 /// Keep a copy of the CLI's own file before touching it, so a bad write can
@@ -143,15 +154,14 @@ async fn fetch() -> Result<Snapshot, String> {
             );
             return Err("Grok token expired — run the Grok CLI once to sign in again".into());
         };
-        // Refresh rotates the CLI's token pair. If the write-back can't
-        // safely replace the live file (planted symlink, read-only dir),
-        // don't call the token endpoint — that would sign the CLI out from
-        // under the user.
-        if !can_stage_write(&path) {
+        // Refresh rotates the CLI's token pair. Stage the write-back BEFORE
+        // the token call: if the refreshed pair can't replace the live
+        // file, the rotation would sign the CLI out from under the user.
+        let Some(staged) = stage_credentials_tmp(&path) else {
             return Err(
                 "Grok credentials cannot be updated safely — run the Grok CLI once to sign in again".into(),
             );
-        }
+        };
         let form = [
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token.as_str()),
@@ -201,13 +211,12 @@ async fn fetch() -> Result<Snapshot, String> {
             // write can never cost the user their login. A planted symlink at
             // the backup path is unlinked first — never write through it.
             backup_credentials(&path);
-            let tmp = path.with_extension("json.tmp");
-            std::fs::write(&tmp, serde_json::to_string_pretty(&doc).unwrap_or(raw))
+            // The tmp was created fresh and owner-locked at staging.
+            staged
+                .write(&serde_json::to_string_pretty(&doc).unwrap_or(raw))
                 .map_err(|e| format!("write refreshed auth.json: {e}"))?;
-            // Lock the new pair down to this user before it replaces the
-            // live file (the preflight probe proved this fs accepts it).
-            super::onenewapi::store::restrict_owner_only(&tmp)
-                .and_then(|_| std::fs::rename(&tmp, &path).map_err(|e| e.to_string()))
+            staged
+                .commit(&path)
                 .map_err(|e| format!("write refreshed auth.json: {e}"))?;
         }
     }
@@ -597,6 +606,34 @@ fn metrics_from_tokens(tokens: Vec<ResetToken>) -> Vec<Metric> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staging_discards_leftover_tmp_and_cleans_up() {
+        let dir = std::env::temp_dir().join(format!("pane-grok-stage-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let live = dir.join("auth.json");
+        std::fs::write(&live, "{}").unwrap();
+
+        // No live credential file → no staging.
+        assert!(stage_credentials_tmp(&dir.join("missing.json")).is_none());
+
+        // A stale leftover (writable or not) at the predictable tmp path is
+        // removed outright — never reused, never written through.
+        let tmp = live.with_extension("json.tmp");
+        std::fs::write(&tmp, b"unrelated data").unwrap();
+        let staged = stage_credentials_tmp(&live).expect("staging must succeed");
+        assert_eq!(std::fs::read_to_string(&tmp).unwrap(), "");
+        staged.write("{\"new\":1}").unwrap();
+        staged.commit(&live).unwrap();
+        assert_eq!(std::fs::read_to_string(&live).unwrap(), "{\"new\":1}");
+
+        // A staged tmp whose refresh never lands is cleaned up on drop.
+        let staged = stage_credentials_tmp(&live).unwrap();
+        drop(staged);
+        assert!(!tmp.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The exact shape xAI returns right after a weekly rollover (captured
     /// live 2026-07-19): zero usage means creditUsagePercent is omitted.
