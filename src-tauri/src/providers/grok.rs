@@ -1,4 +1,4 @@
-use super::{http, Metric, Snapshot};
+use super::{http, http_no_redirect, Metric, Snapshot};
 use chrono::{DateTime, Duration, Utc};
 use prost::Message;
 use serde_json::Value;
@@ -36,6 +36,52 @@ fn is_regular_file(path: &std::path::Path) -> bool {
     std::fs::symlink_metadata(path)
         .ok()
         .is_some_and(|m| m.is_file() && !m.file_type().is_symlink())
+}
+
+/// Refresh preflight: the write-back must be able to replace the live
+/// file — rotating the refresh token without a working write-back signs
+/// the CLI out. A planted symlink at the predictable tmp path is
+/// unlinked (never its target), then a create + owner-lock probe proves
+/// the directory accepts the full staging chain.
+fn can_stage_write(path: &std::path::Path) -> bool {
+    if !is_regular_file(path) {
+        return false;
+    }
+    let tmp = path.with_extension("json.tmp");
+    match std::fs::symlink_metadata(&tmp) {
+        Ok(m) if m.file_type().is_symlink() => {
+            if std::fs::remove_file(&tmp).is_err() {
+                return false;
+            }
+        }
+        Ok(m) if !m.is_file() => return false,
+        _ => {}
+    }
+    let existed = tmp.is_file();
+    let ok = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(&tmp)
+        .is_ok()
+        && super::onenewapi::store::restrict_owner_only(&tmp).is_ok();
+    if !existed {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    ok
+}
+
+/// Keep a copy of the CLI's own file before touching it, so a bad write can
+/// never cost the user their login. A planted symlink at the backup path is
+/// unlinked first — never write through it.
+fn backup_credentials(path: &std::path::Path) {
+    let bak = path.with_extension("json.pane-bak");
+    if std::fs::symlink_metadata(&bak)
+        .ok()
+        .is_some_and(|m| m.file_type().is_symlink())
+    {
+        let _ = std::fs::remove_file(&bak);
+    }
+    let _ = std::fs::copy(path, &bak);
 }
 
 pub async fn snapshot() -> Snapshot {
@@ -97,12 +143,13 @@ async fn fetch() -> Result<Snapshot, String> {
             );
             return Err("Grok token expired — run the Grok CLI once to sign in again".into());
         };
-        // Refresh rotates the CLI's token pair. If we can't write it back
-        // (a planted symlink), don't call the token endpoint — that would
-        // sign the CLI out from under the user.
-        if !is_regular_file(&path) {
+        // Refresh rotates the CLI's token pair. If the write-back can't
+        // safely replace the live file (planted symlink, read-only dir),
+        // don't call the token endpoint — that would sign the CLI out from
+        // under the user.
+        if !can_stage_write(&path) {
             return Err(
-                "Grok credentials are not a regular file — run the Grok CLI once to sign in again".into(),
+                "Grok credentials cannot be updated safely — run the Grok CLI once to sign in again".into(),
             );
         }
         let form = [
@@ -110,14 +157,16 @@ async fn fetch() -> Result<Snapshot, String> {
             ("refresh_token", refresh_token.as_str()),
             ("client_id", client_id.as_str()),
         ];
-        let mut resp = http()
+        // The form carries the refresh token: never follow redirects — a
+        // 307/308 re-sends the body to the redirect target cross-origin.
+        let mut resp = http_no_redirect()
             .post(format!("{issuer}/oauth2/token"))
             .form(&form)
             .send()
             .await
             .map_err(|e| format!("token refresh: {e}"))?;
         if resp.status().as_u16() == 404 {
-            resp = http()
+            resp = http_no_redirect()
                 .post(format!("{issuer}/oauth/token"))
                 .form(&form)
                 .send()
@@ -149,11 +198,16 @@ async fn fetch() -> Result<Snapshot, String> {
             }
             e["expires_at"] = Value::from((Utc::now() + Duration::seconds(expires_in)).to_rfc3339());
             // Keep a copy of the CLI's own file before touching it, so a bad
-            // write can never cost the user their login.
-            let _ = std::fs::copy(&path, path.with_extension("json.pane-bak"));
+            // write can never cost the user their login. A planted symlink at
+            // the backup path is unlinked first — never write through it.
+            backup_credentials(&path);
             let tmp = path.with_extension("json.tmp");
             std::fs::write(&tmp, serde_json::to_string_pretty(&doc).unwrap_or(raw))
-                .and_then(|_| std::fs::rename(&tmp, &path))
+                .map_err(|e| format!("write refreshed auth.json: {e}"))?;
+            // Lock the new pair down to this user before it replaces the
+            // live file (the preflight probe proved this fs accepts it).
+            super::onenewapi::store::restrict_owner_only(&tmp)
+                .and_then(|_| std::fs::rename(&tmp, &path).map_err(|e| e.to_string()))
                 .map_err(|e| format!("write refreshed auth.json: {e}"))?;
         }
     }

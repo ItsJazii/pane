@@ -1,4 +1,4 @@
-use super::{http, Metric, Snapshot};
+use super::{http, http_no_redirect, Metric, Snapshot};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
@@ -169,7 +169,9 @@ async fn fetch() -> Result<Snapshot, String> {
     }
     let server = server.to_string();
 
-    let resp = http()
+    // The body carries the API key: never follow redirects — a 307/308
+    // re-sends the body to the redirect target cross-origin.
+    let resp = http_no_redirect()
         .post(format!(
             "{server}/exa.seat_management_pb.SeatManagementService/GetUserStatus"
         ))
@@ -352,7 +354,9 @@ pub fn collect_usage_events() -> Vec<UsageEvent> {
 }
 
 /// sessions.db keeps one row per message per branch and can be GBs; cap
-/// the scan so a bloated db can't pin a refresh. Real data is far below.
+/// the scan so a bloated db can't pin a refresh. Newest-first ordering
+/// makes the cap deterministic: the oldest rows are dropped, never the
+/// recent ones. Real data is far below.
 const MAX_MESSAGE_ROWS: usize = 2_000_000;
 
 fn read_usage_events(db: &std::path::Path) -> Result<Vec<UsageEvent>, String> {
@@ -361,6 +365,7 @@ fn read_usage_events(db: &std::path::Path) -> Result<Vec<UsageEvent>, String> {
         .prepare(&format!(
             "SELECT m.session_id, m.chat_message, m.created_at, s.model
              FROM message_nodes m JOIN sessions s ON s.id = m.session_id
+             ORDER BY m.created_at DESC
              LIMIT {MAX_MESSAGE_ROWS}"
         ))
         .map_err(|e| format!("query messages: {e}"))?;
@@ -425,7 +430,7 @@ fn read_usage_events(db: &std::path::Path) -> Result<Vec<UsageEvent>, String> {
     }
     if scanned >= MAX_MESSAGE_ROWS {
         eprintln!(
-            "[pane] devin: sessions.db exceeds {MAX_MESSAGE_ROWS} rows — usage beyond the cap is not counted"
+            "[pane] devin: sessions.db exceeds {MAX_MESSAGE_ROWS} rows — keeping newest rows, oldest usage is dropped"
         );
     }
     Ok(out)
