@@ -1,4 +1,4 @@
-use super::{http, http_no_redirect, Metric, Snapshot};
+use super::{http_no_redirect, Metric, Snapshot};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
@@ -117,7 +117,10 @@ mod tests {
             .and_then(toml::Value::as_str)
             .unwrap_or("https://server.codeium.com")
             .trim_end_matches('/');
-        let resp = http()
+        if !is_trusted_server(server) {
+            panic!("credentials.toml api_server_url is not {DEFAULT_SERVER_URL} — refusing to send the key");
+        }
+        let resp = http_no_redirect()
             .post(format!("{server}/exa.seat_management_pb.SeatManagementService/GetUserStatus"))
             .header("Content-Type", "application/json")
             .header("Connect-Protocol-Version", "1")
