@@ -451,6 +451,13 @@ fn read_messages(db: &Path) -> Result<(Vec<MessageRow>, bool), String> {
 /// newest-first cap in read_messages intentionally drops. When (and only
 /// when) the cap binds, find the anchor with a small oldest-first probe:
 /// bounded regardless of table size, skipped entirely on normal DBs.
+///
+/// Known limitation: read_messages covers the newest MAX_LEDGER_ROWS and
+/// this probe covers the oldest MAX_ANCHOR_PROBE_ROWS, so a table with more
+/// than MAX_LEDGER_ROWS + MAX_ANCHOR_PROBE_ROWS rows leaves an unsearched
+/// middle band. If the earliest paid Go row falls in that band the monthly
+/// anchor lands late, shifting the reported billing boundary and reset time.
+/// Only reachable on an implausibly large local ledger (>2.1M rows).
 fn earliest_go_anchor(db: &Path) -> Option<f64> {
     const MAX_ANCHOR_PROBE_ROWS: u64 = 100_000;
     let conn = super::open_readonly_sqlite(db).ok()?;
