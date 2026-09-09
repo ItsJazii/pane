@@ -3,6 +3,7 @@ use serde_json::Value;
 
 const ID: &str = "kilo";
 const NAME: &str = "Kilo";
+const MAX_CRED_BYTES: u64 = 64 * 1024;
 
 pub async fn snapshot() -> Snapshot {
     match fetch().await {
@@ -14,7 +15,8 @@ pub async fn snapshot() -> Snapshot {
 /// The Kilo CLI keeps its session at ~/.local/share/kilo/auth.json → kilo.access
 fn cli_token() -> Option<String> {
     let path = dirs::home_dir()?.join(".local").join("share").join("kilo").join("auth.json");
-    let doc: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let raw = super::read_small_text(&path, MAX_CRED_BYTES, "credentials").ok()?;
+    let doc: Value = serde_json::from_str(&raw).ok()?;
     doc.pointer("/kilo/access").and_then(Value::as_str).map(str::to_string)
 }
 
@@ -176,7 +178,7 @@ fn urlencoding_min(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     /// Live probe against this machine's real Kilo session: prints the raw
-    /// tRPC response (status + first 2000 chars) so shape changes can be
+    /// tRPC response (status + first 200 chars) so shape changes can be
     /// diagnosed. Run: cargo test --lib kilo -- --ignored --nocapture
     #[test]
     #[ignore]
@@ -193,6 +195,6 @@ mod tests {
             (r.status().as_u16(), r.text().await.unwrap_or_default())
         });
         eprintln!("kilo probe: HTTP {status}");
-        eprintln!("{}", body.chars().take(2000).collect::<String>());
+        eprintln!("{}", body.chars().take(200).collect::<String>());
     }
 }

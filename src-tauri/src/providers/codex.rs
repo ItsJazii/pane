@@ -8,6 +8,7 @@ use std::path::PathBuf;
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const ID: &str = "codex";
 const NAME: &str = "Codex";
+const MAX_CRED_BYTES: u64 = 64 * 1024;
 
 fn default_home() -> PathBuf {
     std::env::var("CODEX_HOME")
@@ -104,6 +105,9 @@ pub fn discover_extra_accounts() -> Vec<CodexAccount> {
             continue;
         }
         let Some((account_id, email)) = identity_from(&doc) else { continue };
+        if !scoped_id_charset(&account_id) {
+            continue;
+        }
         if seen.iter().any(|a| a == &account_id) {
             continue;
         }
@@ -157,7 +161,7 @@ struct Access {
 /// token. Shared by the usage fetch and the reset-credit redeem command.
 async fn load_access(dir: &std::path::Path) -> Result<Access, String> {
     let path = dir.join("auth.json");
-    let raw = std::fs::read_to_string(&path).map_err(|e| format!("read auth.json: {e}"))?;
+    let raw = super::read_small_text(&path, MAX_CRED_BYTES, "auth.json")?;
     let mut doc: Value = serde_json::from_str(&raw).map_err(|e| format!("parse auth.json: {e}"))?;
     let tokens = doc
         .get("tokens")
@@ -207,45 +211,55 @@ async fn load_access(dir: &std::path::Path) -> Result<Access, String> {
         if refresh.is_empty() {
             return Err("access token expired and no refresh token — run `codex login` again".into());
         }
-        let resp = http()
-            .post("https://auth.openai.com/oauth/token")
-            .json(&json!({
-                "client_id": CLIENT_ID,
-                "grant_type": "refresh_token",
-                "refresh_token": refresh,
-                "scope": "openid profile email",
-            }))
-            .send()
-            .await
-            .map_err(|e| format!("token refresh: {e}"))?;
-        if !resp.status().is_success() {
-            return Err(format!("token refresh failed: HTTP {}", resp.status()));
+        // Refresh rotates the CLI's refresh token. If we can't write it back
+        // (a planted symlink), don't call the token endpoint — that would
+        // sign the CLI out from under the user; a still-valid access token
+        // just skips the refresh.
+        let writable = is_regular_file(&path);
+        if !writable && access.is_empty() {
+            return Err(
+                "Codex credentials are not a regular file — run `codex login` in a terminal".into(),
+            );
         }
-        let tok: Value = resp.json().await.map_err(|e| format!("token refresh parse: {e}"))?;
-        let new_access = tok
-            .get("access_token")
-            .and_then(Value::as_str)
-            .ok_or("refresh response missing access_token")?
-            .to_string();
-
-        access = new_access.clone();
-
-        if let Some(t) = doc.get_mut("tokens").filter(|v| v.is_object()) {
-            t["access_token"] = Value::from(new_access);
-            if let Some(r) = tok.get("refresh_token").and_then(Value::as_str) {
-                t["refresh_token"] = Value::from(r);
+        if writable {
+            let resp = http()
+                .post("https://auth.openai.com/oauth/token")
+                .json(&json!({
+                    "client_id": CLIENT_ID,
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh,
+                    "scope": "openid profile email",
+                }))
+                .send()
+                .await
+                .map_err(|e| format!("token refresh: {e}"))?;
+            if !resp.status().is_success() {
+                return Err(format!("token refresh failed: HTTP {}", resp.status()));
             }
-            if let Some(i) = tok.get("id_token").and_then(Value::as_str) {
-                t["id_token"] = Value::from(i);
+            let tok: Value = resp.json().await.map_err(|e| format!("token refresh parse: {e}"))?;
+            let new_access = tok
+                .get("access_token")
+                .and_then(Value::as_str)
+                .ok_or("refresh response missing access_token")?
+                .to_string();
+
+            access = new_access.clone();
+
+            if let Some(t) = doc.get_mut("tokens").filter(|v| v.is_object()) {
+                t["access_token"] = Value::from(new_access);
+                if let Some(r) = tok.get("refresh_token").and_then(Value::as_str) {
+                    t["refresh_token"] = Value::from(r);
+                }
+                if let Some(i) = tok.get("id_token").and_then(Value::as_str) {
+                    t["id_token"] = Value::from(i);
+                }
+                doc["last_refresh"] = Value::from(Utc::now().to_rfc3339());
+                backup_credentials(&path);
+                let tmp = path.with_extension("json.tmp");
+                std::fs::write(&tmp, serde_json::to_string_pretty(&doc).unwrap_or(raw))
+                    .and_then(|_| std::fs::rename(&tmp, &path))
+                    .map_err(|e| format!("write refreshed auth.json: {e}"))?;
             }
-            doc["last_refresh"] = Value::from(Utc::now().to_rfc3339());
-            // Keep a copy of the CLI's own file before touching it, so a bad
-            // write can never cost the user their login.
-            let _ = std::fs::copy(&path, path.with_extension("json.pane-bak"));
-            let tmp = path.with_extension("json.tmp");
-            std::fs::write(&tmp, serde_json::to_string_pretty(&doc).unwrap_or(raw))
-                .and_then(|_| std::fs::rename(&tmp, &path))
-                .map_err(|e| format!("write refreshed auth.json: {e}"))?;
         }
     }
 
@@ -399,71 +413,6 @@ fn credits_balance(usage: &Value) -> Option<f64> {
         })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{credits_balance, identity_from, openai_provenance};
-    use base64::Engine;
-    use serde_json::json;
-
-    fn fake_id_token(claims: serde_json::Value) -> String {
-        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_vec(&claims).unwrap());
-        format!("x.{payload}.y")
-    }
-
-    #[test]
-    fn provenance_requires_openais_claim_namespace() {
-        // A foreign auth.json with the right field SHAPE but no OpenAI
-        // claim — the misclassification case — must not pass.
-        let foreign = json!({"tokens": {"account_id": "some-other-account",
-            "access_token": "foreign-access", "refresh_token": "foreign-refresh"}});
-        assert!(!openai_provenance(&foreign));
-        // Even with a JWT id_token, foreign claims don't count.
-        let foreign_jwt = json!({"tokens": {"account_id": "acct",
-            "id_token": fake_id_token(json!({"iss": "https://example.com"}))}});
-        assert!(!openai_provenance(&foreign_jwt));
-        // A real Codex login carries OpenAI's claim namespace.
-        let real = json!({"tokens": {"account_id": "acct",
-            "id_token": fake_id_token(json!({
-                "https://api.openai.com/auth": {"chatgpt_account_id": "acct"}}))}});
-        assert!(openai_provenance(&real));
-        assert!(!openai_provenance(&json!({})));
-    }
-
-    #[test]
-    fn codex_identity_extraction_is_validation() {
-        // account_id field wins; email claim labels the card.
-        let direct = json!({"tokens": {"account_id": "acct-1",
-            "id_token": fake_id_token(json!({"email": "e@corp.com"}))}});
-        assert_eq!(identity_from(&direct), Some(("acct-1".into(), Some("e@corp.com".into()))));
-        // Empty account_id falls through to the id_token's ChatGPT claim.
-        let via_claim = json!({"tokens": {"account_id": "",
-            "id_token": fake_id_token(json!({
-                "https://api.openai.com/auth": {"chatgpt_account_id": "acct-2"}}))}});
-        assert_eq!(identity_from(&via_claim), Some(("acct-2".into(), None)));
-        // Neither → no identity → no card.
-        let anonymous = json!({"tokens": {"access_token": "k"}});
-        assert_eq!(identity_from(&anonymous), None);
-        assert_eq!(identity_from(&json!({})), None);
-    }
-
-    #[test]
-    fn credit_balance_parses_number_and_string_spellings() {
-        // String balance (the shape rollout logs show) — the bug that made
-        // a freshly bought balance vanish from the card entirely.
-        let s = json!({"credits": {"has_credits": true, "balance": "2500"}});
-        assert_eq!(credits_balance(&s), Some(2500.0));
-        // Number balance.
-        let n = json!({"credits": {"has_credits": true, "balance": 125.0}});
-        assert_eq!(credits_balance(&n), Some(125.0));
-        // No balance field, explicitly no credits → explicit zero row.
-        let none = json!({"credits": {"has_credits": false}});
-        assert_eq!(credits_balance(&none), Some(0.0));
-        // No credits object at all → no row.
-        assert_eq!(credits_balance(&json!({})), None);
-    }
-}
-
 const CREDITS_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 
 /// Epoch seconds, epoch ms, or RFC3339 → epoch ms.
@@ -613,4 +562,103 @@ fn push_window_inner(metrics: &mut Vec<Metric>, node: Option<&Value>, label_in: 
     // normalization because it masked real early usage; near-empty windows
     // are kept calm on the pacing side instead.
     metrics.push(Metric::progress(label, used, None).with_reset(resets_at, Some(period_ms)));
+}
+
+/// The account id becomes `codex@<hash8>`, which the frontend interpolates
+/// into HTML attributes — only [A-Za-z0-9-] is safe there.
+fn scoped_id_charset(raw: &str) -> bool {
+    !raw.is_empty() && raw.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+fn is_regular_file(path: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .ok()
+        .is_some_and(|m| m.is_file() && !m.file_type().is_symlink())
+}
+
+/// Keep a copy of the CLI's own file before touching it, so a bad write can
+/// never cost the user their login. A planted symlink at the backup path is
+/// unlinked first — never write through it.
+fn backup_credentials(path: &std::path::Path) {
+    let bak = path.with_extension("json.pane-bak");
+    if std::fs::symlink_metadata(&bak)
+        .ok()
+        .is_some_and(|m| m.file_type().is_symlink())
+    {
+        let _ = std::fs::remove_file(&bak);
+    }
+    let _ = std::fs::copy(path, &bak);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{credits_balance, identity_from, openai_provenance, scoped_id_charset};
+    use base64::Engine;
+    use serde_json::json;
+
+    fn fake_id_token(claims: serde_json::Value) -> String {
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&claims).unwrap());
+        format!("x.{payload}.y")
+    }
+
+    #[test]
+    fn provenance_requires_openais_claim_namespace() {
+        // A foreign auth.json with the right field SHAPE but no OpenAI
+        // claim — the misclassification case — must not pass.
+        let foreign = json!({"tokens": {"account_id": "some-other-account",
+            "access_token": "foreign-access", "refresh_token": "foreign-refresh"}});
+        assert!(!openai_provenance(&foreign));
+        // Even with a JWT id_token, foreign claims don't count.
+        let foreign_jwt = json!({"tokens": {"account_id": "acct",
+            "id_token": fake_id_token(json!({"iss": "https://example.com"}))}});
+        assert!(!openai_provenance(&foreign_jwt));
+        // A real Codex login carries OpenAI's claim namespace.
+        let real = json!({"tokens": {"account_id": "acct",
+            "id_token": fake_id_token(json!({
+                "https://api.openai.com/auth": {"chatgpt_account_id": "acct"}}))}});
+        assert!(openai_provenance(&real));
+        assert!(!openai_provenance(&json!({})));
+    }
+
+    #[test]
+    fn codex_identity_extraction() {
+        // account_id field wins; email claim labels the card.
+        let direct = json!({"tokens": {"account_id": "acct-1",
+            "id_token": fake_id_token(json!({"email": "e@corp.com"}))}});
+        assert_eq!(identity_from(&direct), Some(("acct-1".into(), Some("e@corp.com".into()))));
+        // Empty account_id falls through to the id_token's ChatGPT claim.
+        let via_claim = json!({"tokens": {"account_id": "",
+            "id_token": fake_id_token(json!({
+                "https://api.openai.com/auth": {"chatgpt_account_id": "acct-2"}}))}});
+        assert_eq!(identity_from(&via_claim), Some(("acct-2".into(), None)));
+        // Neither → no identity → no card.
+        let anonymous = json!({"tokens": {"access_token": "k"}});
+        assert_eq!(identity_from(&anonymous), None);
+        assert_eq!(identity_from(&json!({})), None);
+    }
+
+    #[test]
+    fn scoped_id_charset_is_html_attribute_safe() {
+        assert!(scoped_id_charset("b3f1c2d4-9a8b-4c5d-8e9f-aabbccddeeff"));
+        assert!(!scoped_id_charset(""));
+        assert!(!scoped_id_charset("evil\"><script>"));
+        assert!(!scoped_id_charset("with space"));
+    }
+
+    #[test]
+    fn credit_balance_parses_number_and_string_spellings() {
+        // String balance (the shape rollout logs show) — the bug that made
+        // a freshly bought balance vanish from the card entirely.
+        let s = json!({"credits": {"has_credits": true, "balance": "2500"}});
+        assert_eq!(credits_balance(&s), Some(2500.0));
+        // Number balance.
+        let n = json!({"credits": {"has_credits": true, "balance": 125.0}});
+        assert_eq!(credits_balance(&n), Some(125.0));
+        // No balance field, explicitly no credits → explicit zero row.
+        let none = json!({"credits": {"has_credits": false}});
+        assert_eq!(credits_balance(&none), Some(0.0));
+        // No credits object at all → no row.
+        assert_eq!(credits_balance(&json!({})), None);
+    }
 }

@@ -535,8 +535,8 @@ mod tests {
             .filter_map(|c| c.authorization.as_deref())
             .collect();
         auths.sort_unstable();
-        assert!(auths.iter().any(|a| *a == "Bearer sk-a"));
-        assert!(auths.iter().any(|a| *a == "Bearer sk-b"));
+        assert!(auths.contains(&"Bearer sk-a"));
+        assert!(auths.contains(&"Bearer sk-b"));
         assert!(captured.iter().all(|c| {
             c.authorization.as_deref() == Some("Bearer sk-a")
                 || c.authorization.as_deref() == Some("Bearer sk-b")

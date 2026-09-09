@@ -296,11 +296,17 @@ async fn load_access(path: &Path, force: bool) -> Result<String, String> {
         doc["expires_in"] = Value::from(expires_in);
         // The CLI stores unix seconds (sometimes with a fractional part).
         doc["expires_at"] = Value::from((now_ms / 1000) + expires_in);
-        let _ = std::fs::copy(path, path.with_extension("json.pane-bak"));
+        backup_credentials(path);
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, serde_json::to_string_pretty(&doc).unwrap_or(raw))
-            .and_then(|_| std::fs::rename(&tmp, path))
             .map_err(|e| format!("write refreshed credentials: {e}"))?;
+        // Lock the new pair down to this user before it replaces the live file.
+        super::onenewapi::store::restrict_owner_only(&tmp)
+            .and_then(|_| std::fs::rename(&tmp, path).map_err(|e| e.to_string()))
+            .map_err(|e| format!("write refreshed credentials: {e}"))?;
+        // Refresh landed — the backup holds the previous token pair, so don't
+        // leave it on disk. A failed write above returns before this.
+        let _ = std::fs::remove_file(path.with_extension("json.pane-bak"));
     }
     Ok(access)
 }
@@ -313,6 +319,20 @@ fn is_regular_file(path: &Path) -> bool {
     std::fs::symlink_metadata(path)
         .ok()
         .is_some_and(|m| m.is_file() && !m.file_type().is_symlink())
+}
+
+/// Keep a copy of the CLI's own file before touching it, so a bad write can
+/// never cost the user their login. A planted symlink at the backup path is
+/// unlinked first — never write through it.
+fn backup_credentials(path: &Path) {
+    let bak = path.with_extension("json.pane-bak");
+    if std::fs::symlink_metadata(&bak)
+        .ok()
+        .is_some_and(|m| m.file_type().is_symlink())
+    {
+        let _ = std::fs::remove_file(&bak);
+    }
+    let _ = std::fs::copy(path, &bak);
 }
 
 async fn bounded_text(resp: reqwest::Response, max_bytes: usize) -> String {
@@ -422,7 +442,7 @@ fn map_membership_level(raw: &str) -> Option<String> {
         }
         "ADVANCED" | "ALLEGRO" => "Allegro".into(),
         "PREMIUM" | "VIVACE" => "Vivace".into(),
-        other if other.is_empty() => return None,
+        "" => return None,
         other => title_case(other),
     })
 }

@@ -7,6 +7,7 @@ use std::path::PathBuf;
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const ID: &str = "claude";
 const NAME: &str = "Claude";
+const MAX_CRED_BYTES: u64 = 64 * 1024;
 
 fn default_dir() -> PathBuf {
     std::env::var("CLAUDE_CONFIG_DIR")
@@ -78,34 +79,14 @@ fn identity_from(doc: &Value) -> Option<(String, Option<String>)> {
     Some((uuid.to_string(), label))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::identity_from;
-    use serde_json::json;
-
-    #[test]
-    fn claude_identity_extraction_is_validation() {
-        // Org name wins the label; email is the fallback.
-        let org = json!({"oauthAccount": {"accountUuid": "u-1",
-            "organizationName": "Acme", "emailAddress": "a@b.c"}});
-        assert_eq!(identity_from(&org), Some(("u-1".into(), Some("Acme".into()))));
-        let email_only = json!({"oauthAccount": {"accountUuid": "u-2",
-            "organizationName": "  ", "emailAddress": "a@b.c"}});
-        assert_eq!(identity_from(&email_only), Some(("u-2".into(), Some("a@b.c".into()))));
-        // No uuid → no identity → no card (a dir that can't name its
-        // account never becomes one).
-        assert_eq!(identity_from(&json!({"oauthAccount": {}})), None);
-        assert_eq!(identity_from(&json!({})), None);
-    }
-}
-
 /// Extra Claude logins beyond the default config dir: dot-dirs in the home
 /// folder plus dirs under ~/.config that hold a `.credentials.json` with a
 /// claudeAiOauth entry (how a second account is kept via CLAUDE_CONFIG_DIR).
-/// Identity extraction is validation (upstream's rule): a dir that can't
-/// name its account never becomes a card, and a dir naming an already-seen
-/// account is just another source of it — skipped, so duplicate cards are
-/// structurally impossible.
+/// Extraction alone is not validation: a dir that can't name its account
+/// never becomes a card, a dir naming an already-seen account is skipped
+/// (duplicate cards stay structurally impossible), and the uuid must clear
+/// scoped_id_charset before it becomes `claude@<hash8>` — the frontend
+/// interpolates that id into HTML attributes.
 pub fn discover_extra_accounts() -> Vec<ClaudeAccount> {
     let default = default_dir();
     let default_identity = dir_identity(&default);
@@ -130,6 +111,9 @@ pub fn discover_extra_accounts() -> Vec<ClaudeAccount> {
             continue;
         }
         let Some((uuid, label)) = dir_identity(&dir) else { continue };
+        if !scoped_id_charset(&uuid) {
+            continue;
+        }
         if seen.iter().any(|u| u == &uuid) {
             continue;
         }
@@ -176,7 +160,7 @@ async fn fetch(dir: &std::path::Path, id: &str, name: &str) -> Result<Snapshot, 
         ));
     }
 
-    let raw = std::fs::read_to_string(&path).map_err(|e| format!("read credentials: {e}"))?;
+    let raw = super::read_small_text(&path, MAX_CRED_BYTES, "credentials")?;
     let mut doc: Value = serde_json::from_str(&raw).map_err(|e| format!("parse credentials: {e}"))?;
     let oauth = doc
         .get("claudeAiOauth")
@@ -205,59 +189,69 @@ async fn fetch(dir: &std::path::Path, id: &str, name: &str) -> Result<Snapshot, 
         if refresh.is_empty() {
             return Err("token expired and no refresh token present — run `claude` and log in again".into());
         }
-        let resp = http()
-            .post("https://platform.claude.com/v1/oauth/token")
-            .json(&json!({
-                "grant_type": "refresh_token",
-                "refresh_token": refresh,
-                "client_id": CLIENT_ID,
-            }))
-            .send()
-            .await
-            .map_err(|e| format!("token refresh: {e}"))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            // A rejected refresh token isn't transient: another app (Claude
-            // Code itself, or a second machine) rotated it and this copy is
-            // dead. Only a fresh CLI sign-in mints a working pair — say so
-            // instead of leaving a bare HTTP code on the card.
-            if body.contains("invalid_grant") {
-                return Err(
-                    "Claude sign-in was rotated by another app — run `claude` in a terminal once and Pane recovers automatically"
-                        .into(),
-                );
-            }
-            return Err(format!("token refresh failed: HTTP {status}"));
+        // Refresh rotates the CLI's refresh token. If we can't write it back
+        // (a planted symlink), don't call the token endpoint — that would
+        // sign the CLI out from under the user; a still-valid access token
+        // just skips the refresh.
+        let writable = is_regular_file(&path);
+        if !writable && access.is_empty() {
+            return Err(
+                "Claude credentials are not a regular file — run `claude` in a terminal".into(),
+            );
         }
-        let tok: Value = resp.json().await.map_err(|e| format!("token refresh parse: {e}"))?;
-        let new_access = tok
-            .get("access_token")
-            .and_then(Value::as_str)
-            .ok_or("refresh response missing access_token")?
-            .to_string();
-        let new_refresh = tok
-            .get("refresh_token")
-            .and_then(Value::as_str)
-            .unwrap_or(&refresh)
-            .to_string();
-        let expires_in = tok.get("expires_in").and_then(Value::as_i64).unwrap_or(3600);
+        if writable {
+            let resp = http()
+                .post("https://platform.claude.com/v1/oauth/token")
+                .json(&json!({
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh,
+                    "client_id": CLIENT_ID,
+                }))
+                .send()
+                .await
+                .map_err(|e| format!("token refresh: {e}"))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                // A rejected refresh token isn't transient: another app (Claude
+                // Code itself, or a second machine) rotated it and this copy is
+                // dead. Only a fresh CLI sign-in mints a working pair — say so
+                // instead of leaving a bare HTTP code on the card.
+                if body.contains("invalid_grant") {
+                    return Err(
+                        "Claude sign-in was rotated by another app — run `claude` in a terminal once and Pane recovers automatically"
+                            .into(),
+                    );
+                }
+                return Err(format!("token refresh failed: HTTP {status}"));
+            }
+            let tok: Value = resp.json().await.map_err(|e| format!("token refresh parse: {e}"))?;
+            let new_access = tok
+                .get("access_token")
+                .and_then(Value::as_str)
+                .ok_or("refresh response missing access_token")?
+                .to_string();
+            let new_refresh = tok
+                .get("refresh_token")
+                .and_then(Value::as_str)
+                .unwrap_or(&refresh)
+                .to_string();
+            let expires_in = tok.get("expires_in").and_then(Value::as_i64).unwrap_or(3600);
 
-        access = new_access.clone();
+            access = new_access.clone();
 
-        // Refresh tokens rotate on use — write the new pair back so Claude Code
-        // itself stays logged in.
-        if let Some(entry) = doc.get_mut("claudeAiOauth").filter(|v| v.is_object()) {
-            entry["accessToken"] = Value::from(new_access);
-            entry["refreshToken"] = Value::from(new_refresh);
-            entry["expiresAt"] = Value::from(now_ms + expires_in * 1000);
-            // Keep a copy of the CLI's own file before touching it, so a bad
-            // write can never cost the user their login.
-            let _ = std::fs::copy(&path, path.with_extension("json.pane-bak"));
-            let tmp = path.with_extension("json.tmp");
-            std::fs::write(&tmp, serde_json::to_string_pretty(&doc).unwrap_or(raw))
-                .and_then(|_| std::fs::rename(&tmp, &path))
-                .map_err(|e| format!("write refreshed credentials: {e}"))?;
+            // Refresh tokens rotate on use — write the new pair back so Claude Code
+            // itself stays logged in.
+            if let Some(entry) = doc.get_mut("claudeAiOauth").filter(|v| v.is_object()) {
+                entry["accessToken"] = Value::from(new_access);
+                entry["refreshToken"] = Value::from(new_refresh);
+                entry["expiresAt"] = Value::from(now_ms + expires_in * 1000);
+                backup_credentials(&path);
+                let tmp = path.with_extension("json.tmp");
+                std::fs::write(&tmp, serde_json::to_string_pretty(&doc).unwrap_or(raw))
+                    .and_then(|_| std::fs::rename(&tmp, &path))
+                    .map_err(|e| format!("write refreshed credentials: {e}"))?;
+            }
         }
     }
 
@@ -364,4 +358,59 @@ fn push_window(metrics: &mut Vec<Metric>, node: Option<&Value>, label: &str, per
     let Some(used) = node.get("utilization").and_then(Value::as_f64) else { return };
     let resets_at = parse_reset(node.get("resets_at"));
     metrics.push(Metric::progress(label, used, None).with_reset(resets_at, Some(period_ms)));
+}
+
+/// The account uuid becomes `claude@<hash8>`, which the frontend
+/// interpolates into HTML attributes — only [A-Za-z0-9-] is safe there.
+fn scoped_id_charset(raw: &str) -> bool {
+    !raw.is_empty() && raw.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+fn is_regular_file(path: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .ok()
+        .is_some_and(|m| m.is_file() && !m.file_type().is_symlink())
+}
+
+/// Keep a copy of the CLI's own file before touching it, so a bad write can
+/// never cost the user their login. A planted symlink at the backup path is
+/// unlinked first — never write through it.
+fn backup_credentials(path: &std::path::Path) {
+    let bak = path.with_extension("json.pane-bak");
+    if std::fs::symlink_metadata(&bak)
+        .ok()
+        .is_some_and(|m| m.file_type().is_symlink())
+    {
+        let _ = std::fs::remove_file(&bak);
+    }
+    let _ = std::fs::copy(path, &bak);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{identity_from, scoped_id_charset};
+    use serde_json::json;
+
+    #[test]
+    fn claude_identity_extraction() {
+        // Org name wins the label; email is the fallback.
+        let org = json!({"oauthAccount": {"accountUuid": "u-1",
+            "organizationName": "Acme", "emailAddress": "a@b.c"}});
+        assert_eq!(identity_from(&org), Some(("u-1".into(), Some("Acme".into()))));
+        let email_only = json!({"oauthAccount": {"accountUuid": "u-2",
+            "organizationName": "  ", "emailAddress": "a@b.c"}});
+        assert_eq!(identity_from(&email_only), Some(("u-2".into(), Some("a@b.c".into()))));
+        // No uuid → no identity → no card (a dir that can't name its
+        // account never becomes one).
+        assert_eq!(identity_from(&json!({"oauthAccount": {}})), None);
+        assert_eq!(identity_from(&json!({})), None);
+    }
+
+    #[test]
+    fn scoped_id_charset_is_html_attribute_safe() {
+        assert!(scoped_id_charset("b3f1c2d4-9a8b-4c5d-8e9f-aabbccddeeff"));
+        assert!(!scoped_id_charset(""));
+        assert!(!scoped_id_charset("evil\"><script>"));
+        assert!(!scoped_id_charset("with space"));
+    }
 }

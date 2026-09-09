@@ -331,8 +331,9 @@ fn parse(body: &serde_json::Value) -> Result<(Option<String>, Vec<Metric>), Stri
             .filter(|s| !s.trim().is_empty())
             .unwrap_or("Subscription")
             .to_string()
-    } else if (mode == Some("unrestricted") || legacy) && balance.is_some() && !conflict {
-        let balance = balance.unwrap();
+    } else if let Some(balance) =
+        balance.filter(|_| (mode == Some("unrestricted") || legacy) && !conflict)
+    {
         let unit = body.get("unit").and_then(|v| v.as_str()).unwrap_or("USD");
         let amount = if unit == "USD" {
             format!("${balance:.2}")
@@ -361,7 +362,7 @@ fn parse(body: &serde_json::Value) -> Result<(Option<String>, Vec<Metric>), Stri
     };
     apply_status(body, &mut metrics);
     summaries(body, &mut metrics);
-    Ok((Some(plan.into()), metrics))
+    Ok((Some(plan), metrics))
 }
 
 fn apply_status(body: &serde_json::Value, metrics: &mut Vec<Metric>) {
