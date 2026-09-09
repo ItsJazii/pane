@@ -88,8 +88,8 @@ fn save_state(state: &State) {
     }
 }
 
-/// Random v4-style UUID from OS entropy (getrandom via the ring of deps we
-/// already have would be heavier — two calls to the system RNG suffice).
+/// Random v4-style UUID from OS entropy (`getrandom`), with a time/pid
+/// splitmix64 fallback if the OS RNG errors.
 fn new_uuid() -> String {
     let mut bytes = [0u8; 16];
     getrandom_fill(&mut bytes);
@@ -112,7 +112,11 @@ fn new_uuid() -> String {
 }
 
 fn getrandom_fill(buf: &mut [u8]) {
-    // rand isn't in the tree; derive entropy from the OS UUID generator.
+    if getrandom::getrandom(buf).is_ok() {
+        return;
+    }
+    // OS RNG failed (exotic or sandboxed target): splitmix64 seeded from
+    // time + pid. Not real entropy, just uniqueness for an anonymous ID.
     use std::time::{SystemTime, UNIX_EPOCH};
     let mut seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)

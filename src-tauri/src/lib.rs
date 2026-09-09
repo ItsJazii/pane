@@ -1186,6 +1186,7 @@ fn purge_onenewapi_cards(key_ids: &[String]) -> Result<(), String> {
     )
 }
 
+#[cfg(test)]
 fn purge_onenewapi_cards_with(
     key_ids: &[String],
     persist_config: impl FnOnce(&[String]) -> Result<(), String>,
@@ -1253,6 +1254,7 @@ fn rename_cached_snapshots(renames: &[(String, String)]) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
 fn rename_cached_snapshot_in<Persist>(
     map: &mut HashMap<String, CachedSnap>,
     id: &str,
@@ -1294,6 +1296,44 @@ where
 /// spelling allowed to leave the machine in telemetry.
 fn family_of(id: &str) -> String {
     id.split('@').next().unwrap_or(id).to_string()
+}
+
+/// Telemetry boundary for starred metrics: labels arrive from user config,
+/// but some providers build them from server data (claude formats
+/// "{display_name} weekly" from the usage API). Telemetry promises stable
+/// IDs only, so a label ships verbatim only with a conservative ID shape;
+/// anything else folds into one fixed "other" bucket.
+fn telemetry_starred_id(family: &str, label: &str) -> String {
+    if is_stable_metric_label(label) {
+        format!("{family}/{label}")
+    } else {
+        "other".to_string()
+    }
+}
+
+/// Conservative stable-ID shape: short ASCII (alnum, space, `. _ - %`), no
+/// version-like digit runs ("4.8"), no lowercase slug tokens with digits
+/// ("sonnet-4") — both are server-derived model names, not stable IDs.
+fn is_stable_metric_label(label: &str) -> bool {
+    if label.is_empty() || label.len() > 32 {
+        return false;
+    }
+    if !label
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b' ' | b'.' | b'_' | b'-' | b'%'))
+    {
+        return false;
+    }
+    for w in label.as_bytes().windows(3) {
+        if w[0].is_ascii_digit() && w[1] == b'.' && w[2].is_ascii_digit() {
+            return false;
+        }
+    }
+    !label.split_whitespace().any(|tok| {
+        tok.contains('-')
+            && tok.bytes().any(|b| b.is_ascii_digit())
+            && !tok.bytes().any(|b| b.is_ascii_uppercase())
+    })
 }
 
 fn is_managed_key_card(id: &str) -> bool {
@@ -2000,7 +2040,7 @@ async fn fetch_usage(
                                     .filter_map(Value::as_str)
                                     // Family prefix only — an account-scoped
                                     // pid would ship an account-derived hash.
-                                    .map(|m| format!("{}/{m}", family_of(pid)))
+                                    .map(|m| telemetry_starred_id(&family_of(pid), m))
                                     .collect::<Vec<_>>()
                             })
                             .unwrap_or_default()
@@ -2212,7 +2252,8 @@ fn set_api_key(provider: String, key: String) -> Result<(), String> {
         let _ = std::fs::remove_file(&path);
         return Ok(());
     }
-    std::fs::write(&path, serde_json::json!({ "apiKey": key }).to_string())
+    let raw = serde_json::json!({ "apiKey": key }).to_string();
+    providers::onenewapi::store::atomic_write(&path, &raw)
         .map_err(|e| format!("write key file: {e}"))
 }
 
@@ -2288,6 +2329,7 @@ fn onenewapi_delete_site(id: String) -> Result<(), String> {
     providers::onenewapi::delete_site_consistently(id, || purge_onenewapi_cards(&key_ids))
 }
 
+#[cfg(test)]
 fn onenewapi_apply_zero_to_one_enable(disabled: &mut Vec<Value>, key_id: &str) {
     let snap_id = format!("onenewapi@{key_id}");
     disabled.retain(|v| match v.as_str() {
@@ -2592,6 +2634,7 @@ fn build_updater(app: &tauri::AppHandle) -> Result<tauri_plugin_updater::Updater
     app.updater_builder()
         .endpoints(endpoints)
         .map_err(|e| e.to_string())?
+        .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| e.to_string())
 }
@@ -2612,9 +2655,8 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
         // The update the button promised is gone (yanked release, CDN
         // hiccup). Succeeding silently would strand the frontend in its
         // "Installing…" state — fail so the button can recover.
-        None => return Err("update no longer available — try again shortly".into()),
+        None => Err("update no longer available — try again shortly".into()),
     }
-    Ok(())
 }
 
 /// Popover-open update check: the footer asks on every tray click and
@@ -2884,7 +2926,8 @@ mod tests {
         restore_kimi_wallet_rows,
         restore_last_success_after_error,
         retain_current_key_card_results, strip_entry_application_order, strip_icon_ids_to_clear,
-        strip_is_active, strip_reset_ids, updater_endpoint_strings, CachedSnap, FailState,
+        strip_is_active, strip_reset_ids, telemetry_starred_id, is_stable_metric_label,
+        updater_endpoint_strings, CachedSnap, FailState,
         KeyCardMutationGuard, StripEntry, SNAPSHOT_CACHE_MS, STALE_GRACE_MS,
     };
     use crate::alerts;
@@ -3939,5 +3982,65 @@ mod tests {
         assert!(!alerts::has_state_for_test("onenewapi@ticket07-a2:Usage"));
         assert!(alerts::has_state_for_test("onenewapi@ticket07-b1:Usage"));
         alerts::forget_snapshot("onenewapi@ticket07-b1");
+    }
+
+    #[test]
+    fn starred_metric_ids_pass_stable_labels_verbatim() {
+        assert_eq!(telemetry_starred_id("claude", "Weekly"), "claude/Weekly");
+        assert_eq!(
+            telemetry_starred_id("claude", "Sonnet weekly"),
+            "claude/Sonnet weekly"
+        );
+        assert_eq!(
+            telemetry_starred_id("cursor", "On-demand"),
+            "cursor/On-demand"
+        );
+        assert_eq!(
+            telemetry_starred_id("qwen", "Requests this month"),
+            "qwen/Requests this month"
+        );
+    }
+
+    #[test]
+    fn starred_metric_ids_bucket_server_derived_labels() {
+        // claude builds "{display_name} weekly" from API data; model
+        // versions and slugs must not leave the machine.
+        assert_eq!(telemetry_starred_id("claude", "Sonnet 4.8 weekly"), "other");
+        assert_eq!(
+            telemetry_starred_id("claude", "claude-sonnet-4-8 weekly"),
+            "other"
+        );
+        assert_eq!(telemetry_starred_id("claude", "fable-4 weekly"), "other");
+    }
+
+    #[test]
+    fn starred_metric_ids_bucket_malformed_labels() {
+        assert_eq!(telemetry_starred_id("claude", ""), "other");
+        assert_eq!(telemetry_starred_id("claude", &"x".repeat(33)), "other");
+        // Non-ASCII and out-of-charset punctuation are not stable IDs.
+        assert_eq!(telemetry_starred_id("claude", "Panel · Prod"), "other");
+        assert_eq!(telemetry_starred_id("claude", "quota (usd)"), "other");
+        assert_eq!(telemetry_starred_id("claude", "a/b"), "other");
+    }
+
+    #[test]
+    fn stable_label_shape_matches_the_real_provider_labels() {
+        for label in [
+            "Session",
+            "Weekly",
+            "Sonnet weekly",
+            "Opus weekly",
+            "Usage",
+            "Balance",
+            "Credits",
+            "On-demand",
+            "Total usage",
+            "Requests this month",
+            "Kilo Pass",
+        ] {
+            assert!(is_stable_metric_label(label), "{label} is a stable ID");
+        }
+        assert!(!is_stable_metric_label("4.8"));
+        assert!(!is_stable_metric_label("sonnet-4"));
     }
 }
