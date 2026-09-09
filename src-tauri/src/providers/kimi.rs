@@ -239,18 +239,19 @@ async fn load_access(path: &Path, force: bool) -> Result<String, String> {
             "token expired and no refresh token present — run `kimi login` in a terminal".into(),
         );
     }
-    // Refresh rotates the CLI's refresh token. If the write-back can't
-    // safely replace the live file (planted symlink, read-only dir),
-    // don't call the token endpoint — that would sign the CLI out from
-    // under the user.
-    if !can_write_creds(path) {
-        if !access.is_empty() && !force {
+    // Refresh rotates the CLI's refresh token. Stage the write-back BEFORE
+    // the token call: if the refreshed pair can't replace the live file,
+    // the rotation would sign the CLI out from under the user. Only a token
+    // whose expiry is still in the future may skip the refresh; an expired
+    // one would just earn a vendor rejection.
+    let Some(staged) = stage_credentials_tmp(path) else {
+        if !access.is_empty() && expires_ms > now_ms && !force {
             return Ok(access);
         }
         return Err(
             "Kimi Code credentials cannot be updated safely — run `kimi login` in a terminal".into(),
         );
-    }
+    };
 
     let form = [
         ("grant_type", "refresh_token"),
@@ -298,12 +299,12 @@ async fn load_access(path: &Path, force: bool) -> Result<String, String> {
         // The CLI stores unix seconds (sometimes with a fractional part).
         doc["expires_at"] = Value::from((now_ms / 1000) + expires_in);
         backup_credentials(path);
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(&doc).unwrap_or(raw))
+        // The tmp was created fresh and owner-locked at staging.
+        staged
+            .write(&serde_json::to_string_pretty(&doc).unwrap_or(raw))
             .map_err(|e| format!("write refreshed credentials: {e}"))?;
-        // Lock the new pair down to this user before it replaces the live file.
-        super::onenewapi::store::restrict_owner_only(&tmp)
-            .and_then(|_| std::fs::rename(&tmp, path).map_err(|e| e.to_string()))
+        staged
+            .commit(path)
             .map_err(|e| format!("write refreshed credentials: {e}"))?;
         // Refresh landed — the backup holds the previous token pair, so don't
         // leave it on disk. A failed write above returns before this.
@@ -312,36 +313,47 @@ async fn load_access(path: &Path, force: bool) -> Result<String, String> {
     Ok(access)
 }
 
-/// Refresh preflight: the write-back must be able to replace the live
-/// file — rotating the refresh token without a working write-back signs
-/// the CLI out. A planted symlink at the predictable tmp path is unlinked
-/// (never its target), then a create + owner-lock probe proves the
-/// directory accepts the full staging chain.
-fn can_write_creds(path: &Path) -> bool {
+/// Proof the refreshed credential pair can replace the live file BEFORE the
+/// rotating token call: any leftover or planted file at the predictable tmp
+/// path is removed outright (a symlink or hardlink redirect is never written
+/// through), a fresh tmp is created with create_new and owner-locked, and it
+/// stays staged until commit so nothing can be planted in the gap. Drop
+/// removes the tmp when the refresh never lands.
+struct StagedTmp(PathBuf);
+
+impl StagedTmp {
+    fn write(&self, contents: &str) -> std::io::Result<()> {
+        std::fs::write(&self.0, contents)
+    }
+    fn commit(self, live: &Path) -> std::io::Result<()> {
+        std::fs::rename(&self.0, live)?;
+        std::mem::forget(self);
+        Ok(())
+    }
+}
+
+impl Drop for StagedTmp {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn stage_credentials_tmp(path: &Path) -> Option<StagedTmp> {
     if !is_regular_file(path) {
-        return false;
+        return None;
     }
     let tmp = path.with_extension("json.tmp");
-    match std::fs::symlink_metadata(&tmp) {
-        Ok(m) if m.file_type().is_symlink() => {
-            if std::fs::remove_file(&tmp).is_err() {
-                return false;
-            }
-        }
-        Ok(m) if !m.is_file() => return false,
-        _ => {}
+    if std::fs::symlink_metadata(&tmp).is_ok() && std::fs::remove_file(&tmp).is_err() {
+        return None;
     }
-    let existed = tmp.is_file();
-    let ok = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .open(&tmp)
-        .is_ok()
-        && super::onenewapi::store::restrict_owner_only(&tmp).is_ok();
-    if !existed {
+    if std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp).is_err() {
+        return None;
+    }
+    if super::onenewapi::store::restrict_owner_only(&tmp).is_err() {
         let _ = std::fs::remove_file(&tmp);
+        return None;
     }
-    ok
+    Some(StagedTmp(tmp))
 }
 
 fn is_regular_file(path: &Path) -> bool {

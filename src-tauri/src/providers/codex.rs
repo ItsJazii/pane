@@ -211,17 +211,18 @@ async fn load_access(dir: &std::path::Path) -> Result<Access, String> {
         if refresh.is_empty() {
             return Err("access token expired and no refresh token — run `codex login` again".into());
         }
-        // Refresh rotates the CLI's refresh token. If the write-back can't
-        // safely replace the live file (planted symlink, read-only dir),
-        // don't call the token endpoint — that would sign the CLI out from
-        // under the user; a still-valid access token just skips the refresh.
-        let writable = can_stage_write(&path);
-        if !writable && access.is_empty() {
+        // Refresh rotates the CLI's refresh token. Stage the write-back
+        // BEFORE the token call: if the refreshed pair can't replace the
+        // live file, the rotation would sign the CLI out from under the
+        // user. Only a token whose expiry is still in the future may skip
+        // the refresh; an expired one would just earn a vendor rejection.
+        let staged = stage_credentials_tmp(&path);
+        if staged.is_none() && (access.is_empty() || exp <= Utc::now().timestamp()) {
             return Err(
                 "Codex credentials cannot be updated safely — run `codex login` in a terminal".into(),
             );
         }
-        if writable {
+        if let Some(staged) = staged {
             let resp = http()
                 .post("https://auth.openai.com/oauth/token")
                 .json(&json!({
@@ -255,13 +256,12 @@ async fn load_access(dir: &std::path::Path) -> Result<Access, String> {
                 }
                 doc["last_refresh"] = Value::from(Utc::now().to_rfc3339());
                 backup_credentials(&path);
-                let tmp = path.with_extension("json.tmp");
-                std::fs::write(&tmp, serde_json::to_string_pretty(&doc).unwrap_or(raw))
+                // The tmp was created fresh and owner-locked at staging.
+                staged
+                    .write(&serde_json::to_string_pretty(&doc).unwrap_or(raw))
                     .map_err(|e| format!("write refreshed auth.json: {e}"))?;
-                // Lock the new pair down to this user before it replaces the
-                // live file (the preflight probe proved this fs accepts it).
-                super::onenewapi::store::restrict_owner_only(&tmp)
-                    .and_then(|_| std::fs::rename(&tmp, &path).map_err(|e| e.to_string()))
+                staged
+                    .commit(&path)
                     .map_err(|e| format!("write refreshed auth.json: {e}"))?;
             }
         }
@@ -580,36 +580,47 @@ fn is_regular_file(path: &std::path::Path) -> bool {
         .is_some_and(|m| m.is_file() && !m.file_type().is_symlink())
 }
 
-/// Refresh preflight: the write-back must be able to replace the live
-/// file — rotating the refresh token without a working write-back signs
-/// the CLI out. A planted symlink at the predictable tmp path is
-/// unlinked (never its target), then a create + owner-lock probe proves
-/// the directory accepts the full staging chain.
-fn can_stage_write(path: &std::path::Path) -> bool {
+/// Proof the refreshed credential pair can replace the live file BEFORE the
+/// rotating token call: any leftover or planted file at the predictable tmp
+/// path is removed outright (a symlink or hardlink redirect is never written
+/// through), a fresh tmp is created with create_new and owner-locked, and it
+/// stays staged until commit so nothing can be planted in the gap. Drop
+/// removes the tmp when the refresh never lands.
+struct StagedTmp(std::path::PathBuf);
+
+impl StagedTmp {
+    fn write(&self, contents: &str) -> std::io::Result<()> {
+        std::fs::write(&self.0, contents)
+    }
+    fn commit(self, live: &std::path::Path) -> std::io::Result<()> {
+        std::fs::rename(&self.0, live)?;
+        std::mem::forget(self);
+        Ok(())
+    }
+}
+
+impl Drop for StagedTmp {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn stage_credentials_tmp(path: &std::path::Path) -> Option<StagedTmp> {
     if !is_regular_file(path) {
-        return false;
+        return None;
     }
     let tmp = path.with_extension("json.tmp");
-    match std::fs::symlink_metadata(&tmp) {
-        Ok(m) if m.file_type().is_symlink() => {
-            if std::fs::remove_file(&tmp).is_err() {
-                return false;
-            }
-        }
-        Ok(m) if !m.is_file() => return false,
-        _ => {}
+    if std::fs::symlink_metadata(&tmp).is_ok() && std::fs::remove_file(&tmp).is_err() {
+        return None;
     }
-    let existed = tmp.is_file();
-    let ok = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .open(&tmp)
-        .is_ok()
-        && super::onenewapi::store::restrict_owner_only(&tmp).is_ok();
-    if !existed {
+    if std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp).is_err() {
+        return None;
+    }
+    if super::onenewapi::store::restrict_owner_only(&tmp).is_err() {
         let _ = std::fs::remove_file(&tmp);
+        return None;
     }
-    ok
+    Some(StagedTmp(tmp))
 }
 
 /// Keep a copy of the CLI's own file before touching it, so a bad write can

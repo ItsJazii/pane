@@ -221,10 +221,17 @@ pub(crate) fn read_small_text(
     if meta.file_type().is_symlink() || !meta.is_file() {
         return Err(format!("{what} is not a regular file"));
     }
-    if meta.len() > max_bytes {
+    // Read through a bounded reader — a file that grows or is swapped after
+    // the metadata check still can't exceed the cap.
+    let file = std::fs::File::open(path).map_err(|e| format!("read {what}: {e}"))?;
+    let mut limited = std::io::Read::take(file, max_bytes + 1);
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut limited, &mut text)
+        .map_err(|e| format!("read {what}: {e}"))?;
+    if text.len() as u64 > max_bytes {
         return Err(format!("{what} is unexpectedly large — not reading it"));
     }
-    std::fs::read_to_string(path).map_err(|e| format!("read {what}: {e}"))
+    Ok(text)
 }
 
 /// Where Pane keeps its own settings, e.g. saved API keys:
