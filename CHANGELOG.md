@@ -1,5 +1,44 @@
 # Changelog
 
+## Unreleased
+
+### Security
+- **Bundled SQLite moved past the public FTS5 CVEs.** Pane opens
+  databases that several CLIs own, so the SQLite vendored through
+  `rusqlite` is now a release carrying the disclosed FTS5 fixes.
+- **Every pasted-key file is owner-only and written atomically.** What
+  One/New API and Sub2API already had now covers every
+  `%APPDATA%\Pane\<provider>.json`: an owner-only ACL (Windows
+  protected DACL / Unix `0600`) never inherited from a permissive
+  parent, and a temp-file-then-rename write so a crash mid-save cannot
+  truncate your keys.
+- **Webview permissions cut to the minimum.** The main window's Tauri
+  capability is down to `core:default` — the UI only ever talks to Rust
+  through app commands, so every plugin permission is denied by
+  default.
+- **Antigravity's loopback client no longer follows redirects.** A legit
+  language server never redirects, and one could have carried the
+  client's csrf header cross-origin; redirects are now refused and
+  plaintext loopback never rides a proxy.
+- **Pricing-supplement values are range-checked.** The supplement is
+  fetched from a third-party URL, so rates and multipliers outside a
+  sane range are dropped before they touch spend math.
+- **Spend scanner caps line, file, and model-key growth.** A hostile or
+  corrupted log can no longer balloon a scan: individual lines, bytes
+  read per file, and the number of distinct model keys kept per file
+  are all bounded.
+- **Update checks throttled to the documented cadence.** The checker
+  now asks at launch and then every 4 h — what the privacy page has
+  always stated — and no more often.
+- **Assorted lows.** Provider error messages no longer echo saved keys;
+  Kimi's `*.pane-bak` token backup is deleted once the refreshed
+  credential file is safely in place; credential write-backs refuse
+  symlinked targets; the local HTTP API refuses duplicate `Host`
+  headers and answers with `nosniff`; telemetry drops free-text labels
+  from starred metrics and mints its random ID from OS entropy; the
+  updater download has a timeout; and the release pipeline's signing
+  job runs behind a GitHub `release` environment gate.
+
 ## 0.4.48 — 2026-09-09
 
 ### Fixed
