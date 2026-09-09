@@ -102,8 +102,23 @@ impl FileData {
             self.models.insert(model.to_string());
             return model.to_string();
         }
-        OVERFLOW_MODEL_KEY.to_string()
+        overflow_key(model)
     }
+}
+
+/// The overflow bucket keeps Pi's routing prefix: take_tagged can only
+/// claim keys that still start with `{card}\u{1}`, so folding a tagged
+/// name into the bare overflow key would strand that usage between cards.
+/// Pi's card set is fixed (`claude`, `codex` — see pi_line), so this adds
+/// at most one bounded key per card.
+fn overflow_key(model: &str) -> String {
+    for card in ["claude", "codex"] {
+        let prefix = format!("{card}{PI_SEP}");
+        if model.starts_with(&prefix) {
+            return format!("{prefix}{OVERFLOW_MODEL_KEY}");
+        }
+    }
+    OVERFLOW_MODEL_KEY.to_string()
 }
 
 struct FileEntry {
@@ -3156,6 +3171,34 @@ mod tests {
         // $0 carried cost falls through to pricing; unknown model → honest ⚠.
         assert_eq!(codex.days.values().map(|v| v.1).sum::<f64>(), 500.0);
         assert_eq!(codex.unpriced.get("pi-test-model"), Some(&1));
+    }
+
+    /// Overflowed Pi keys keep their routing prefix: take_tagged must still
+    /// claim them, so capped usage lands on the right card instead of
+    /// vanishing with the discarded scan.
+    #[test]
+    fn pi_overflow_keeps_its_card_routing() {
+        let mut seen = HashSet::new();
+        let mut data = FileData::default();
+        let huge = "m".repeat(10_000);
+        for (id, provider) in [("p1", "anthropic"), ("p2", "openai-codex")] {
+            let line = json!({"type": "message", "id": id, "timestamp": "2026-08-03T10:00:00Z",
+                "message": {"role": "assistant", "provider": provider, "model": &huge,
+                            "usage": {"input": 100.0, "output": 50.0, "cacheRead": 0.0,
+                                      "cacheWrite": 0.0, "totalTokens": 150.0,
+                                      "cost": {"total": 1.0}}}})
+            .to_string();
+            pi_line(&mut seen, &line, &mut data);
+        }
+        let claude = take_tagged(&mut data, "claude");
+        let codex = take_tagged(&mut data, "codex");
+        // Nothing stranded between cards.
+        assert!(data.days.is_empty() && data.unpriced.is_empty());
+        assert_eq!(cost_sum(&claude), 1.0);
+        assert_eq!(cost_sum(&codex), 1.0);
+        assert_eq!(tokens_sum(&claude), 150.0);
+        assert!(claude.days.keys().all(|(_, m)| m == OVERFLOW_MODEL_KEY));
+        assert!(codex.days.keys().all(|(_, m)| m == OVERFLOW_MODEL_KEY));
     }
 
     #[test]
