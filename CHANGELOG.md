@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.48 — 2026-09-09
 
 ### Fixed
 - **Devin SWE and Penguin spend again.** Cognition's `swe-1.6` /
