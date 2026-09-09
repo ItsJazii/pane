@@ -1,9 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window. Only core IPC: the frontend talks to Rust exclusively through app commands (open_link, install_update, ...), so no plugin surface is exposed to the webview.",
+  "description": "Capability for the main window. App commands (open_link, install_update, ...) need no grant; the frontend additionally only listens to Rust events and reads the app version. No core:default — it would expose core:image allow-from-path (arbitrary PNG read + pixel exfiltration) plus unused tray/menu/path/window grants.",
   "windows": ["main"],
   "permissions": [
-    "core:default"
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:app:allow-version"
   ]
 }
