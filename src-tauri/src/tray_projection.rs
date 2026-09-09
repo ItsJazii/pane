@@ -405,7 +405,7 @@ mod tests {
         let mut layout = provider(&["1d", "Total quota", "5h"]);
         layout.hidden.push("5h".into());
         cfg.providers.insert(snap.id.clone(), layout);
-        let projected = project_main_tray(&[snap.clone()], &cfg, false);
+        let projected = project_main_tray(std::slice::from_ref(&snap), &cfg, false);
         assert_eq!(projected.remaining_percentages, vec![5]);
         assert_eq!(projected.tooltip, "Pane\nSite · Key 5h: 5% left");
         cfg.disabled.push("sub2api".into());
