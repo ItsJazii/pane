@@ -191,6 +191,12 @@ pub fn corrections_rev() -> u32 {
 /// Router prose names, GPT-5.3–5.6 effort slugs). 64 silently dropped
 /// everything after `gpt-5.2`. Per-rule caps below still bound memory.
 const MAX_ALIAS_RULES: usize = 256;
+/// Bounds for what the supplement feed may claim — it is trusted by URL
+/// alone yet outranks both catalogs in resolve(). No real model prices
+/// above ~$600/M, and a fast tier outside 1×–10× is a corrupt feed, not
+/// a SKU. Entries outside the bounds are dropped, not clamped.
+const MAX_SUPPLEMENT_PRICE: f64 = 10_000.0;
+const MAX_FAST_MULTIPLIER: f64 = 10.0;
 
 /// Stable fingerprint of the effective pricing inputs: the on-disk catalog
 /// files plus this binary's corrections revision. The persistent spend
@@ -303,6 +309,10 @@ fn apply_supplement(store: &mut Store, doc: &Value) {
     store.supplement.clear();
     store.fast_multipliers.clear();
     store.alias_rules.clear();
+    // The feed is trusted by URL alone yet outranks both catalogs in
+    // resolve(), so every value it hands us is range-checked on the way
+    // in; drops are counted and reported once at the end.
+    let mut dropped = 0usize;
     if let Some(pricing) = doc.get("pricing").and_then(Value::as_object) {
         for (model, entry) in pricing {
             let get = |key: &str| entry.get(key).and_then(Value::as_f64);
@@ -311,14 +321,16 @@ fn apply_supplement(store: &mut Store, doc: &Value) {
             else {
                 continue;
             };
+            let cache_read = get("cache_read_per_million").unwrap_or(input);
+            let cache_write = get("cache_write_per_million").unwrap_or(input);
+            let plausible = |v: f64| v.is_finite() && (0.0..=MAX_SUPPLEMENT_PRICE).contains(&v);
+            if ![input, output, cache_read, cache_write].into_iter().all(plausible) {
+                dropped += 1;
+                continue;
+            }
             store.supplement.insert(
                 model.clone(),
-                Price::flat(
-                    input,
-                    output,
-                    get("cache_read_per_million").unwrap_or(input),
-                    get("cache_write_per_million").unwrap_or(input),
-                ),
+                Price::flat(input, output, cache_read, cache_write),
             );
         }
     }
@@ -326,7 +338,11 @@ fn apply_supplement(store: &mut Store, doc: &Value) {
     if let Some(mults) = doc.get("fast_multipliers").and_then(Value::as_object) {
         for (model, v) in mults {
             if let Some(m) = v.as_f64() {
-                store.fast_multipliers.insert(model.clone(), m);
+                if m.is_finite() && (1.0..=MAX_FAST_MULTIPLIER).contains(&m) {
+                    store.fast_multipliers.insert(model.clone(), m);
+                } else {
+                    dropped += 1;
+                }
             }
         }
     }
@@ -352,9 +368,9 @@ fn apply_supplement(store: &mut Store, doc: &Value) {
 
     // The supplement is fetched from a third-party URL, so cap what it can
     // feed us: at most MAX_ALIAS_RULES of at most 256 chars each, compiled
-    // with a bounded size. (Rust's regex engine is linear-time by design,
-    // so ReDoS-style backtracking blowups aren't possible; the caps bound
-    // memory and compile cost.)
+    // with a bounded size, with plain-slug targets. (Rust's regex engine is
+    // linear-time by design, so ReDoS-style backtracking blowups aren't
+    // possible; the caps bound memory and compile cost.)
     if let Some(rules) = doc.get("alias_rules").and_then(Value::as_array) {
         for rule in rules.iter().take(MAX_ALIAS_RULES) {
             let (Some(pattern), Some(canonical)) = (
@@ -363,7 +379,15 @@ fn apply_supplement(store: &mut Store, doc: &Value) {
             ) else {
                 continue;
             };
-            if pattern.len() > 256 || canonical.len() > 128 {
+            // Targets become model names inside resolve() — plain ASCII
+            // slugs only, so a rule can't smuggle control characters,
+            // spaces, or unicode lookalikes into lookups.
+            if pattern.len() > 256
+                || canonical.len() > 128
+                || canonical.is_empty()
+                || !canonical.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'/' | b'_' | b'-'))
+            {
+                dropped += 1;
                 continue;
             }
             if let Ok(re) = regex::RegexBuilder::new(pattern)
@@ -373,6 +397,9 @@ fn apply_supplement(store: &mut Store, doc: &Value) {
                 store.alias_rules.push((re, canonical.to_string()));
             }
         }
+    }
+    if dropped > 0 {
+        eprintln!("[pane] pricing: supplement dropped {dropped} out-of-range entries");
     }
 }
 
@@ -665,7 +692,7 @@ fn resolve(s: &Store, model: &str, depth: u8) -> Option<Price> {
     if let Some(p) = s
         .litellm
         .iter()
-        .find(|(k, p)| k.rsplit('/').next() == Some(canonical.as_str()) && real(&p))
+        .find(|(k, p)| k.rsplit('/').next() == Some(canonical.as_str()) && real(p))
         .map(|(_, p)| *p)
     {
         return Some(p);
@@ -1369,6 +1396,67 @@ mod tests {
         assert!(store.alias_rules.iter().any(|(_, c)| c == "gpt-5.6-sol"));
     }
 
+    #[test]
+    fn supplement_drops_out_of_range_prices_and_multipliers() {
+        // The supplement outranks every catalog in resolve(), so a hostile
+        // or corrupt feed must not name its own dollars: nothing real
+        // exceeds ~$600/M, and fast tiers stay within 1x-10x.
+        let doc = serde_json::json!({
+            "pricing": {
+                "absurd-model": { "input_per_million": 50_000.0, "output_per_million": 1.0 },
+                "negative-model": { "input_per_million": -1.0, "output_per_million": 1.0 },
+                "bad-cache-model": { "input_per_million": 1.0, "output_per_million": 2.0,
+                                     "cache_read_per_million": 99_999.0 },
+                "ceiling-model": { "input_per_million": 10_000.0, "output_per_million": 10_000.0 },
+                "sane-model": { "input_per_million": 3.0, "output_per_million": 15.0,
+                                "cache_read_per_million": 0.3, "cache_write_per_million": 3.75 },
+                "free-model": { "input_per_million": 0.0, "output_per_million": 0.0 },
+            },
+            "fast_multipliers": {
+                "absurd-model": 500.0,
+                "negative-model": 0.5,   // <1: fast cheaper than standard is nonsense
+                "sane-model": 2.0,
+                "ceiling-lo": 1.0,
+                "ceiling-hi": 10.0,
+            },
+        });
+        let mut store = super::Store::default();
+        super::apply_supplement(&mut store, &doc);
+        for model in ["absurd-model", "negative-model", "bad-cache-model"] {
+            assert!(!store.supplement.contains_key(model), "{model}");
+        }
+        assert_eq!(store.fast_multipliers.get("absurd-model"), None);
+        assert_eq!(store.fast_multipliers.get("negative-model"), None);
+        let p = store.supplement.get("sane-model").unwrap();
+        assert_eq!((p.input, p.output, p.cache_read, p.cache_write), (3.0, 15.0, 0.3, 3.75));
+        assert_eq!(store.fast_multipliers.get("sane-model"), Some(&2.0));
+        // Bounds are inclusive: the 0/0 free placeholder and the (unlikely
+        // but in-range) ceiling values survive, so edge data never drops.
+        assert!(store.supplement.contains_key("free-model"));
+        assert!(store.supplement.contains_key("ceiling-model"));
+        assert_eq!(store.fast_multipliers.get("ceiling-lo"), Some(&1.0));
+        assert_eq!(store.fast_multipliers.get("ceiling-hi"), Some(&10.0));
+    }
+
+    #[test]
+    fn supplement_alias_targets_are_plain_ascii_slugs() {
+        // Targets land in resolve() as model names — anything but a plain
+        // slug (control chars, spaces, unicode lookalikes, empty) drops.
+        let doc = serde_json::json!({ "alias_rules": [
+            { "pattern": "^good$", "canonical": "gpt-5.6-sol" },
+            { "pattern": "^prefixed$", "canonical": "openai/gpt_5.6.sol" },
+            { "pattern": "^control$", "canonical": "gpt-5.6\n-fake" },
+            { "pattern": "^spaces$", "canonical": "not a slug" },
+            { "pattern": "^unicode$", "canonical": "gрt-5.6" },
+            { "pattern": "^empty$", "canonical": "" },
+            { "pattern": "^long$", "canonical": "x".repeat(200) },
+        ]});
+        let mut store = super::Store::default();
+        super::apply_supplement(&mut store, &doc);
+        let targets: Vec<&str> = store.alias_rules.iter().map(|(_, c)| c.as_str()).collect();
+        assert_eq!(targets, ["gpt-5.6-sol", "openai/gpt_5.6.sol"]);
+    }
+
     /// Live probe: fetches the three catalogs and resolves a few real slugs.
     /// Run via `cargo test --lib pricing -- --ignored --nocapture`.
     #[test]
@@ -1396,13 +1484,16 @@ mod tests {
             }
         }
         for model in &matrix {
-            match super::lookup(model) {
-                Some(p) => eprintln!(
+            // Cap each dump line: this runs with --nocapture straight to
+            // the terminal over data a third-party feed can influence.
+            let line = match super::lookup(model) {
+                Some(p) => format!(
                     "{model}: in=${:.2} out=${:.2} cr=${:.3} cw=${:.2} (per 1M)",
                     p.input, p.output, p.cache_read, p.cache_write
                 ),
-                None => eprintln!("{model}: UNPRICED"),
-            }
+                None => format!("{model}: UNPRICED"),
+            };
+            eprintln!("{line:.200}");
         }
     }
 }

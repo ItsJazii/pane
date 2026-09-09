@@ -12,7 +12,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
@@ -63,6 +63,20 @@ impl ProviderSpend {
 /// (local calendar day, model) → (cost, tokens). Day = days since CE.
 type DayMap = HashMap<(i32, String), (f64, f64)>;
 
+/// Longest model string admitted as a days/unpriced key. Same bound as
+/// catalog canonicals (MAX_PROBE_KEY), which every real model fits;
+/// longer names fold into OVERFLOW_MODEL_KEY.
+const MAX_MODEL_KEY: usize = MAX_PROBE_KEY;
+
+/// Distinct model keys one file may admit before extras fold into
+/// OVERFLOW_MODEL_KEY. Real session logs name a handful of models — the
+/// cap stops a hostile log from inflating the maps (and spend_cache.json).
+const MAX_MODELS_PER_FILE: usize = 4096;
+
+/// Fixed bucket for model names refused by the two caps above. Spend and
+/// token totals stay exact — only the per-model attribution merges.
+const OVERFLOW_MODEL_KEY: &str = "[over-limit model name]";
+
 /// Everything one file contributes: priced per-day totals plus the tally of
 /// unpriced (excluded) events per model name. Cached as a unit so exclusion
 /// counts survive the per-file cache.
@@ -70,6 +84,26 @@ type DayMap = HashMap<(i32, String), (f64, f64)>;
 struct FileData {
     days: DayMap,
     unpriced: HashMap<String, u64>,
+    /// Distinct model keys admitted by `model_key` during this file's
+    /// parse — the state behind MAX_MODELS_PER_FILE. Consulted only while
+    /// parsing; split helpers don't keep it in step.
+    models: HashSet<String>,
+}
+
+impl FileData {
+    /// Bounded key for a log-supplied model string: within both caps the
+    /// name passes through, otherwise OVERFLOW_MODEL_KEY. Model strings
+    /// come straight from the logs, so without this a hostile line could
+    /// key these maps (and spend_cache.json) with unbounded names.
+    fn model_key(&mut self, model: &str) -> String {
+        if model.len() <= MAX_MODEL_KEY
+            && (self.models.contains(model) || self.models.len() < MAX_MODELS_PER_FILE)
+        {
+            self.models.insert(model.to_string());
+            return model.to_string();
+        }
+        OVERFLOW_MODEL_KEY.to_string()
+    }
 }
 
 struct FileEntry {
@@ -205,7 +239,7 @@ fn cache() -> &'static Mutex<HashMap<PathBuf, FileEntry>> {
 // "Scanning session logs…" every day.
 // ---------------------------------------------------------------------------
 
-const PERSIST_VERSION: u32 = 3; // bump on cache format *or* parser-logic changes
+const PERSIST_VERSION: u32 = 4; // bump on cache format *or* parser-logic changes
 
 /// Set when any file was (re)parsed this run — nothing changed, nothing saved.
 static CACHE_DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -343,10 +377,8 @@ fn day_of_utc(ts: DateTime<Utc>) -> i32 {
 }
 
 fn add_event(data: &mut FileData, ts: DateTime<Utc>, model: &str, cost: f64, tokens: f64) {
-    let entry = data
-        .days
-        .entry((day_of_utc(ts), model.to_string()))
-        .or_insert((0.0, 0.0));
+    let key = data.model_key(model);
+    let entry = data.days.entry((day_of_utc(ts), key)).or_insert((0.0, 0.0));
     entry.0 += cost;
     entry.1 += tokens;
 }
@@ -354,8 +386,10 @@ fn add_event(data: &mut FileData, ts: DateTime<Utc>, model: &str, cost: f64, tok
 /// Tally an event no catalog can price: its tokens still count (they're
 /// measured, not guessed) at zero cost, so only the dollars under-report.
 fn note_unpriced(data: &mut FileData, ts: DateTime<Utc>, model: &str, tokens: f64) {
-    *data.unpriced.entry(model.to_string()).or_insert(0) += 1;
+    let key = data.model_key(model);
+    *data.unpriced.entry(key).or_insert(0) += 1;
     if tokens > 0.0 {
+        // add_event re-derives the same bounded key.
         add_event(data, ts, model, 0.0, tokens);
     }
 }
@@ -369,6 +403,7 @@ fn merge_data(target: &mut FileData, source: FileData) {
     for (model, count) in source.unpriced {
         *target.unpriced.entry(model).or_insert(0) += count;
     }
+    target.models.extend(source.models);
 }
 
 /// Ranked model list for one window: top models by cost, anything past the
@@ -455,6 +490,26 @@ const MAX_SCAN_DEPTH: usize = 16;
 /// tree (or `/`) can't stall the refresh thread.
 const MAX_SCAN_DIRS: usize = 20_000;
 
+/// Session logs larger than this are skipped whole, with a diagnostic — a
+/// multi-hundred-MB single "log" is a corrupt or hostile artifact, and
+/// reading it would stall the refresh thread.
+const MAX_LOG_FILE_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Stored bytes per JSONL line: a longer physical line is skipped and its
+/// remainder read-and-discarded, never kept. Legit Claude/Codex lines
+/// reach ~1 MB, so 4 MiB loses nothing real.
+const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Report a log skipped for exceeding MAX_LOG_FILE_BYTES.
+fn oversized_log(path: &Path, size: u64) {
+    eprintln!(
+        "[pane] spend: skipping {} — {} MiB exceeds the {} MiB log-file cap",
+        path.display(),
+        size / (1024 * 1024),
+        MAX_LOG_FILE_BYTES / (1024 * 1024),
+    );
+}
+
 /// All .jsonl files under `root` modified in the last 31 days.
 /// Symlinks and junctions are followed throughout: directories are resolved
 /// through links when recursing, and the recency check below reads the
@@ -521,11 +576,19 @@ fn recent_jsonl_files(root: &Path, out: &mut Vec<PathBuf>) {
                 {
                     // Target metadata, so a link's own ancient mtime can't
                     // hide a recently written log.
+                    if meta.len() > MAX_LOG_FILE_BYTES {
+                        oversized_log(&path, meta.len());
+                        continue;
+                    }
                     followed_link = true;
                     out.push(path);
                 }
             } else if path.extension().is_some_and(|e| e == "jsonl") {
                 let Ok(meta) = entry.metadata() else { continue };
+                if meta.len() > MAX_LOG_FILE_BYTES {
+                    oversized_log(&path, meta.len());
+                    continue;
+                }
                 if meta.modified().map(|m| m >= cutoff).unwrap_or(true) {
                     out.push(path);
                 }
@@ -552,6 +615,13 @@ fn recent_jsonl_files(root: &Path, out: &mut Vec<PathBuf>) {
 /// Parses one file into per-day totals, via the cache when unchanged.
 fn file_days(path: &Path, parse: &mut dyn FnMut(&str, &mut FileData)) -> FileData {
     let Ok(meta) = fs::metadata(path) else { return FileData::default() };
+    if meta.len() > MAX_LOG_FILE_BYTES {
+        // Also gated in recent_jsonl_files; this catches direct-path
+        // callers (grok's unified.jsonl). Not touched, so a stale cache
+        // entry for it is pruned on the next save.
+        oversized_log(path, meta.len());
+        return FileData::default();
+    }
     let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
     let size = meta.len();
 
@@ -592,10 +662,44 @@ fn file_days(path: &Path, parse: &mut dyn FnMut(&str, &mut FileData)) -> FileDat
             return FileData::default();
         }
     };
+    let mut reader = BufReader::new(file);
     let mut read_ok = true;
-    for line in BufReader::new(file).lines() {
-        match line {
-            Ok(line) => parse(&line, &mut data),
+    loop {
+        // One physical line, storing at most MAX_LINE_BYTES (+1 byte to
+        // detect overflow) — a hostile log must not make a single line
+        // allocate without bound.
+        let mut buf: Vec<u8> = Vec::new();
+        let read = reader
+            .by_ref()
+            .take(MAX_LINE_BYTES as u64 + 1)
+            .read_until(b'\n', &mut buf);
+        match read {
+            Ok(0) => break, // EOF
+            Ok(_) if buf.len() > MAX_LINE_BYTES && !buf.ends_with(b"\n") => {
+                // Overlong line: discard the rest of it without storing.
+                if skip_line_rest(&mut reader).is_err() {
+                    read_ok = false;
+                    break;
+                }
+            }
+            Ok(_) => {
+                // Same terminator handling as BufRead::lines().
+                if buf.ends_with(b"\n") {
+                    buf.pop();
+                    if buf.ends_with(b"\r") {
+                        buf.pop();
+                    }
+                }
+                match String::from_utf8(buf) {
+                    Ok(line) => parse(&line, &mut data),
+                    Err(_) => {
+                        // lines() treated invalid UTF-8 as a read error;
+                        // keep the file out of the cache the same way.
+                        read_ok = false;
+                        break;
+                    }
+                }
+            }
             Err(_) => {
                 read_ok = false;
                 break;
@@ -615,6 +719,27 @@ fn file_days(path: &Path, parse: &mut dyn FnMut(&str, &mut FileData)) -> FileDat
     }
     CACHE_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
     data
+}
+
+/// Consume through the next '\n' (or EOF) using only the reader's own
+/// buffer — the unread tail of an overlong line.
+fn skip_line_rest(reader: &mut impl BufRead) -> std::io::Result<()> {
+    loop {
+        let buf = reader.fill_buf()?;
+        if buf.is_empty() {
+            return Ok(());
+        }
+        match buf.iter().position(|&b| b == b'\n') {
+            Some(i) => {
+                reader.consume(i + 1);
+                return Ok(());
+            }
+            None => {
+                let n = buf.len();
+                reader.consume(n);
+            }
+        }
+    }
 }
 
 fn parse_ts(value: Option<&Value>) -> Option<DateTime<Utc>> {
@@ -2079,6 +2204,86 @@ fn parse_csv_date(s: &str) -> Option<DateTime<Utc>> {
     None
 }
 
+/// Minimal CSV field splitter with quoted-field support.
+fn split_csv_row(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut field = String::new();
+    let mut in_quotes = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if in_quotes && chars.peek() == Some(&'"') => {
+                field.push('"');
+                chars.next();
+            }
+            '"' => in_quotes = !in_quotes,
+            ',' if !in_quotes => out.push(std::mem::take(&mut field)),
+            _ => field.push(c),
+        }
+    }
+    out.push(field);
+    out
+}
+
+pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
+    providers::sweep_temp_sqlite_copies();
+    pricing::ensure_fresh();
+    load_persisted_cache();
+    if let Ok(mut t) = touched().lock() {
+        t.clear();
+    }
+    let (pi_claude, pi_codex) = pi();
+    let (claude_sp, mut minimax_extra, mut qwen_via_claude, mut kimi_routed) =
+        claude(pi_claude);
+    // Extra Claude accounts: own spend cards, with their MiniMax/qwen/Kimi-
+    // routed rows folded into the same destinations as the default account's.
+    let (extra_claude_spends, mm2, qw2, km2) = claude_extra_accounts();
+    merge_data(&mut minimax_extra, mm2);
+    merge_data(&mut qwen_via_claude, qw2);
+    merge_data(&mut kimi_routed, km2);
+    // Hermes rows going to an existing slice merge into it (MiniMax via the
+    // extra-data path); the rest become their own spend entries.
+    let mut hermes_rest = Vec::new();
+    for (id, name, data) in hermes() {
+        if id == "minimax" {
+            merge_data(&mut minimax_extra, data);
+        } else {
+            hermes_rest.push(build_spend(id, name, data));
+        }
+    }
+    let (opencode_sp, mut aihubmix_data) = opencode();
+    merge_data(&mut aihubmix_data, qwen_via_claude);
+    let aihubmix_sp = build_spend("aihubmix", "AihubMix", aihubmix_data);
+    let (codex_sp, kimi_via_codex) = codex(pi_codex);
+    merge_data(&mut kimi_routed, kimi_via_codex);
+    let (extra_codex_spends, kimi_via_extra_codex) = codex_extra_accounts();
+    merge_data(&mut kimi_routed, kimi_via_extra_codex);
+    let mut list = vec![
+        claude_sp,
+        codex_sp,
+        grok(),
+        opencode_sp,
+        aihubmix_sp,
+        devin(),
+        minimax(minimax_extra),
+        kimi(kimi_routed),
+        qwen(),
+    ];
+    list.extend(extra_claude_spends);
+    list.extend(extra_codex_spends);
+    list.extend(hermes_rest);
+    if let Some(csv) = cursor_csv {
+        list.push(cursor_from_csv(&csv));
+    }
+    // Models nothing prices yet (new slugs ship often): flag the catalog
+    // to look for updates hourly instead of daily.
+    if list.iter().any(|sp| sp.unpriced > 0) {
+        pricing::note_unpriced();
+    }
+    save_persisted_cache();
+    list.into_iter().filter(ProviderSpend::has_data).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2297,6 +2502,111 @@ mod tests {
         let cached = cache().lock().unwrap().contains_key(&dir);
         let _ = fs::remove_dir_all(&dir);
         assert!(!cached, "unreadable path must not become a cache entry");
+    }
+
+    // ---- Input bounds: oversize lines, huge files, hostile model names ---
+
+    /// A line past MAX_LINE_BYTES is skipped without ever being stored;
+    /// the lines around it still parse and the file still caches (a
+    /// deliberate skip is not a read failure).
+    #[test]
+    fn oversize_lines_are_skipped_without_storing() {
+        let dir = std::env::temp_dir().join(format!("pane-bigline-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("big-line.jsonl");
+        let ok = json!({"type": "usage.record", "model": "kimi-code/k3",
+            "usage": {"inputOther": 1000.0, "output": 1000.0},
+            "usageScope": "turn", "time": 1784208630652i64})
+        .to_string();
+        let huge = "x".repeat(MAX_LINE_BYTES + 1024);
+        fs::write(&path, format!("{ok}\n{huge}\n{ok}\n")).unwrap();
+
+        let mut seen: Vec<usize> = Vec::new();
+        let data = file_days(&path, &mut |line, data| {
+            seen.push(line.len());
+            kimi_line(line, data);
+        });
+        let cached = cache().lock().unwrap().contains_key(&path);
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(seen, vec![ok.len(), ok.len()], "overlong line reached the parser");
+        assert_eq!(tokens_sum(&data), 4_000.0);
+        assert!(cached, "a skipped line must not poison the cache entry");
+    }
+
+    /// Files past MAX_LOG_FILE_BYTES are skipped: the walk won't list them,
+    /// and a direct-path caller gets nothing (and no cache entry).
+    #[test]
+    fn huge_log_files_are_skipped() {
+        let dir = std::env::temp_dir().join(format!("pane-hugefile-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("small.jsonl"), "{}\n").unwrap();
+        let huge_path = dir.join("huge.jsonl");
+        let huge = fs::File::create(&huge_path).unwrap();
+        huge.set_len(MAX_LOG_FILE_BYTES + 1).unwrap();
+        drop(huge);
+
+        let mut out = Vec::new();
+        recent_jsonl_files(&dir, &mut out);
+        assert!(out.iter().any(|p| p.ends_with("small.jsonl")));
+        assert!(!out.iter().any(|p| p.ends_with("huge.jsonl")), "oversize log must not be listed");
+
+        let mut parsed = false;
+        let data = file_days(&huge_path, &mut |_, _| parsed = true);
+        let cached = cache().lock().unwrap().contains_key(&huge_path);
+        let _ = fs::remove_dir_all(&dir);
+        assert!(!parsed && data.days.is_empty());
+        assert!(!cached, "oversize log must not become a cache entry");
+    }
+
+    /// A model string longer than MAX_MODEL_KEY can't key the maps (or the
+    /// persisted cache): it folds into the fixed overflow bucket while its
+    /// dollars and tokens still count.
+    #[test]
+    fn huge_model_names_fold_into_the_overflow_bucket() {
+        let ts = DateTime::from_timestamp_millis(1_784_208_630_652).unwrap();
+        let mut data = FileData::default();
+        let huge_a = format!("a{}", "x".repeat(10_000));
+        let huge_b = format!("b{}", "y".repeat(10_000));
+        add_event(&mut data, ts, &huge_a, 1.0, 100.0);
+        add_event(&mut data, ts, &huge_b, 2.0, 200.0);
+        note_unpriced(&mut data, ts, &huge_a, 50.0);
+
+        // Totals stay exact; only the attribution merged.
+        assert_eq!(cost_sum(&data), 3.0);
+        assert_eq!(tokens_sum(&data), 350.0);
+        assert_eq!(data.days.len(), 1);
+        assert!(data.days.keys().all(|(_, m)| m == OVERFLOW_MODEL_KEY));
+        assert_eq!(data.unpriced.get(OVERFLOW_MODEL_KEY), Some(&1));
+        assert!(data.unpriced.keys().all(|m| m.len() <= MAX_MODEL_KEY));
+
+        // Boundary: 128 chars is admitted, 129 folds.
+        let mut b = FileData::default();
+        let at_cap = "m".repeat(MAX_MODEL_KEY);
+        add_event(&mut b, ts, &at_cap, 1.0, 1.0);
+        assert!(b.days.keys().all(|(_, m)| m == &at_cap));
+        add_event(&mut b, ts, &"m".repeat(MAX_MODEL_KEY + 1), 1.0, 1.0);
+        assert!(b.days.keys().any(|(_, m)| m == OVERFLOW_MODEL_KEY));
+    }
+
+    /// One file naming endless distinct models folds everything past
+    /// MAX_MODELS_PER_FILE into the overflow bucket.
+    #[test]
+    fn unique_model_keys_cap_per_file() {
+        let ts = DateTime::from_timestamp_millis(1_784_208_630_652).unwrap();
+        let mut data = FileData::default();
+        for i in 0..MAX_MODELS_PER_FILE + 5 {
+            add_event(&mut data, ts, &format!("model-{i}"), 1.0, 1.0);
+        }
+        // 4096 admitted names plus the single overflow bucket.
+        assert_eq!(data.days.len(), MAX_MODELS_PER_FILE + 1);
+        let overflow = data
+            .days
+            .get(&(day_of_utc(ts), OVERFLOW_MODEL_KEY.to_string()))
+            .expect("overflow bucket");
+        assert_eq!(*overflow, (5.0, 5.0));
+        assert_eq!(cost_sum(&data), (MAX_MODELS_PER_FILE + 5) as f64);
     }
 
     #[test]
@@ -2603,7 +2913,7 @@ mod tests {
                         {"type": "message", "input_tokens": 1.0, "output_tokens": 291.0}
                     ]}}})
         .to_string();
-        let once = claude_run(&[line.clone()]);
+        let once = claude_run(std::slice::from_ref(&line));
         let models: HashSet<&str> = once.days.keys().map(|(_, m)| m.as_str()).collect();
         assert!(models.iter().any(|m| m.contains("fable")));
         assert!(models.iter().any(|m| m.contains("haiku")));
@@ -2907,109 +3217,37 @@ mod tests {
     #[test]
     #[ignore]
     fn live_probe() {
+        // Real export data is echoed here — cap every dump at 200 chars.
+        let clip = |s: String| s.chars().take(200).collect::<String>();
         let csv = tauri::async_runtime::block_on(crate::providers::cursor::fetch_usage_csv());
         eprintln!("cursor csv: {} bytes", csv.as_deref().map(str::len).unwrap_or(0));
         if let Some(c) = &csv {
-            eprintln!("csv header: {}", c.lines().next().unwrap_or(""));
+            eprintln!("{}", clip(format!("csv header: {}", c.lines().next().unwrap_or(""))));
             for row in c.lines().skip(1).take(3) {
                 let cells = super::split_csv_row(row);
                 eprintln!(
-                    "row: date={:?} parsed={} model={:?} in={:?} out={:?} total={:?} cost={:?}",
-                    cells.first(),
-                    cells.first().map(|d| super::parse_csv_date(d).is_some()).unwrap_or(false),
-                    cells.get(4),
-                    cells.get(6),
-                    cells.get(9),
-                    cells.get(10),
-                    cells.get(11),
+                    "{}",
+                    clip(format!(
+                        "row: date={:?} parsed={} model={:?} in={:?} out={:?} total={:?} cost={:?}",
+                        cells.first(),
+                        cells.first().map(|d| super::parse_csv_date(d).is_some()).unwrap_or(false),
+                        cells.get(4),
+                        cells.get(6),
+                        cells.get(9),
+                        cells.get(10),
+                        cells.get(11),
+                    ))
                 );
             }
         }
         for sp in super::collect(csv) {
             eprintln!(
-                "{}: today=${:.2} 30d=${:.2} tokens30={:.0} unpriced={} {:?}",
-                sp.id, sp.today.cost, sp.last30.cost, sp.last30.tokens, sp.unpriced, sp.unpriced_models
+                "{}",
+                clip(format!(
+                    "{}: today=${:.2} 30d=${:.2} tokens30={:.0} unpriced={} {:?}",
+                    sp.id, sp.today.cost, sp.last30.cost, sp.last30.tokens, sp.unpriced, sp.unpriced_models
+                ))
             );
         }
     }
-}
-
-/// Minimal CSV field splitter with quoted-field support.
-fn split_csv_row(line: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut field = String::new();
-    let mut in_quotes = false;
-    let mut chars = line.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '"' if in_quotes && chars.peek() == Some(&'"') => {
-                field.push('"');
-                chars.next();
-            }
-            '"' => in_quotes = !in_quotes,
-            ',' if !in_quotes => out.push(std::mem::take(&mut field)),
-            _ => field.push(c),
-        }
-    }
-    out.push(field);
-    out
-}
-
-pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
-    providers::sweep_temp_sqlite_copies();
-    pricing::ensure_fresh();
-    load_persisted_cache();
-    if let Ok(mut t) = touched().lock() {
-        t.clear();
-    }
-    let (pi_claude, pi_codex) = pi();
-    let (claude_sp, mut minimax_extra, mut qwen_via_claude, mut kimi_routed) =
-        claude(pi_claude);
-    // Extra Claude accounts: own spend cards, with their MiniMax/qwen/Kimi-
-    // routed rows folded into the same destinations as the default account's.
-    let (extra_claude_spends, mm2, qw2, km2) = claude_extra_accounts();
-    merge_data(&mut minimax_extra, mm2);
-    merge_data(&mut qwen_via_claude, qw2);
-    merge_data(&mut kimi_routed, km2);
-    // Hermes rows going to an existing slice merge into it (MiniMax via the
-    // extra-data path); the rest become their own spend entries.
-    let mut hermes_rest = Vec::new();
-    for (id, name, data) in hermes() {
-        if id == "minimax" {
-            merge_data(&mut minimax_extra, data);
-        } else {
-            hermes_rest.push(build_spend(id, name, data));
-        }
-    }
-    let (opencode_sp, mut aihubmix_data) = opencode();
-    merge_data(&mut aihubmix_data, qwen_via_claude);
-    let aihubmix_sp = build_spend("aihubmix", "AihubMix", aihubmix_data);
-    let (codex_sp, kimi_via_codex) = codex(pi_codex);
-    merge_data(&mut kimi_routed, kimi_via_codex);
-    let (extra_codex_spends, kimi_via_extra_codex) = codex_extra_accounts();
-    merge_data(&mut kimi_routed, kimi_via_extra_codex);
-    let mut list = vec![
-        claude_sp,
-        codex_sp,
-        grok(),
-        opencode_sp,
-        aihubmix_sp,
-        devin(),
-        minimax(minimax_extra),
-        kimi(kimi_routed),
-        qwen(),
-    ];
-    list.extend(extra_claude_spends);
-    list.extend(extra_codex_spends);
-    list.extend(hermes_rest);
-    if let Some(csv) = cursor_csv {
-        list.push(cursor_from_csv(&csv));
-    }
-    // Models nothing prices yet (new slugs ship often): flag the catalog
-    // to look for updates hourly instead of daily.
-    if list.iter().any(|sp| sp.unpriced > 0) {
-        pricing::note_unpriced();
-    }
-    save_persisted_cache();
-    list.into_iter().filter(ProviderSpend::has_data).collect()
 }
