@@ -168,63 +168,6 @@ fn parse_quota(doc: &Value) -> Option<Snapshot> {
     Some(Snapshot::ok(ID, NAME, plan, metrics))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Live diagnostic (ignored): shows what each console/header attempt
-    /// returns so quota-auth failures can be debugged without ever
-    /// printing the key. Run:
-    ///   cargo test qwen_quota_live_probe -- --ignored --nocapture
-    #[tokio::test]
-    #[ignore]
-    async fn qwen_quota_live_probe() {
-        let Some(key) = find_api_key() else {
-            println!("no key found");
-            return;
-        };
-        for console in CONSOLES {
-            for header in ["authorization", "x-api-key", "x-dashscope-api-key"] {
-                let value =
-                    if header == "authorization" { format!("Bearer {key}") } else { key.clone() };
-                let resp = http()
-                    .post(format!("{console}{RPC_QUERY}"))
-                    .header(header, value)
-                    .header("accept", "application/json")
-                    .json(&serde_json::json!({}))
-                    .send()
-                    .await;
-                match resp {
-                    Ok(r) => {
-                        let status = r.status();
-                        let body = r.text().await.unwrap_or_default();
-                        let trimmed: String = body.chars().take(300).collect();
-                        println!("{console} [{header}] -> {status}: {trimmed}");
-                    }
-                    Err(e) => println!("{console} [{header}] -> error: {e}"),
-                }
-            }
-        }
-        // Does the coding endpoint itself expose quota via response headers?
-        for base in
-            ["https://coding-intl.dashscope.aliyuncs.com/v1", "https://coding.dashscope.aliyuncs.com/v1"]
-        {
-            match http().get(format!("{base}/models")).bearer_auth(&key).send().await {
-                Ok(r) => {
-                    println!("{base}/models -> {}", r.status());
-                    for (name, value) in r.headers() {
-                        let n = name.as_str().to_ascii_lowercase();
-                        if n.contains("limit") || n.contains("quota") || n.contains("remain") || n.contains("usage") {
-                            println!("  header {n}: {:?}", value);
-                        }
-                    }
-                }
-                Err(e) => println!("{base}/models -> error: {e}"),
-            }
-        }
-    }
-}
-
 /// Fallback card from the CLI's own per-request ledger: request and token
 /// counts for today and the current month. No percentages — the plan's
 /// limits aren't knowable locally.
@@ -263,4 +206,62 @@ fn local_ledger() -> Option<Snapshot> {
             Metric::text("Requests this month", format!("{mon_req}")),
         ],
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Live diagnostic (ignored): shows what each console/header attempt
+    /// returns so quota-auth failures can be debugged without ever
+    /// printing the key. Run:
+    ///   cargo test qwen_quota_live_probe -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn qwen_quota_live_probe() {
+        let Some(key) = find_api_key() else {
+            println!("no key found");
+            return;
+        };
+        for console in CONSOLES {
+            for header in ["authorization", "x-api-key", "x-dashscope-api-key"] {
+                let value =
+                    if header == "authorization" { format!("Bearer {key}") } else { key.clone() };
+                let resp = http()
+                    .post(format!("{console}{RPC_QUERY}"))
+                    .header(header, value)
+                    .header("accept", "application/json")
+                    .json(&serde_json::json!({}))
+                    .send()
+                    .await;
+                match resp {
+                    Ok(r) => {
+                        let status = r.status();
+                        let body = r.text().await.unwrap_or_default();
+                        let trimmed: String = body.chars().take(200).collect();
+                        println!("{console} [{header}] -> {status}: {trimmed}");
+                    }
+                    Err(e) => println!("{console} [{header}] -> error: {e}"),
+                }
+            }
+        }
+        // Does the coding endpoint itself expose quota via response headers?
+        for base in
+            ["https://coding-intl.dashscope.aliyuncs.com/v1", "https://coding.dashscope.aliyuncs.com/v1"]
+        {
+            match http().get(format!("{base}/models")).bearer_auth(&key).send().await {
+                Ok(r) => {
+                    println!("{base}/models -> {}", r.status());
+                    for (name, value) in r.headers() {
+                        let n = name.as_str().to_ascii_lowercase();
+                        if n.contains("limit") || n.contains("quota") || n.contains("remain") || n.contains("usage") {
+                            let v: String = format!("{value:?}").chars().take(200).collect();
+                            println!("  header {n}: {v}");
+                        }
+                    }
+                }
+                Err(e) => println!("{base}/models -> error: {e}"),
+            }
+        }
+    }
 }

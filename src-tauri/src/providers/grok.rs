@@ -12,9 +12,30 @@ const EMPTY_GRPC_WEB_MESSAGE: [u8; 5] = [0, 0, 0, 0, 0];
 const MAX_RESET_CREDITS_BODY: usize = 64 * 1024;
 const PROTO_TIMESTAMP_MIN_SECONDS: i64 = -62_135_596_800;
 const PROTO_TIMESTAMP_MAX_SECONDS: i64 = 253_402_300_799;
+const MAX_AUTH_BYTES: u64 = 64 * 1024;
+const DEFAULT_OIDC_ISSUER: &str = "https://auth.x.ai";
 
 fn auth_path() -> PathBuf {
     dirs::home_dir().unwrap_or_default().join(".grok").join("auth.json")
+}
+
+/// The refresh token is POSTed to `{issuer}/oauth2/token` — a planted
+/// oidc_issuer in auth.json would exfiltrate it. Trust only the vendor
+/// host over https; anything else skips the refresh.
+fn trusted_oidc_issuer(raw: Option<&str>) -> Option<String> {
+    let issuer = raw.unwrap_or(DEFAULT_OIDC_ISSUER).trim_end_matches('/');
+    match reqwest::Url::parse(issuer) {
+        Ok(u) if u.scheme() == "https" && u.host_str() == Some("auth.x.ai") => {
+            Some(issuer.to_string())
+        }
+        _ => None,
+    }
+}
+
+fn is_regular_file(path: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .ok()
+        .is_some_and(|m| m.is_file() && !m.file_type().is_symlink())
 }
 
 pub async fn snapshot() -> Snapshot {
@@ -33,7 +54,7 @@ async fn fetch() -> Result<Snapshot, String> {
             "Grok CLI sign-in not found (~\\.grok\\auth.json).",
         ));
     }
-    let raw = std::fs::read_to_string(&path).map_err(|e| format!("read auth.json: {e}"))?;
+    let raw = super::read_small_text(&path, MAX_AUTH_BYTES, "auth.json")?;
     let mut doc: Value = serde_json::from_str(&raw).map_err(|e| format!("parse auth.json: {e}"))?;
 
     // auth.json maps "<issuer>::<account-uuid>" to the account entry.
@@ -53,12 +74,7 @@ async fn fetch() -> Result<Snapshot, String> {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    let issuer = entry
-        .get("oidc_issuer")
-        .and_then(Value::as_str)
-        .unwrap_or("https://auth.x.ai")
-        .trim_end_matches('/')
-        .to_string();
+    let issuer = trusted_oidc_issuer(entry.get("oidc_issuer").and_then(Value::as_str));
     let client_id = entry
         .get("oidc_client_id")
         .and_then(Value::as_str)
@@ -74,6 +90,20 @@ async fn fetch() -> Result<Snapshot, String> {
     if token.is_empty() || expired {
         if refresh_token.is_empty() || client_id.is_empty() {
             return Err("Grok token expired — run the Grok CLI once to sign in again".into());
+        }
+        let Some(issuer) = issuer else {
+            eprintln!(
+                "[pane] grok: auth.json oidc_issuer is not {DEFAULT_OIDC_ISSUER} — skipping token refresh"
+            );
+            return Err("Grok token expired — run the Grok CLI once to sign in again".into());
+        };
+        // Refresh rotates the CLI's token pair. If we can't write it back
+        // (a planted symlink), don't call the token endpoint — that would
+        // sign the CLI out from under the user.
+        if !is_regular_file(&path) {
+            return Err(
+                "Grok credentials are not a regular file — run the Grok CLI once to sign in again".into(),
+            );
         }
         let form = [
             ("grant_type", "refresh_token"),

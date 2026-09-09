@@ -7,6 +7,16 @@ const NAME: &str = "Devin";
 // Mirrors the Mac app's DevinUsageClient — the server expects an IDE-shaped
 // client identity and the Connect RPC protocol header.
 const COMPAT_VERSION: &str = "1.108.2";
+/// The vendor default — the only host that may receive the API key.
+const DEFAULT_SERVER_URL: &str = "https://server.codeium.com";
+
+/// The API key rides every status request; a planted api_server_url in
+/// credentials.toml would exfiltrate it. Vendor host over https only.
+fn is_trusted_server(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .map(|u| u.scheme() == "https" && u.host_str() == Some("server.codeium.com"))
+        .unwrap_or(false)
+}
 
 fn credentials_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
@@ -119,13 +129,12 @@ mod tests {
             .unwrap();
         println!("status: {}", resp.status());
         let body: Value = resp.json().await.unwrap();
-        println!(
-            "planStatus: {}",
-            serde_json::to_string_pretty(
-                body.pointer("/userStatus/planStatus").unwrap_or(&Value::Null)
-            )
-            .unwrap()
-        );
+        let dump = serde_json::to_string_pretty(
+            body.pointer("/userStatus/planStatus").unwrap_or(&Value::Null),
+        )
+        .unwrap();
+        let dump: String = dump.chars().take(200).collect();
+        println!("planStatus: {dump}");
     }
 }
 
@@ -148,9 +157,17 @@ async fn fetch() -> Result<Snapshot, String> {
     let server = doc
         .get("api_server_url")
         .and_then(toml::Value::as_str)
-        .unwrap_or("https://server.codeium.com")
-        .trim_end_matches('/')
-        .to_string();
+        .unwrap_or(DEFAULT_SERVER_URL)
+        .trim_end_matches('/');
+    if !is_trusted_server(server) {
+        eprintln!(
+            "[pane] devin: credentials.toml api_server_url is not {DEFAULT_SERVER_URL} — skipping status request"
+        );
+        return Err(
+            "Devin credentials point at an unexpected server — sign in with the Devin CLI again".into(),
+        );
+    }
+    let server = server.to_string();
 
     let resp = http()
         .post(format!(
@@ -334,13 +351,18 @@ pub fn collect_usage_events() -> Vec<UsageEvent> {
     }
 }
 
+/// sessions.db keeps one row per message per branch and can be GBs; cap
+/// the scan so a bloated db can't pin a refresh. Real data is far below.
+const MAX_MESSAGE_ROWS: usize = 2_000_000;
+
 fn read_usage_events(db: &std::path::Path) -> Result<Vec<UsageEvent>, String> {
     let conn = super::open_readonly_sqlite(db)?;
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT m.session_id, m.chat_message, m.created_at, s.model
-             FROM message_nodes m JOIN sessions s ON s.id = m.session_id",
-        )
+             FROM message_nodes m JOIN sessions s ON s.id = m.session_id
+             LIMIT {MAX_MESSAGE_ROWS}"
+        ))
         .map_err(|e| format!("query messages: {e}"))?;
     let rows = stmt
         .query_map([], |row| {
@@ -355,7 +377,9 @@ fn read_usage_events(db: &std::path::Path) -> Result<Vec<UsageEvent>, String> {
 
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
+    let mut scanned = 0usize;
     for row in rows.flatten() {
+        scanned += 1;
         let (session_id, chat_message, node_created_s, model) = row;
         let Ok(msg) = serde_json::from_str::<Value>(&chat_message) else { continue };
         if msg.get("role").and_then(Value::as_str) != Some("assistant") {
@@ -398,6 +422,11 @@ fn read_usage_events(db: &std::path::Path) -> Result<Vec<UsageEvent>, String> {
             cache_read: num("cache_read_tokens"),
             cache_write: num("cache_creation_tokens"),
         });
+    }
+    if scanned >= MAX_MESSAGE_ROWS {
+        eprintln!(
+            "[pane] devin: sessions.db exceeds {MAX_MESSAGE_ROWS} rows — usage beyond the cap is not counted"
+        );
     }
     Ok(out)
 }

@@ -1,9 +1,21 @@
-use super::{http, Metric, Snapshot};
+use super::{Metric, Snapshot};
 use serde_json::Value;
 
 const ID: &str = "ollama";
 const NAME: &str = "Ollama";
 const BASE: &str = "http://127.0.0.1:11434";
+
+/// Plaintext loopback only, so it must never ride a proxy (env or
+/// configured) — a dedicated no-proxy client rather than the shared one.
+fn client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent("Pane-Windows/0.3")
+        .timeout(std::time::Duration::from_secs(20))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .no_proxy()
+        .build()
+        .expect("failed to build http client")
+}
 
 pub async fn snapshot() -> Snapshot {
     match fetch().await {
@@ -14,7 +26,7 @@ pub async fn snapshot() -> Snapshot {
 
 async fn fetch() -> Result<Snapshot, String> {
     // No credentials — either the local server answers or it doesn't.
-    let version = match http().get(format!("{BASE}/api/version")).send().await {
+    let version = match client().get(format!("{BASE}/api/version")).send().await {
         Ok(resp) if resp.status().is_success() => resp
             .json::<Value>()
             .await
@@ -31,7 +43,7 @@ async fn fetch() -> Result<Snapshot, String> {
 
     let mut metrics = Vec::new();
 
-    if let Ok(resp) = http().get(format!("{BASE}/api/tags")).send().await {
+    if let Ok(resp) = client().get(format!("{BASE}/api/tags")).send().await {
         if let Ok(doc) = resp.json::<Value>().await {
             let models = doc.get("models").and_then(Value::as_array).cloned().unwrap_or_default();
             let bytes: u64 =
@@ -43,7 +55,7 @@ async fn fetch() -> Result<Snapshot, String> {
         }
     }
 
-    if let Ok(resp) = http().get(format!("{BASE}/api/ps")).send().await {
+    if let Ok(resp) = client().get(format!("{BASE}/api/ps")).send().await {
         if let Ok(doc) = resp.json::<Value>().await {
             let names: Vec<String> = doc
                 .get("models")
