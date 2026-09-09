@@ -8,6 +8,32 @@ export type Locale = "en" | "zh" | "ru";
 type Dict = Record<string, string>;
 
 const en: Dict = {
+  "settings.sub2api": "Sub2API sites",
+  "settings.sub2apiNote": "Add Sub2API sites and keys without a remote check. Keys stay on this PC (%APPDATA%\\Pane\\sub2api.json) and are sent only to that site's /v1/usage. Shared wallets and subscriptions are shown separately for each key.",
+  "settings.sub2apiFamily": "Show Sub2API cards",
+  "settings.siteInvalidUrl": "Invalid site URL",
+  "footer.sub2apiFailed": "Sub2API: {err}",
+  "metric.primaryQuota": "Current primary metric",
+  "metric.totalQuota": "Total quota",
+  "metric.remainingAmount": "Remaining amount",
+  "metric.type": "Type",
+  "metric.status": "Status",
+  "metric.subscription": "Subscription",
+  "metric.todayRequests": "Today's requests (key)",
+  "metric.todayTokens": "Today's tokens (key)",
+  "metric.todayActualCost": "Today's actual cost (key)",
+  "metric.totalRequests": "Total requests (key)",
+  "metric.totalTokens": "Total tokens (key)",
+  "metric.totalActualCost": "Total actual cost (key)",
+  "detail.unknown": "Unknown",
+  "detail.expired": "Expired",
+  "detail.exhausted": "Quota exhausted",
+  "detail.disabled": "Disabled",
+  "detail.overdue": "Overdue",
+  "detail.wallet": "Wallet",
+  "detail.keyQuota": "Key quota",
+  "detail.subscription": "Subscription",
+  "detail.unknownType": "Unknown type",
   "sidebar.theme": "Light / dark mode",
   "sidebar.themeToDark": "Switch to dark mode",
   "sidebar.themeToLight": "Switch to light mode",
@@ -355,6 +381,32 @@ const en: Dict = {
 };
 
 const zh: Dict = {
+  "settings.sub2api": "Sub2API 站点",
+  "settings.sub2apiNote": "添加 Sub2API 站点和密钥，无需远程验证。密钥只保存在本机（%APPDATA%\\Pane\\sub2api.json），仅发送至对应站点的 /v1/usage。共享钱包和订阅按 Key 分别展示，不汇总。",
+  "settings.sub2apiFamily": "显示 Sub2API 卡片",
+  "settings.siteInvalidUrl": "站点地址格式无效",
+  "footer.sub2apiFailed": "Sub2API：{err}",
+  "metric.primaryQuota": "当前主指标",
+  "metric.totalQuota": "总额度",
+  "metric.remainingAmount": "剩余金额",
+  "metric.type": "类型",
+  "metric.status": "状态",
+  "metric.subscription": "订阅",
+  "metric.todayRequests": "今日请求数（Key）",
+  "metric.todayTokens": "今日 Token 数（Key）",
+  "metric.todayActualCost": "今日实际费用（Key）",
+  "metric.totalRequests": "累计请求数（Key）",
+  "metric.totalTokens": "累计 Token 数（Key）",
+  "metric.totalActualCost": "累计实际费用（Key）",
+  "detail.unknown": "未知",
+  "detail.expired": "已过期",
+  "detail.exhausted": "额度已耗尽",
+  "detail.disabled": "已禁用",
+  "detail.overdue": "欠费",
+  "detail.wallet": "钱包",
+  "detail.keyQuota": "Key 限额",
+  "detail.subscription": "订阅",
+  "detail.unknownType": "类型未知",
   "sidebar.theme": "浅色 / 深色模式",
   "sidebar.themeToDark": "切换到深色模式",
   "sidebar.themeToLight": "切换到浅色模式",
@@ -1003,6 +1055,17 @@ const ru: Dict = {
 };
 
 const METRIC_KEYS: Record<string, string> = {
+  "Total quota": "metric.totalQuota",
+  "Remaining amount": "metric.remainingAmount",
+  Type: "metric.type",
+  Status: "metric.status",
+  Subscription: "metric.subscription",
+  "Today requests": "metric.todayRequests",
+  "Today tokens": "metric.todayTokens",
+  "Today actual cost": "metric.todayActualCost",
+  "Total requests": "metric.totalRequests",
+  "Total tokens": "metric.totalTokens",
+  "Total actual cost": "metric.totalActualCost",
   Session: "metric.session",
   Weekly: "metric.weekly",
   Monthly: "metric.monthly",
@@ -1115,6 +1178,18 @@ export function displayLinkLabel(label: string): string {
 /// Translate the known shapes at paint time so layout keys stay English.
 export function displayMetricDetail(text: string): string {
   if (getLocale() === "en" || !text) return text;
+  const reset = text.match(/^(.*) · Resets (\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC)$/);
+  if (reset) return `${displayMetricDetail(reset[1])} · ${t("card.resetsAt", { when: reset[2] })}`;
+  const states: Record<string, string> = {
+    Unknown: "detail.unknown", Expired: "detail.expired", "Quota exhausted": "detail.exhausted",
+    Disabled: "detail.disabled", Overdue: "detail.overdue", Wallet: "detail.wallet",
+    "Key quota": "detail.keyQuota", Subscription: "detail.subscription", "Unknown type": "detail.unknownType",
+  };
+  if (states[text]) return t(states[text]);
+  const stateParts = text.split(" · ");
+  if (stateParts.length > 1 && stateParts.every((part) => states[part])) {
+    return stateParts.map((part) => t(states[part])).join(" · ");
+  }
   const money = "\\$[\\d,]+(?:\\.\\d+)?K?";
   const num = "[\\d,]+(?:\\.\\d+)?";
   let m = text.match(new RegExp(`^(${money}) of (${money}) left(?: · (\\d+) credits)?$`, "i"));

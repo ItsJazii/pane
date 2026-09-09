@@ -8,8 +8,9 @@ code.
 
 Ground rules that apply to every provider:
 
-- A credential is only ever sent to **its own vendor's API**, over HTTPS
-  (One/New API sites may use `http://` only with private, loopback, or
+- A credential is only ever sent to **its own vendor's API or its explicitly
+  configured One/New API or Sub2API origin**, over HTTPS
+  (One/New API and Sub2API sites may use `http://` only with private, loopback, or
   link-local IP addresses).
 - If no credential is found, the provider shows a "connect me" hint (new
   installs auto-disable everything undetected except Claude and Codex).
@@ -390,3 +391,78 @@ Provider request formats were researched from two MIT-licensed macOS
 projects: [robinebers/openusage](https://github.com/robinebers/openusage)
 and [steipete/CodexBar](https://github.com/steipete/CodexBar) — both
 credited in [LICENSE](../LICENSE).
+## Sub2API
+
+Add a site in Settings → Sub2API, then paste an API key created in that
+site's console. Each site can have several keys; each key has its own card
+with a stable `sub2api@<key-id>` identity. Empty sites remain in Settings.
+Saving validates the address and input locally, so an unavailable site or
+an unauthorized key can still be saved and corrected later.
+
+Pane stores keys in `%APPDATA%\Pane\sub2api.json`, a versioned document
+written atomically with an owner-only Windows DACL (Unix `0600`). Damaged
+or unreadable storage is reported rather than replaced with an empty file.
+Saved keys and key fragments are never returned to Settings. The only
+remote request is `GET <site>/v1/usage` with that key as a Bearer token;
+there is no status probe, dashboard JWT, billing fallback, model request,
+or remote icon download. Requests use Pane's proxy and timeout settings,
+a bounded response body and concurrency, and never follow redirects.
+
+Addresses accept an HTTPS origin or an origin ending in `/v1`; HTTP is
+limited to private, loopback, and link-local IP literals. Userinfo, query
+strings, fragments, and other paths are rejected. Names default to the
+hostname and stable `Key N` labels. Duplicate normalized sites, keys within
+a site, and nonempty labels within a site are rejected.
+
+The response selects the card's mode on every refresh:
+
+- **Key quota:** total USD allowance and configured 5h, 1d, 7d windows,
+  including valid server reset times and a separate key expiry/status.
+  Window-only keys work without a total quota. Actual amounts remain
+  visible when usage exceeds the limit; bars stop at 100%.
+- **Subscription:** plan and configured daily, weekly, monthly USD
+  allowances, plus separate subscription expiry. Explicit unlimited
+  subscriptions show Unlimited. Missing periods are not zero quotas.
+- **Wallet:** actual balance, including zero and negative debt. No
+  percentage is invented from a historical maximum.
+
+Main information stays visible; expand the card for today's and total
+requests, tokens, and **actual_cost**. Missing or invalid fields display
+Unknown; `cost` never substitutes for actual cost. Subscription allowances
+belong to the group subscription and wallet balances to the account,
+whereas usage summaries describe the current key. Equal values across
+keys remain separate and are never added, deduplicated, or included in
+Total Spend. No reset time is inferred from calendar boundaries, window
+starts, expiry, or usage statistics.
+
+Legacy responses without `mode` can use explicit quota, subscription, or
+wallet structure. Ambiguous structures or a lone `remaining` show Unknown
+type and a readable remaining amount when available, without guessing a
+currency. An unknown explicit mode does not invoke legacy detection.
+Unrecognizable responses show a safe error. First refresh failures show
+an error card; subsequent failures retain the same key/context's last
+successful snapshot with a stale warning. Partial successful responses do
+not copy missing fields from older data. Expired or exhausted keys can
+still refresh.
+
+Rename sites or keys without losing card identity, ordering or pins. Leave
+the edited key blank to keep its secret. Rotating a key clears its old
+usage; changing a site's address requires confirmation for the affected
+keys and clears their usage. Delete a key to remove its cached data and
+preferences, or delete a site to remove all its keys. Deleting the last
+key keeps the empty site. Family and per-key enable switches are separate;
+disabling the family preserves each key's choice. The first configured key
+enables the family; subsequent additions respect a disabled family.
+
+The tray automatically selects the valid allowance with the highest used
+percentage, with ties resolved in the standard order listed above. Its
+tooltip names that allowance. Wallets show balance text, without a low
+balance alert. Existing quota notification settings apply independently
+per key and allowance; stale, unknown, and disabled results produce no
+new quota alerts. Dashboard links open the configured site root.
+
+Sub2API adds no telemetry: its family, dynamic identities, site/key counts,
+addresses, labels, values and raw errors are excluded. The local HTTP API
+publishes only display data by snapshot ID, with current error/stale state;
+it excludes origins, dashboard links, secrets and raw responses. See
+[local-http-api.md](local-http-api.md).

@@ -21,7 +21,11 @@ vulnerability reporting).
   English; screenshots for anything visual.
 - Provider PRs must follow the house rules: credentials are read only
   from where the official tool already stores them, and are sent only to
-  that vendor's own API. Every new provider gets a section in
+  that vendor's own API. One/New API and Sub2API are explicit manual-key
+  exceptions: users supply the key and site address, keys are stored in
+  owner-only local files, and requests go only to that configured origin.
+  These exceptions do not authorize other credential sources or destinations.
+  Every new provider gets a section in
   [docs/providers.md](docs/providers.md) documenting exactly what it
   reads and calls.
 - No telemetry, analytics SDKs, or "phone home" code — PRs adding any

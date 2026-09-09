@@ -245,6 +245,7 @@ fn onenewapi_rank(o: &Outcome) -> u8 {
 /// first if needed). Returns the `provider_refresh_daily` events for the
 /// *finished* day, ready to send — empty on ordinary same-day ticks.
 fn accumulate(state: &mut State, today: &str, outcomes: &[Outcome]) -> Vec<Value> {
+    state.providers.retain(|id, _| !is_sub2api_field(id));
     let mut finished = Vec::new();
     if state.day != today {
         if !state.day.is_empty() {
@@ -268,7 +269,7 @@ fn accumulate(state: &mut State, today: &str, outcomes: &[Outcome]) -> Vec<Value
     for o in outcomes {
         // "no_credentials" is a setup state, not a refresh result — a card
         // waiting for a sign-in shouldn't read as a daily failure.
-        if o.status == "no_credentials" {
+        if o.status == "no_credentials" || is_sub2api_field(&o.id) {
             continue;
         }
         let entry = state.providers.entry(o.id.clone()).or_default();
@@ -290,20 +291,28 @@ fn daily_active(state: &State, today: &str, snap: &ConfigSnapshot) -> Option<Val
     if state.daily_sent == today {
         return None;
     }
+    let enabled: Vec<_> = snap.enabled_providers.iter().filter(|id| !is_sub2api_field(id)).collect();
+    let starred: Vec<_> = snap.starred_metrics.iter().filter(|id| !is_sub2api_field(id)).collect();
     Some(event(
         "app_daily_active",
         &state.uuid,
         json!({
             "app_version": snap.app_version,
             "os": "windows",
-            "enabled_providers": snap.enabled_providers,
-            "enabled_provider_count": snap.enabled_providers.len(),
-            "starred_metrics": snap.starred_metrics,
+            "enabled_providers": enabled,
+            "enabled_provider_count": enabled.len(),
+            "starred_metrics": starred,
             "appearance": snap.appearance,
             "density": snap.density,
             "refresh_minutes": snap.refresh_minutes,
         }),
     ))
+}
+
+// This manually configured family has no authorization for telemetry, even
+// as a family-level count. Also reject metric IDs before constructing events.
+fn is_sub2api_field(id: &str) -> bool {
+    id == "sub2api" || id.starts_with("sub2api@") || id.starts_with("sub2api:")
 }
 
 fn event(name: &str, uuid: &str, mut props: Value) -> Value {
@@ -371,6 +380,30 @@ async fn send(batch: &[Value]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sub2api_is_excluded_from_daily_counts_and_configuration() {
+        let mut state = State::default();
+        accumulate(&mut state, "2026-09-04", &[
+            outcome("sub2api@private-key", "error", false, Some("private site")),
+            outcome("sub2api", "ok", false, None),
+            outcome("claude", "ok", false, None),
+        ]);
+        let events = accumulate(&mut state, "2026-09-05", &[]);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["properties"]["provider"], "claude");
+        let config = ConfigSnapshot {
+            app_version: "test".into(),
+            enabled_providers: vec!["sub2api".into(), "sub2api@private-key".into(), "claude".into()],
+            starred_metrics: vec!["sub2api@private-key:Total quota".into(), "sub2api:Balance".into(), "claude:Weekly".into()],
+            appearance: "dark".into(), density: "comfortable".into(), refresh_minutes: 5,
+        };
+        let event = daily_active(&state, "2026-09-05", &config).unwrap();
+        assert_eq!(event["properties"]["enabled_provider_count"], 1);
+        assert_eq!(event["properties"]["starred_metrics"], json!(["claude:Weekly"]));
+        assert!(!event.to_string().contains("sub2api"));
+        assert!(!event.to_string().contains("private"));
+    }
 
     fn outcome(id: &str, status: &str, stale: bool, error: Option<&str>) -> Outcome {
         Outcome {

@@ -13,6 +13,7 @@ This is the complete list. Anything not listed here does not happen.
 |---|---|---|
 | Each provider's own API (Anthropic, OpenAI/ChatGPT, cursor.com, GitHub, x.ai, opencode.ai, Devin, MiniMax, OpenRouter, Z.ai, Google, DeepSeek, Moonshot, Kimi Code, ElevenLabs, Codebuff, Kilo, AihubMix, Alibaba Model Studio…) | Every refresh (default 1 min), only for providers you have enabled | That provider's own token/key, exactly as its official tool would send it. Full per-provider detail: [providers.md](providers.md) |
 | User-configured One/New API origins | Status probe when saving/changing a site, plus one unauthenticated backfill if a stored site has no display unit; billing on every refresh for enabled keys | `/api/status` with no key. Subscription + usage send that site's key as Bearer, **only to that origin** — never to Pane servers. |
+| User-configured Sub2API origins | Each enabled key's scheduled refresh; saving only validates local input | `GET /v1/usage` with that key as Bearer, only to its configured origin, without redirects or fallback endpoints. |
 | `raw.githubusercontent.com` (LiteLLM), `models.dev`, `robinebers.github.io` | ~Daily | Anonymous GET for public model price tables (no identifying data) |
 | `trypane.xyz/api/update` (the legacy `pane.jazii.dev/api/update` redirects there; GitHub Releases is the final fallback) | On launch + every 4 h | Anonymous GET for the update manifest, carrying the app version. See "The update check" below for exactly what this counts. |
 | `us.i.posthog.com` | Once per day (unless switched off) | The two anonymous daily-statistic events described in "Anonymous usage statistics" below — a random ID, version, enabled-provider list, and per-provider success/failure counts. Never usage amounts, spend, keys, or error text. |
@@ -87,6 +88,17 @@ identical either way — the only thing that changed is who serves the
 manifest first.
 
 ## What stays on your PC
+
+Sub2API is excluded from anonymous statistics, including family-level
+refresh counts, enabled-provider counts and starred metrics. Site names,
+addresses, key labels/identities/counts, balances, quotas, spend and raw
+error text are not collected. Its manually pasted keys are stored in the
+independent `%APPDATA%\Pane\sub2api.json` document with atomic replacement
+and owner-only permissions. Settings never returns saved keys or fragments.
+Keys are sent only to their configured origin's `GET /v1/usage`, with
+redirects disabled and no fallback endpoints. Its local HTTP entries expose
+safe display information and error/stale state, omitting credentials,
+origins, dashboard URLs and raw responses. See [providers.md](providers.md).
 
 - **Credentials**: read from the files the official CLIs already maintain
   (see [providers.md](providers.md)); pasted API keys live in

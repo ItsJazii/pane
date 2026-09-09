@@ -103,10 +103,10 @@ pub fn save(path: &Path, doc: &StoreFile) -> Result<(), String> {
     atomic_write(path, &raw)
 }
 
-fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
+pub(crate) fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
     let dir = path
         .parent()
-        .ok_or_else(|| "onenewapi.json path is missing a directory".to_string())?;
+        .ok_or_else(|| "credential file path is missing a directory".to_string())?;
     std::fs::create_dir_all(dir).map_err(|e| format!("create config dir: {e}"))?;
     let tmp = dir.join(format!(
         "onenewapi.{}.tmp",
@@ -122,11 +122,11 @@ fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
 fn write_private_then_replace(path: &Path, tmp: &Path, contents: &str) -> Result<(), String> {
     create_empty(tmp)?;
     restrict_owner_only(tmp)?;
-    std::fs::write(tmp, contents).map_err(|e| format!("write onenewapi.json: {e}"))?;
+    std::fs::write(tmp, contents).map_err(|e| format!("write credential file: {e}"))?;
     if path.exists() {
-        replace_existing(tmp, path).map_err(|e| format!("replace onenewapi.json: {e}"))?;
+        replace_existing(tmp, path).map_err(|e| format!("replace credential file: {e}"))?;
     } else {
-        std::fs::rename(tmp, path).map_err(|e| format!("replace onenewapi.json: {e}"))?;
+        std::fs::rename(tmp, path).map_err(|e| format!("replace credential file: {e}"))?;
     }
     restrict_owner_only(path)
 }
@@ -141,18 +141,18 @@ fn create_empty(path: &Path) -> Result<(), String> {
                 .create_new(true)
                 .mode(0o600)
                 .open(path)
-                .map_err(|e| format!("write onenewapi.json: {e}"))?,
+                .map_err(|e| format!("write credential file: {e}"))?,
         );
         Ok(())
     }
     #[cfg(not(unix))]
     {
-        drop(std::fs::File::create_new(path).map_err(|e| format!("write onenewapi.json: {e}"))?);
+        drop(std::fs::File::create_new(path).map_err(|e| format!("write credential file: {e}"))?);
         Ok(())
     }
 }
 
-fn restrict_owner_only(path: &Path) -> Result<(), String> {
+pub(crate) fn restrict_owner_only(path: &Path) -> Result<(), String> {
     #[cfg(windows)]
     {
         let sid = current_user_sid()?;
@@ -162,7 +162,7 @@ fn restrict_owner_only(path: &Path) -> Result<(), String> {
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("restrict onenewapi.json: {e}"))
+            .map_err(|e| format!("restrict credential file: {e}"))
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -207,7 +207,7 @@ fn query_current_user_sid() -> Result<String, String> {
     unsafe {
         let mut token = HANDLE::default();
         OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
-            .map_err(|e| format!("restrict onenewapi.json: {e}"))?;
+            .map_err(|e| format!("restrict credential file: {e}"))?;
         let mut needed = 0u32;
         let _ = GetTokenInformation(token, TokenUser, None, 0, &mut needed);
         let mut buf = vec![0u8; needed as usize];
@@ -219,14 +219,14 @@ fn query_current_user_sid() -> Result<String, String> {
             &mut needed,
         );
         let _ = CloseHandle(token);
-        info.map_err(|e| format!("restrict onenewapi.json: {e}"))?;
+        info.map_err(|e| format!("restrict credential file: {e}"))?;
         let user = &*(buf.as_ptr() as *const TOKEN_USER);
         let mut sid = PWSTR::null();
         ConvertSidToStringSidW(user.User.Sid, &mut sid)
-            .map_err(|e| format!("restrict onenewapi.json: {e}"))?;
+            .map_err(|e| format!("restrict credential file: {e}"))?;
         let _free = LocalAlloc(sid.0.cast());
         sid.to_string()
-            .map_err(|e| format!("restrict onenewapi.json: {e}"))
+            .map_err(|e| format!("restrict credential file: {e}"))
     }
 }
 
@@ -253,15 +253,15 @@ fn set_protected_dacl(path: &Path, sddl: &str) -> Result<(), String> {
             &mut sd,
             None,
         )
-        .map_err(|e| format!("restrict onenewapi.json: {e}"))?;
+        .map_err(|e| format!("restrict credential file: {e}"))?;
         let _free = LocalAlloc(sd.0);
         let mut present = windows::core::BOOL::default();
         let mut defaulted = windows::core::BOOL::default();
         let mut dacl: *mut ACL = std::ptr::null_mut();
         GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted)
-            .map_err(|e| format!("restrict onenewapi.json: {e}"))?;
+            .map_err(|e| format!("restrict credential file: {e}"))?;
         if !present.as_bool() || dacl.is_null() {
-            return Err("restrict onenewapi.json: missing DACL".into());
+            return Err("restrict credential file: missing DACL".into());
         }
         let err = SetNamedSecurityInfoW(
             PCWSTR(path_w.as_ptr()),
@@ -273,7 +273,7 @@ fn set_protected_dacl(path: &Path, sddl: &str) -> Result<(), String> {
             None,
         );
         if err != ERROR_SUCCESS {
-            return Err(format!("restrict onenewapi.json: {err:?}"));
+            return Err(format!("restrict credential file: {err:?}"));
         }
     }
     Ok(())

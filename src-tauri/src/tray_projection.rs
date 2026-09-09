@@ -46,7 +46,7 @@ fn projection_disabled(id: &str, disabled: &[String]) -> bool {
         return true;
     }
     let family = id.split('@').next().unwrap_or(id);
-    family == "onenewapi" && disabled.iter().any(|d| d == "onenewapi")
+    matches!(family, "onenewapi" | "sub2api") && disabled.iter().any(|d| d == family)
 }
 
 pub(crate) fn project_main_tray(
@@ -64,7 +64,7 @@ pub(crate) fn project_main_tray(
                 .find(|snapshot| snapshot.id == *provider_id)
         })
         .filter(|snapshot| {
-            snapshot.status == "ok"
+            snapshot.id.starts_with("sub2api@") || snapshot.status == "ok"
                 && snapshot
                     .metrics
                     .iter()
@@ -76,14 +76,19 @@ pub(crate) fn project_main_tray(
             .iter()
             .find(|snapshot| snapshot.id == pinned.provider)
             .copied()?;
-        let metric = snapshot
+        let metric = if snapshot.id.starts_with("sub2api@") && pinned.label == "Primary quota" {
+            ordinary_metrics(snapshot, None).first().copied()
+        } else { snapshot
             .metrics
             .iter()
-            .find(|metric| metric.kind == "progress" && metric.label == pinned.label)?;
+            .find(|metric| metric.kind == "progress" && metric.label == pinned.label)
+        }?;
         Some((snapshot, metric))
     });
     let auto_provider = visible.iter().copied().find(|snapshot| {
         !ordinary_metrics(snapshot, config.providers.get(&snapshot.id)).is_empty()
+    }).or_else(|| {
+        visible.iter().copied().find(|snapshot| snapshot.id.starts_with("sub2api@"))
     });
     let Some(icon_provider) = active_pinned
         .map(|(snapshot, _)| snapshot)
@@ -109,6 +114,7 @@ pub(crate) fn project_main_tray(
         .copied()
         .filter(|snapshot| {
             Some(snapshot.id.as_str()) == pinned_provider_id
+                || snapshot.id.starts_with("sub2api@")
                 || !ordinary_metrics(snapshot, config.providers.get(&snapshot.id)).is_empty()
         })
         .collect();
@@ -135,7 +141,7 @@ pub(crate) fn project_main_tray(
         } else {
             1
         });
-        if metrics.is_empty() {
+        if metrics.is_empty() && !snapshot.id.starts_with("sub2api@") {
             continue;
         }
         tooltip_lines.push((
@@ -156,7 +162,8 @@ pub(crate) fn project_main_tray(
     let icon_explained = tooltip_lines
         .iter()
         .any(|(provider_id, _)| *provider_id == icon_provider.id.as_str());
-    let show_numbers = !strip_active && icon_explained;
+    let show_numbers = !strip_active && icon_explained
+        && icon_metrics.iter().any(|metric| metric.kind == "progress");
 
     MainTrayProjection {
         icon_mode: if show_numbers {
@@ -167,6 +174,7 @@ pub(crate) fn project_main_tray(
         remaining_percentages: if show_numbers {
             icon_metrics
                 .into_iter()
+                .filter(|metric| metric.kind == "progress")
                 .map(|metric| percent_left(metric) as u32)
                 .collect()
         } else {
@@ -196,6 +204,21 @@ fn ordinary_metrics<'a>(
     snapshot: &'a providers::Snapshot,
     config: Option<&ProviderProjectionConfig>,
 ) -> Vec<&'a providers::Metric> {
+    if snapshot.id.starts_with("sub2api@") {
+        let quota = snapshot.metrics.iter()
+            .filter(|metric| metric.kind == "progress"
+                && metric.used_percent.is_some_and(|used| used.is_finite() && used >= 0.0))
+            .fold(None, |best: Option<&providers::Metric>, next| {
+                match best {
+                    Some(current) if current.used_percent >= next.used_percent => Some(current),
+                    _ => Some(next),
+                }
+            });
+        return quota.or_else(|| ["Balance", "Remaining amount", "Total quota", "5h", "1d", "7d",
+                "Daily", "Weekly", "Monthly", "Subscription", "Type", "Status"]
+            .iter().find_map(|label| snapshot.metrics.iter().find(|metric| metric.label == *label)))
+            .into_iter().collect();
+    }
     let hidden = config
         .map(|value| value.hidden.as_slice())
         .unwrap_or_default();
@@ -238,8 +261,16 @@ fn format_provider_line(
     };
     let mut metrics = metrics.iter();
     let Some(first) = metrics.next() else {
-        return name;
+        return match snapshot.error.as_deref() {
+            Some(error) if snapshot.id.starts_with("sub2api@") => format!("{name}: {error}"),
+            _ => name,
+        };
     };
+    if first.kind != "progress" {
+        let line = format!("{name} {}: {}", crate::i18n::metric_label(locale, &first.label),
+            crate::i18n::metric_label(locale, first.value.as_deref().unwrap_or("Unknown")));
+        return append_sub2api_status(line, snapshot, &first.label, locale);
+    }
     let mut line = crate::i18n::pct_left(locale, &name, &first.label, percent_left(first));
     let resolved = crate::i18n::resolved_locale(locale);
     let separator = if resolved == "zh" { "，" } else { ", " };
@@ -254,6 +285,21 @@ fn format_provider_line(
         };
         line.push_str(separator);
         line.push_str(&fragment);
+    }
+    append_sub2api_status(line, snapshot, &first.label, locale)
+}
+
+fn append_sub2api_status(mut line: String, snapshot: &providers::Snapshot, primary: &str, locale: &serde_json::Value) -> String {
+    if snapshot.id.starts_with("sub2api@") {
+        for metric in &snapshot.metrics {
+            if matches!(metric.label.as_str(), "Type" | "Status") && metric.label != primary {
+                if let Some(value) = &metric.value {
+                    let shown = value.split(" · ").map(|part| crate::i18n::metric_label(locale, part))
+                        .collect::<Vec<_>>().join(" · ");
+                    line.push_str(&format!(" · {shown}"));
+                }
+            }
+        }
     }
     line
 }
@@ -295,6 +341,114 @@ mod tests {
             pinned: None,
             locale: "en".into(),
         }
+    }
+
+    #[test]
+    fn sub2api_failed_card_does_not_hide_later_quota_numbers() {
+        for next_id in ["sub2api@healthy", "codex"] {
+            let failed = Snapshot::error("sub2api@failed", "Failed", "HTTP 401".into());
+            let healthy = snapshot(next_id, "Healthy", vec![progress("Weekly", 25.0)]);
+            let cfg = config(&["sub2api@failed", next_id]);
+
+            let result = project_main_tray(&[failed, healthy], &cfg, false);
+
+            assert_eq!(result.icon_mode, MainTrayIconMode::Numbers);
+            assert_eq!(result.remaining_percentages, vec![75]);
+            assert!(result.tooltip.contains("Healthy Weekly: 75% left"));
+            assert!(result.tooltip.contains("Failed: HTTP 401"));
+        }
+    }
+
+    #[test]
+    fn sub2api_failed_cards_keep_errors_without_selecting_disabled_quotas() {
+        let snapshots = vec![
+            Snapshot::error("sub2api@first", "First", "HTTP 401".into()),
+            Snapshot::error("sub2api@second", "Second", "HTTP 403".into()),
+            snapshot("codex", "Codex", vec![progress("Weekly", 25.0)]),
+        ];
+        let mut cfg = config(&["sub2api@first", "sub2api@second", "codex"]);
+        cfg.disabled.push("codex".into());
+        let result = project_main_tray(&snapshots, &cfg, false);
+        assert_eq!(result.icon_mode, MainTrayIconMode::Logo);
+        assert!(result.remaining_percentages.is_empty());
+        assert_eq!(result.tooltip, "Pane\nFirst: HTTP 401\nSecond: HTTP 403");
+        cfg.disabled.push("sub2api@first".into());
+        assert_eq!(project_main_tray(&snapshots, &cfg, false).tooltip, "Pane\nSecond: HTTP 403");
+        cfg.disabled.push("sub2api".into());
+        assert_eq!(project_main_tray(&snapshots, &cfg, false).tooltip, "Pane");
+    }
+
+    #[test]
+    fn sub2api_stale_quota_and_text_keep_their_auto_priority() {
+        let mut first = snapshot("sub2api@first", "First", vec![progress("5h", 60.0)]);
+        first.stale = true;
+        first.error = Some("HTTP 503".into());
+        let healthy = snapshot("codex", "Codex", vec![progress("Weekly", 25.0)]);
+        let cfg = config(&["sub2api@first", "codex"]);
+        let result = project_main_tray(&[first.clone(), healthy.clone()], &cfg, false);
+        assert_eq!(result.remaining_percentages, vec![40]);
+        assert!(result.tooltip.contains("⚠ First 5h: 40% left"));
+
+        first.metrics = vec![Metric::text("Balance", "$5.00".into())];
+        let result = project_main_tray(&[first, healthy], &cfg, false);
+        assert_eq!(result.icon_mode, MainTrayIconMode::Logo);
+        assert!(result.remaining_percentages.is_empty());
+        assert!(result.tooltip.contains("⚠ First Balance: $5.00"));
+    }
+
+    #[test]
+    fn sub2api_tray_uses_tightest_allowance_even_when_details_are_hidden() {
+        let snap = snapshot("sub2api@tray-quota", "Site · Key", vec![
+            progress("Total quota", 20.0), progress("5h", 95.0), progress("1d", 95.0),
+        ]);
+        let mut cfg = config(&["sub2api@tray-quota"]);
+        let mut layout = provider(&["1d", "Total quota", "5h"]);
+        layout.hidden.push("5h".into());
+        cfg.providers.insert(snap.id.clone(), layout);
+        let projected = project_main_tray(&[snap.clone()], &cfg, false);
+        assert_eq!(projected.remaining_percentages, vec![5]);
+        assert_eq!(projected.tooltip, "Pane\nSite · Key 5h: 5% left");
+        cfg.disabled.push("sub2api".into());
+        assert_eq!(project_main_tray(&[snap], &cfg, false).tooltip, "Pane");
+    }
+
+    #[test]
+    fn sub2api_wallet_and_unknown_text_remain_visible_without_a_percentage() {
+        let mut wallet = snapshot("sub2api@tray-wallet", "Wallet", vec![
+            Metric::text("Balance", "$-2.50".into()),
+            Metric::text("Status", "Overdue".into()),
+        ]);
+        wallet.stale = true;
+        let mut cfg = config(&["sub2api@tray-wallet"]);
+        cfg.pinned = Some(PinnedMetric { provider: wallet.id.clone(), label: "Primary quota".into() });
+        let result = project_main_tray(&[wallet], &cfg, false);
+        assert_eq!(result.icon_mode, MainTrayIconMode::Logo);
+        assert!(result.remaining_percentages.is_empty());
+        assert_eq!(result.tooltip, "Pane\n⚠ Wallet Balance: $-2.50 · Overdue");
+        let unknown = snapshot("sub2api@tray-wallet", "Wallet", vec![
+            Metric::text("Type", "Unknown type".into()),
+            Metric::text("Remaining amount", "15.00".into()),
+        ]);
+        let result = project_main_tray(&[unknown], &cfg, false);
+        assert!(result.tooltip.contains("Remaining amount: 15.00"));
+        assert!(result.tooltip.contains("Unknown type"));
+        let error = Snapshot::error("sub2api@tray-wallet", "Wallet", "HTTP 401".into());
+        assert!(project_main_tray(&[error], &cfg, false).tooltip.contains("HTTP 401"));
+    }
+
+    #[test]
+    fn sub2api_tray_keeps_restriction_status_and_partial_allowance_text() {
+        let expired = snapshot("sub2api@tray-status", "Key", vec![
+            progress("Total quota", 20.0), Metric::text("Status", "Expired".into()),
+        ]);
+        let cfg = config(&["sub2api@tray-status"]);
+        assert!(project_main_tray(&[expired], &cfg, false).tooltip.contains("Expired"));
+        let partial = snapshot("sub2api@tray-status", "Key", vec![
+            Metric::text("Total quota", "$5.00 of Unknown".into()),
+        ]);
+        let projected = project_main_tray(&[partial], &cfg, false);
+        assert!(projected.remaining_percentages.is_empty());
+        assert!(projected.tooltip.contains("$5.00 of Unknown"));
     }
 
     #[test]

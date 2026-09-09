@@ -26,13 +26,53 @@ pub fn publish(snapshots: &[Snapshot]) {
     }
 }
 
+pub(crate) fn publish_restored_sub2api(snapshots: &[Snapshot]) {
+    let fetched_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    if let Ok(mut published) = latest().lock() {
+        if let Some(values) = published.as_array_mut() {
+            values.retain(|value| !value["providerId"].as_str().is_some_and(|id| id.starts_with("sub2api@")));
+            values.extend(snapshots.iter().filter(|snapshot| snapshot.id.starts_with("sub2api@"))
+                .map(|snapshot| provider_json(snapshot, &fetched_at)));
+        }
+    }
+}
+
+/// Keep the already-published view in sync with successful local mutations.
+pub(crate) fn forget_snapshots(ids: &[String]) {
+    retain_published(|id| !ids.iter().any(|removed| removed == id));
+}
+
+pub(crate) fn forget_disabled_snapshots(disabled: &[String]) {
+    retain_published(|id| !crate::card_is_disabled(id, disabled));
+}
+
+fn retain_published(keep: impl Fn(&str) -> bool) {
+    if let Ok(mut published) = latest().lock() {
+        if let Some(snapshots) = published.as_array_mut() {
+            snapshots.retain(|snapshot| snapshot["providerId"].as_str().is_some_and(&keep));
+        }
+    }
+}
+
+pub(crate) fn rename_snapshots(names: &std::collections::HashMap<String, String>) {
+    if let Ok(mut published) = latest().lock() {
+        if let Some(snapshots) = published.as_array_mut() {
+            for snapshot in snapshots {
+                if let Some(name) = snapshot["providerId"].as_str().and_then(|id| names.get(id)) {
+                    snapshot["displayName"] = json!(name);
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn provider_json(s: &Snapshot, fetched_at: &str) -> Value {
     let lines: Vec<Value> = s
         .metrics
         .iter()
         .map(|m| {
             if m.kind == "progress" {
-                json!({
+                let mut line = json!({
                     "type": "progress",
                     "label": m.label,
                     "used": m.used_percent,
@@ -41,7 +81,12 @@ pub(crate) fn provider_json(s: &Snapshot, fetched_at: &str) -> Value {
                     "resetsAt": m.resets_at.map(iso8601),
                     "periodDurationMs": m.period_ms,
                     "color": Value::Null,
-                })
+                });
+                if s.id.starts_with("sub2api@") {
+                    line["value"] = json!(m.value);
+                    line["subtitle"] = json!(m.detail);
+                }
+                line
             } else {
                 json!({
                     "type": "text",
@@ -54,13 +99,20 @@ pub(crate) fn provider_json(s: &Snapshot, fetched_at: &str) -> Value {
             }
         })
         .collect();
-    json!({
+    let mut output = json!({
         "providerId": s.id,
         "displayName": s.name,
         "plan": s.plan,
         "lines": lines,
         "fetchedAt": fetched_at,
-    })
+    });
+    if s.id.starts_with("sub2api@") {
+        output["status"] = json!(s.status);
+        output["stale"] = json!(s.stale);
+        output["error"] = json!(s.error);
+        output["warning"] = json!(s.warning);
+    }
+    output
 }
 
 fn iso8601(epoch_ms: i64) -> String {
@@ -157,6 +209,24 @@ mod tests {
     use super::{host_ok, provider_json, publish, route};
     use crate::providers::{Metric, Snapshot};
 
+    #[test]
+    fn sub2api_public_projection_preserves_stale_and_display_amounts_only() {
+        let mut snap = Snapshot::ok("sub2api@http-state", "Site · Key", None,
+            vec![Metric::progress("5h", 25.0, Some("$5.00 / $20.00".into()))]);
+        snap.dashboard_url = Some("https://private.example.com".into());
+        snap.stale = true;
+        snap.warning = Some("HTTP 401".into());
+        let output = provider_json(&snap, "2026-09-05T00:00:00Z");
+        assert_eq!(output["stale"], true);
+        assert_eq!(output["warning"], "HTTP 401");
+        assert_eq!(output["status"], "ok");
+        assert_eq!(output["lines"][0]["subtitle"], "$5.00 / $20.00");
+        assert!(!output.to_string().contains("private.example.com"));
+        let error = Snapshot::error("sub2api@http-state", "Site · Key", "HTTP 403".into());
+        assert_eq!(provider_json(&error, "now")["error"], "HTTP 403");
+        assert!(provider_json(&onenewapi_snap(), "now").get("status").is_none());
+    }
+
     fn onenewapi_snap() -> Snapshot {
         let mut snap = Snapshot::ok(
             "onenewapi@abc",
@@ -201,6 +271,7 @@ mod tests {
 
     #[test]
     fn get_by_id_uses_full_snapshot_id() {
+        let _guard = route_test_lock();
         publish(&[onenewapi_snap()]);
         let (status, body) = route(&tiny_http::Method::Get, "/v1/usage/onenewapi@abc");
         assert_eq!(status, 200);
@@ -212,6 +283,39 @@ mod tests {
 
         let (missing, _) = route(&tiny_http::Method::Get, "/v1/usage/onenewapi");
         assert_eq!(missing, 404);
+    }
+
+    fn route_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap()
+    }
+
+    #[test]
+    fn sub2api_routes_follow_publish_rename_disable_and_context_removal() {
+        let _guard = route_test_lock();
+        let make = |id: &str| Snapshot::ok(id, "Site · Key", None,
+            vec![Metric::text("Balance", "$5.00".into())]);
+        publish(&[make("sub2api@http-a"), make("sub2api@http-b")]);
+        let (status, body) = route(&tiny_http::Method::Get, "/v1/usage");
+        assert_eq!(status, 200);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap().as_array().unwrap().len(), 2);
+        super::rename_snapshots(&std::collections::HashMap::from([
+            ("sub2api@http-a".into(), "Renamed · Key".into())]));
+        assert!(route(&tiny_http::Method::Get, "/v1/usage/sub2api@http-a").1.contains("Renamed · Key"));
+        super::forget_snapshots(&["sub2api@http-a".into()]);
+        assert_eq!(route(&tiny_http::Method::Get, "/v1/usage/sub2api@http-a").0, 404);
+        assert_eq!(route(&tiny_http::Method::Get, "/v1/usage/sub2api@http-b").0, 200);
+        super::forget_disabled_snapshots(&["sub2api".into()]);
+        assert_eq!(route(&tiny_http::Method::Get, "/v1/usage/sub2api@http-b").0, 404);
+        assert_eq!(route(&tiny_http::Method::Get, "/v1/usage").1, "[]");
+        let mut restored = make("sub2api@http-restored");
+        restored.stale = true;
+        super::publish_restored_sub2api(&[restored]);
+        let (status, body) = route(&tiny_http::Method::Get, "/v1/usage/sub2api@http-restored");
+        assert_eq!(status, 200);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["stale"], true);
+        super::publish_restored_sub2api(&[]);
+        assert_eq!(route(&tiny_http::Method::Get, "/v1/usage/sub2api@http-restored").0, 404);
     }
 
     #[test]

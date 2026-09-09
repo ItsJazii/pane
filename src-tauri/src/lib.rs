@@ -230,12 +230,17 @@ fn set_config_in(dir: &Path, patch: Value) -> Result<Value, String> {
 
 fn set_config_inner(patch: Value) -> Result<Value, String> {
     let cfg = set_config_in(&providers::config_dir(), patch)?;
+    let disabled = cfg.get("disabled").and_then(Value::as_array)
+        .map(|ids| ids.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>())
+        .unwrap_or_default();
+    httpapi::forget_disabled_snapshots(&disabled);
     HIDE_WANT.store(hide_usage_flag(&cfg), Ordering::Relaxed);
     Ok(cfg)
 }
 
 #[tauri::command]
 fn set_config(app: tauri::AppHandle, patch: Value) -> Result<Value, String> {
+    let _publication = KEY_CARD_PUBLICATION.lock().unwrap_or_else(|e| e.into_inner());
     let cfg = set_config_inner(patch)?;
     apply_tray_locale(&app, &cfg);
     Ok(cfg)
@@ -573,7 +578,7 @@ struct StripEntry {
 /// strip ids are validated against this before becoming tray icon ids,
 /// including `family@account` cards. Stale family-level strip icons are
 /// removed for exactly this set.
-const STRIP_PROVIDER_IDS: [&str; 22] = [
+const STRIP_PROVIDER_IDS: [&str; 23] = [
     "claude",
     "codex",
     "cursor",
@@ -596,6 +601,7 @@ const STRIP_PROVIDER_IDS: [&str; 22] = [
     "hermes",
     "kimi",
     "onenewapi",
+    "sub2api",
 ];
 
 async fn update_tray_strip(app: tauri::AppHandle, entries: Vec<StripEntry>) -> Result<(), String> {
@@ -940,6 +946,7 @@ fn forget_provider_snapshots(ids: &[String]) -> Result<(), String> {
         failures.remove(id);
         alerts::forget_snapshot(id);
     }
+    httpapi::forget_snapshots(ids);
     Ok(())
 }
 
@@ -959,11 +966,44 @@ fn onenewapi_snapshot_ids(key_ids: &[String]) -> Vec<String> {
     key_ids.iter().map(|id| format!("onenewapi@{id}")).collect()
 }
 
+fn sub2api_snapshot_ids(key_ids: &[String]) -> Vec<String> {
+    key_ids.iter().map(|id| format!("sub2api@{id}")).collect()
+}
+
+fn forget_sub2api_key_ids(key_ids: impl IntoIterator<Item = String>) -> Result<(), String> {
+    forget_provider_snapshots(&sub2api_snapshot_ids(&key_ids.into_iter().collect::<Vec<_>>()))
+}
+
+fn purge_sub2api_cards(key_ids: &[String]) -> Result<(), String> {
+    let ids = sub2api_snapshot_ids(key_ids);
+    let restore = persist_key_cards_config_purge(&ids)?;
+    if let Err(error) = forget_provider_snapshots(&ids) {
+        return match restore_key_cards_config_purge(restore) {
+            Ok(()) => Err(error),
+            Err(restore_error) => Err(format!("{error}; restore card settings failed: {restore_error}")),
+        };
+    }
+    Ok(())
+}
+
+fn sub2api_after_site_save(
+    previous: &providers::sub2api::SiteDto,
+    site: &providers::sub2api::SiteDto,
+) -> Result<(), String> {
+    if site.base_url == previous.base_url && site.name != previous.name {
+        let renames = site.keys.iter().map(|key| (
+            format!("sub2api@{}", key.id), format!("{} · {}", site.name, key.label),
+        )).collect::<Vec<_>>();
+        rename_cached_snapshots(&renames)?;
+    }
+    Ok(())
+}
+
 fn cached_onenewapi_id_is_configured(id: &str, configured: &HashSet<String>) -> bool {
     family_of(id) != "onenewapi" || configured.contains(id)
 }
 
-fn retain_current_onenewapi_results(
+fn retain_current_key_card_results(
     all: &mut Vec<providers::Snapshot>,
     expected: &HashMap<String, u64>,
     current: &HashMap<String, u64>,
@@ -971,7 +1011,7 @@ fn retain_current_onenewapi_results(
     let stale: Vec<String> = all
         .iter()
         .filter(|snapshot| {
-            family_of(&snapshot.id) == "onenewapi"
+            is_managed_key_card(&snapshot.id)
                 && expected.get(&snapshot.id) != current.get(&snapshot.id)
         })
         .map(|snapshot| snapshot.id.clone())
@@ -981,16 +1021,18 @@ fn retain_current_onenewapi_results(
     stale
 }
 
-static ONENEWAPI_MUTATION_GENERATION: AtomicU64 = AtomicU64::new(0);
-static ONENEWAPI_ACTIVE_MUTATIONS: AtomicU64 = AtomicU64::new(0);
-static ONENEWAPI_SNAPSHOT_GENERATIONS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+static KEY_CARD_MUTATION_GENERATION: AtomicU64 = AtomicU64::new(0);
+static KEY_CARD_ACTIVE_MUTATIONS: AtomicU64 = AtomicU64::new(0);
+static KEY_CARD_SNAPSHOT_GENERATIONS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+// Serialize only cache/publication and local mutations, never network requests.
+static KEY_CARD_PUBLICATION: Mutex<()> = Mutex::new(());
 
-fn onenewapi_mutation_generation() -> u64 {
-    ONENEWAPI_MUTATION_GENERATION.load(Ordering::Acquire)
+fn key_card_mutation_generation() -> u64 {
+    KEY_CARD_MUTATION_GENERATION.load(Ordering::Acquire)
 }
 
-fn onenewapi_snapshot_generations(ids: impl IntoIterator<Item = String>) -> HashMap<String, u64> {
-    let generations = ONENEWAPI_SNAPSHOT_GENERATIONS
+fn key_card_snapshot_generations(ids: impl IntoIterator<Item = String>) -> HashMap<String, u64> {
+    let generations = KEY_CARD_SNAPSHOT_GENERATIONS
         .get_or_init(Default::default)
         .lock()
         .unwrap();
@@ -1002,8 +1044,8 @@ fn onenewapi_snapshot_generations(ids: impl IntoIterator<Item = String>) -> Hash
         .collect()
 }
 
-fn bump_onenewapi_snapshot_generations(ids: &[String]) {
-    let mut generations = ONENEWAPI_SNAPSHOT_GENERATIONS
+fn bump_key_card_snapshot_generations(ids: &[String]) {
+    let mut generations = KEY_CARD_SNAPSHOT_GENERATIONS
         .get_or_init(Default::default)
         .lock()
         .unwrap();
@@ -1012,30 +1054,37 @@ fn bump_onenewapi_snapshot_generations(ids: &[String]) {
     }
 }
 
-struct OneNewApiMutationGuard {
+struct KeyCardMutationGuard {
     snapshot_ids: Vec<String>,
+    _publication: std::sync::MutexGuard<'static, ()>,
 }
 
-impl OneNewApiMutationGuard {
+impl KeyCardMutationGuard {
     fn begin(snapshot_ids: Vec<String>) -> Self {
-        ONENEWAPI_ACTIVE_MUTATIONS.fetch_add(1, Ordering::AcqRel);
-        bump_onenewapi_snapshot_generations(&snapshot_ids);
-        ONENEWAPI_MUTATION_GENERATION.fetch_add(1, Ordering::AcqRel);
-        Self { snapshot_ids }
+        let publication = KEY_CARD_PUBLICATION.lock().unwrap_or_else(|e| e.into_inner());
+        KEY_CARD_ACTIVE_MUTATIONS.fetch_add(1, Ordering::AcqRel);
+        bump_key_card_snapshot_generations(&snapshot_ids);
+        KEY_CARD_MUTATION_GENERATION.fetch_add(1, Ordering::AcqRel);
+        Self { snapshot_ids, _publication: publication }
+    }
+
+    fn track(&mut self, snapshot_ids: Vec<String>) {
+        bump_key_card_snapshot_generations(&snapshot_ids);
+        self.snapshot_ids.extend(snapshot_ids);
     }
 }
 
-impl Drop for OneNewApiMutationGuard {
+impl Drop for KeyCardMutationGuard {
     fn drop(&mut self) {
-        bump_onenewapi_snapshot_generations(&self.snapshot_ids);
-        ONENEWAPI_MUTATION_GENERATION.fetch_add(1, Ordering::AcqRel);
-        ONENEWAPI_ACTIVE_MUTATIONS.fetch_sub(1, Ordering::AcqRel);
+        bump_key_card_snapshot_generations(&self.snapshot_ids);
+        KEY_CARD_MUTATION_GENERATION.fetch_add(1, Ordering::AcqRel);
+        KEY_CARD_ACTIVE_MUTATIONS.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
-/// Strip deleted One/New API *key cards* from config. Never removes family
-/// id `onenewapi` just because keys went away. Returns only changed keys.
-fn purge_onenewapi_from_config(cfg: &mut Value, snapshot_ids: &[String]) -> Value {
+/// Strip deleted key cards from config, preserving their family choices.
+/// Returns only changed config fields.
+fn purge_key_cards_from_config(cfg: &mut Value, snapshot_ids: &[String]) -> Value {
     if snapshot_ids.is_empty() {
         return json!({});
     }
@@ -1093,7 +1142,7 @@ fn purge_onenewapi_from_config(cfg: &mut Value, snapshot_ids: &[String]) -> Valu
     Value::Object(patch)
 }
 
-fn onenewapi_purge_restore_patch(original: &Value, purge_patch: &Value) -> Value {
+fn key_cards_purge_restore_patch(original: &Value, purge_patch: &Value) -> Value {
     let mut restore = serde_json::Map::new();
     if let Some(obj) = purge_patch.as_object() {
         for key in obj.keys() {
@@ -1103,22 +1152,22 @@ fn onenewapi_purge_restore_patch(original: &Value, purge_patch: &Value) -> Value
     Value::Object(restore)
 }
 
-fn persist_onenewapi_config_purge(snapshot_ids: &[String]) -> Result<Value, String> {
+fn persist_key_cards_config_purge(snapshot_ids: &[String]) -> Result<Value, String> {
     // Tests must not rewrite the developer's real config.json.
     if cfg!(test) {
         return Ok(json!({}));
     }
     let mut cfg = config_with_defaults(load_config());
     let original = cfg.clone();
-    let patch = purge_onenewapi_from_config(&mut cfg, snapshot_ids);
-    let restore = onenewapi_purge_restore_patch(&original, &patch);
+    let patch = purge_key_cards_from_config(&mut cfg, snapshot_ids);
+    let restore = key_cards_purge_restore_patch(&original, &patch);
     if patch.as_object().is_some_and(|o| !o.is_empty()) {
         set_config_inner(patch)?;
     }
     Ok(restore)
 }
 
-fn restore_onenewapi_config_purge(restore: Value) -> Result<(), String> {
+fn restore_key_cards_config_purge(restore: Value) -> Result<(), String> {
     if restore.as_object().map(|o| o.is_empty()).unwrap_or(true) {
         return Ok(());
     }
@@ -1131,9 +1180,9 @@ fn restore_onenewapi_config_purge(restore: Value) -> Result<(), String> {
 fn purge_onenewapi_cards(key_ids: &[String]) -> Result<(), String> {
     purge_onenewapi_cards_coordinated(
         key_ids,
-        persist_onenewapi_config_purge,
+        persist_key_cards_config_purge,
         |ids| forget_onenewapi_key_ids(ids.iter().cloned()),
-        restore_onenewapi_config_purge,
+        restore_key_cards_config_purge,
     )
 }
 
@@ -1199,7 +1248,9 @@ fn rename_cached_snapshot(id: &str, new_name: String) -> Result<(), String> {
 
 fn rename_cached_snapshots(renames: &[(String, String)]) -> Result<(), String> {
     let mut map = last_ok().lock().unwrap();
-    rename_cached_snapshots_in(&mut map, renames, persist_last_ok)
+    rename_cached_snapshots_in(&mut map, renames, persist_last_ok)?;
+    httpapi::rename_snapshots(&renames.iter().cloned().collect());
+    Ok(())
 }
 
 fn rename_cached_snapshot_in<Persist>(
@@ -1245,13 +1296,17 @@ fn family_of(id: &str) -> String {
     id.split('@').next().unwrap_or(id).to_string()
 }
 
-/// One/New API is two-level: family id `onenewapi` disables every key card.
+fn is_managed_key_card(id: &str) -> bool {
+    matches!(family_of(id).as_str(), "onenewapi" | "sub2api")
+}
+
+/// Managed API families disable all their key cards together.
 /// Claude/Codex extra accounts stay independent of the bare family id.
 fn card_is_disabled(id: &str, disabled: &[String]) -> bool {
     if disabled.iter().any(|d| d == id) {
         return true;
     }
-    family_of(id) == "onenewapi" && disabled.iter().any(|d| d == "onenewapi")
+    is_managed_key_card(id) && disabled.iter().any(|d| d == &family_of(id))
 }
 
 // Owned id/name so dynamically discovered account cards (claude@<hash>)
@@ -1379,12 +1434,13 @@ fn restore_last_success_after_error(
     previous: &providers::Snapshot,
     age_ms: i64,
 ) -> bool {
-    if current.status != "error" || age_ms > SNAPSHOT_CACHE_MS {
+    let sub2api = family_of(&current.id) == "sub2api";
+    if current.status != "error" || (!sub2api && age_ms > SNAPSHOT_CACHE_MS) {
         return false;
     }
     let warning = current.error.clone();
     *current = previous.clone();
-    if age_ms > STALE_GRACE_MS {
+    if sub2api || age_ms > STALE_GRACE_MS {
         current.stale = true;
         current.warning = warning;
     }
@@ -1634,15 +1690,15 @@ async fn fetch_usage(
             )),
         ));
     }
-    let mut expected_onenewapi_generations = HashMap::new();
-    let onenewapi_generation_before = onenewapi_mutation_generation();
-    let onenewapi_active_before = ONENEWAPI_ACTIVE_MUTATIONS.load(Ordering::Acquire);
+    let mut expected_key_card_generations = HashMap::new();
+    let onenewapi_generation_before = key_card_mutation_generation();
+    let onenewapi_active_before = KEY_CARD_ACTIVE_MUTATIONS.load(Ordering::Acquire);
     if !disabled.iter().any(|d| d == "onenewapi") {
         if let Ok(cards) = providers::onenewapi::prepare_key_cards().await {
-            expected_onenewapi_generations =
-                onenewapi_snapshot_generations(cards.iter().map(|card| card.id.clone()));
-            let onenewapi_generation_after = onenewapi_mutation_generation();
-            let onenewapi_active_after = ONENEWAPI_ACTIVE_MUTATIONS.load(Ordering::Acquire);
+            expected_key_card_generations =
+                key_card_snapshot_generations(cards.iter().map(|card| card.id.clone()));
+            let onenewapi_generation_after = key_card_mutation_generation();
+            let onenewapi_active_after = KEY_CARD_ACTIVE_MUTATIONS.load(Ordering::Acquire);
             let stable = onenewapi_active_before == 0
                 && onenewapi_active_after == 0
                 && onenewapi_generation_before == onenewapi_generation_after;
@@ -1664,7 +1720,29 @@ async fn fetch_usage(
                     ));
                 }
             } else {
-                expected_onenewapi_generations.clear();
+                expected_key_card_generations.clear();
+            }
+        }
+    }
+    if !disabled.iter().any(|d| d == "sub2api") {
+        let before = key_card_mutation_generation();
+        let active_before = KEY_CARD_ACTIVE_MUTATIONS.load(Ordering::Acquire);
+        if let Ok(cards) = providers::sub2api::key_cards() {
+            let generations = key_card_snapshot_generations(cards.iter().map(|card| card.id.clone()));
+            if active_before == 0
+                && KEY_CARD_ACTIVE_MUTATIONS.load(Ordering::Acquire) == 0
+                && before == key_card_mutation_generation()
+            {
+                expected_key_card_generations.extend(generations);
+                let clients = providers::sub2api::refresh_clients(&cards);
+                for card in cards {
+                    let client = clients.get(&card.origin).cloned()
+                        .unwrap_or_else(providers::http_no_redirect);
+                    let (id, name) = (card.id.clone(), card.name.clone());
+                    futs.push((id.clone(), Box::pin(guarded(
+                        id, name, providers::sub2api::snapshot_key_with_client(client, card),
+                    ))));
+                }
             }
         }
     }
@@ -1681,7 +1759,7 @@ async fn fetch_usage(
         let mut fams: Vec<String> = Vec::new();
         for (id, _) in &futs {
             let fam = family_of(id);
-            if !fams.contains(&fam) {
+            if fam != "sub2api" && !fams.contains(&fam) {
                 fams.push(fam);
             }
         }
@@ -1697,17 +1775,18 @@ async fn fetch_usage(
             all.push(snap);
         }
     }
-    let current_onenewapi_generations = onenewapi_snapshot_generations(
+    let _publication = KEY_CARD_PUBLICATION.lock().unwrap_or_else(|e| e.into_inner());
+    let current_key_card_generations = key_card_snapshot_generations(
         all.iter()
-            .filter(|snapshot| family_of(&snapshot.id) == "onenewapi")
+            .filter(|snapshot| is_managed_key_card(&snapshot.id))
             .map(|snapshot| snapshot.id.clone()),
     );
-    let stale_onenewapi_ids = retain_current_onenewapi_results(
+    let stale_key_card_ids = retain_current_key_card_results(
         &mut all,
-        &expected_onenewapi_generations,
-        &current_onenewapi_generations,
+        &expected_key_card_generations,
+        &current_key_card_generations,
     );
-    if !stale_onenewapi_ids.is_empty() {
+    if !stale_key_card_ids.is_empty() {
         if !all
             .iter()
             .any(|snapshot| family_of(&snapshot.id) == "onenewapi")
@@ -1715,14 +1794,15 @@ async fn fetch_usage(
             enabled_ids.retain(|id| id != "onenewapi");
         }
         let mut failures = fail_state().lock().unwrap();
-        for id in stale_onenewapi_ids {
+        for id in stale_key_card_ids {
             failures.remove(&id);
         }
     }
 
     for s in &all {
-        let log_id = if family_of(&s.id) == "onenewapi" {
-            "onenewapi"
+        let log_family = family_of(&s.id);
+        let log_id = if is_managed_key_card(&s.id) {
+            log_family.as_str()
         } else {
             s.id.as_str()
         };
@@ -1741,8 +1821,9 @@ async fn fetch_usage(
     // Transient server errors (a 503, a timeout) shouldn't blank a card the
     // user was just reading: fall back to the last good snapshot, marked
     // stale so the UI can say "Outdated" with the real error on hover. The
-    // cache is persisted to disk so it survives app restarts; entries older
-    // than a day are too misleading to show and get skipped.
+    // cache survives app restarts. Sub2API keeps explicitly stale history
+    // until its credential context changes; other providers keep the
+    // existing one-day limit.
     {
         let cache = last_ok();
         // Cache identity stamp (upstream's Phase 1): if a DIFFERENT account
@@ -1809,9 +1890,9 @@ async fn fetch_usage(
         if let Ok(mut map) = cache.lock() {
             let mut dirty = false;
             for s in all.iter_mut() {
-                if family_of(&s.id) == "onenewapi" {
-                    let current = onenewapi_snapshot_generations([s.id.clone()]);
-                    if expected_onenewapi_generations.get(&s.id) != current.get(&s.id) {
+                if is_managed_key_card(&s.id) {
+                    let current = key_card_snapshot_generations([s.id.clone()]);
+                    if expected_key_card_generations.get(&s.id) != current.get(&s.id) {
                         continue;
                     }
                 }
@@ -1860,20 +1941,19 @@ async fn fetch_usage(
         }
     }
 
-    // A mutation can begin after the first post-request check. Recheck after
-    // the cache critical section so an old result is neither published nor
-    // included in alerts/telemetry while its replacement is being saved.
-    let current_onenewapi_generations = onenewapi_snapshot_generations(
+    // Recheck before publishing; the publication lock keeps local mutations
+    // from interleaving cache updates, HTTP publication, and alerts.
+    let current_key_card_generations = key_card_snapshot_generations(
         all.iter()
-            .filter(|snapshot| family_of(&snapshot.id) == "onenewapi")
+            .filter(|snapshot| is_managed_key_card(&snapshot.id))
             .map(|snapshot| snapshot.id.clone()),
     );
-    let stale_onenewapi_ids = retain_current_onenewapi_results(
+    let stale_key_card_ids = retain_current_key_card_results(
         &mut all,
-        &expected_onenewapi_generations,
-        &current_onenewapi_generations,
+        &expected_key_card_generations,
+        &current_key_card_generations,
     );
-    if !stale_onenewapi_ids.is_empty() {
+    if !stale_key_card_ids.is_empty() {
         if !all
             .iter()
             .any(|snapshot| family_of(&snapshot.id) == "onenewapi")
@@ -1881,7 +1961,7 @@ async fn fetch_usage(
             enabled_ids.retain(|id| id != "onenewapi");
         }
         let mut failures = fail_state().lock().unwrap();
-        for id in stale_onenewapi_ids {
+        for id in stale_key_card_ids {
             failures.remove(&id);
         }
     }
@@ -1890,6 +1970,12 @@ async fn fetch_usage(
     // wallet card whenever the plan card is actually showing.
     fold_moonshot_into_kimi(&mut all);
 
+    // A user may disable a family or key while its request is in flight.
+    let publish_cfg = config_with_defaults(load_config());
+    let publish_disabled = publish_cfg.get("disabled").and_then(Value::as_array)
+        .map(|ids| ids.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>())
+        .unwrap_or_default();
+    all.retain(|snapshot| !card_is_disabled(&snapshot.id, &publish_disabled));
     httpapi::publish(&all);
     // Anonymous daily-rollup telemetry (Settings → "Share anonymous usage
     // statistics"). Fire-and-forget: it must never delay or fail a refresh.
@@ -1904,6 +1990,7 @@ async fn fetch_usage(
             .map(|provs| {
                 provs
                     .iter()
+                    .filter(|(pid, _)| family_of(pid) != "sub2api")
                     .flat_map(|(pid, entry)| {
                         entry
                             .get("starred")
@@ -1952,6 +2039,7 @@ async fn fetch_usage(
         };
         let outcomes: Vec<telemetry::Outcome> = all
             .iter()
+            .filter(|s| family_of(&s.id) != "sub2api")
             .map(|s| telemetry::Outcome {
                 // Family only: account-scoped ids never leave the machine.
                 // Multiple accounts fold into one family row (accumulate
@@ -1986,6 +2074,7 @@ async fn fetch_usage(
 /// Everything is marked stale; the first live fetch replaces it.
 #[tauri::command]
 fn cached_usage() -> Vec<providers::Snapshot> {
+    let _publication = KEY_CARD_PUBLICATION.lock().unwrap_or_else(|e| e.into_inner());
     #[derive(serde::Deserialize)]
     struct CachedSnap {
         at: i64,
@@ -2013,6 +2102,9 @@ fn cached_usage() -> Vec<providers::Snapshot> {
         })
         .unwrap_or_default();
     let configured_onenewapi: HashSet<String> = providers::onenewapi::key_cards()
+        .map(|cards| cards.into_iter().map(|card| card.id).collect())
+        .unwrap_or_default();
+    let configured_sub2api: HashSet<String> = providers::sub2api::key_cards()
         .map(|cards| cards.into_iter().map(|card| card.id).collect())
         .unwrap_or_default();
 
@@ -2044,9 +2136,10 @@ fn cached_usage() -> Vec<providers::Snapshot> {
     let mut out: Vec<providers::Snapshot> = map
         .into_iter()
         .filter(|(id, c)| {
-            now_ms - c.at <= MAX_STALE_MS
+            (family_of(id) == "sub2api" || now_ms - c.at <= MAX_STALE_MS)
                 && !card_is_disabled(id, &disabled)
                 && cached_onenewapi_id_is_configured(id, &configured_onenewapi)
+                && (family_of(id) != "sub2api" || configured_sub2api.contains(id))
                 && !swapped.iter().any(|f| f == id)
         })
         .map(|(_, c)| {
@@ -2057,6 +2150,7 @@ fn cached_usage() -> Vec<providers::Snapshot> {
         .collect();
     fold_moonshot_into_kimi(&mut out);
     out.sort_by(|a, b| a.id.cmp(&b.id));
+    httpapi::publish_restored_sub2api(&out);
     out
 }
 
@@ -2172,7 +2266,7 @@ async fn onenewapi_update_site(
         .map(|key| key.id.clone())
         .collect::<Vec<_>>();
     let affected_snapshot_ids = onenewapi_snapshot_ids(&key_ids);
-    let _mutation = OneNewApiMutationGuard::begin(affected_snapshot_ids);
+    let _mutation = KeyCardMutationGuard::begin(affected_snapshot_ids);
     providers::onenewapi::update_site_consistently(id, name, verified_base_url, display, |site| {
         if url_changed {
             forget_onenewapi_key_ids(key_ids)?;
@@ -2190,7 +2284,7 @@ fn onenewapi_delete_site(id: String) -> Result<(), String> {
         .find(|s| s.id == id)
         .map(|s| s.keys.into_iter().map(|k| k.id).collect::<Vec<_>>())
         .ok_or_else(|| "site not found".to_string())?;
-    let _mutation = OneNewApiMutationGuard::begin(onenewapi_snapshot_ids(&key_ids));
+    let _mutation = KeyCardMutationGuard::begin(onenewapi_snapshot_ids(&key_ids));
     providers::onenewapi::delete_site_consistently(id, || purge_onenewapi_cards(&key_ids))
 }
 
@@ -2209,7 +2303,7 @@ fn onenewapi_create_key(
     label: String,
     api_key: String,
 ) -> Result<providers::onenewapi::CreatedKey, String> {
-    let _mutation = OneNewApiMutationGuard::begin(Vec::new());
+    let _mutation = KeyCardMutationGuard::begin(Vec::new());
     providers::onenewapi::create_key(site_id, label, api_key)
 }
 
@@ -2226,7 +2320,7 @@ fn onenewapi_update_key(
         .is_some_and(|s| !s.is_empty());
     let label_changed = label.is_some();
     let snap_id = format!("onenewapi@{key_id}");
-    let _mutation = OneNewApiMutationGuard::begin(vec![snap_id.clone()]);
+    let _mutation = KeyCardMutationGuard::begin(vec![snap_id.clone()]);
     providers::onenewapi::update_key_consistently(site_id, key_id.clone(), label, api_key, |site| {
         if rotated {
             forget_provider_snapshot(&snap_id)?;
@@ -2244,10 +2338,118 @@ fn onenewapi_delete_key(
     site_id: String,
     key_id: String,
 ) -> Result<providers::onenewapi::SiteDto, String> {
-    let _mutation = OneNewApiMutationGuard::begin(vec![format!("onenewapi@{key_id}")]);
+    let _mutation = KeyCardMutationGuard::begin(vec![format!("onenewapi@{key_id}")]);
     let cleanup_key_id = key_id.clone();
     providers::onenewapi::delete_key_consistently(site_id, key_id, || {
         purge_onenewapi_cards(&[cleanup_key_id])
+    })
+}
+
+#[tauri::command]
+fn sub2api_list_sites() -> Result<Vec<providers::sub2api::SiteDto>, String> {
+    providers::sub2api::list_sites()
+}
+
+#[tauri::command]
+async fn sub2api_create_site(
+    name: String,
+    base_url: String,
+) -> Result<providers::sub2api::CreateSiteResult, String> {
+    providers::sub2api::create_site(name, base_url).await
+}
+
+#[tauri::command]
+async fn sub2api_update_site(
+    id: String,
+    name: Option<String>,
+    base_url: Option<String>,
+) -> Result<providers::sub2api::SiteDto, String> {
+    let mut mutation = KeyCardMutationGuard::begin(Vec::new());
+    let previous = providers::sub2api::list_sites()?
+        .into_iter()
+        .find(|s| s.id == id)
+        .ok_or_else(|| "site not found".to_string())?;
+    let normalized_base_url = base_url
+        .as_deref()
+        .map(providers::sub2api::normalize_site_url)
+        .transpose()?;
+    let url_changed = normalized_base_url
+        .as_deref()
+        .is_some_and(|candidate| candidate != previous.base_url);
+    let key_ids = previous
+        .keys
+        .iter()
+        .map(|key| key.id.clone())
+        .collect::<Vec<_>>();
+    let affected_snapshot_ids = sub2api_snapshot_ids(&key_ids);
+    mutation.track(affected_snapshot_ids);
+    providers::sub2api::update_site_consistently(id, name, normalized_base_url, |site| {
+        if url_changed {
+            forget_sub2api_key_ids(key_ids)?;
+            Ok(())
+        } else {
+            sub2api_after_site_save(&previous, site)
+        }
+    })
+}
+
+#[tauri::command]
+fn sub2api_delete_site(id: String) -> Result<(), String> {
+    let mut mutation = KeyCardMutationGuard::begin(Vec::new());
+    let key_ids = providers::sub2api::list_sites()?
+        .into_iter()
+        .find(|s| s.id == id)
+        .map(|s| s.keys.into_iter().map(|k| k.id).collect::<Vec<_>>())
+        .ok_or_else(|| "site not found".to_string())?;
+    mutation.track(sub2api_snapshot_ids(&key_ids));
+    providers::sub2api::delete_site_consistently(id, || purge_sub2api_cards(&key_ids))
+}
+
+#[tauri::command]
+fn sub2api_create_key(
+    site_id: String,
+    label: String,
+    api_key: String,
+) -> Result<providers::sub2api::CreatedKey, String> {
+    let _mutation = KeyCardMutationGuard::begin(Vec::new());
+    providers::sub2api::create_key(site_id, label, api_key)
+}
+
+#[tauri::command]
+fn sub2api_update_key(
+    site_id: String,
+    key_id: String,
+    label: Option<String>,
+    api_key: Option<String>,
+) -> Result<providers::sub2api::SiteDto, String> {
+    let rotated = api_key
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+    let label_changed = label.is_some();
+    let snap_id = format!("sub2api@{key_id}");
+    let _mutation = KeyCardMutationGuard::begin(vec![snap_id.clone()]);
+    providers::sub2api::update_key_consistently(site_id, key_id.clone(), label, api_key, |site| {
+        if rotated {
+            forget_provider_snapshot(&snap_id)?;
+        } else if label_changed {
+            if let Some(key) = site.keys.iter().find(|k| k.id == key_id) {
+                rename_cached_snapshot(&snap_id, format!("{} · {}", site.name, key.label))?;
+            }
+        }
+        Ok(())
+    })
+}
+
+#[tauri::command]
+fn sub2api_delete_key(
+    site_id: String,
+    key_id: String,
+) -> Result<providers::sub2api::SiteDto, String> {
+    let _mutation = KeyCardMutationGuard::begin(vec![format!("sub2api@{key_id}")]);
+    let cleanup_key_id = key_id.clone();
+    providers::sub2api::delete_key_consistently(site_id, key_id, || {
+        purge_sub2api_cards(&[cleanup_key_id])
     })
 }
 
@@ -2561,6 +2763,13 @@ pub fn run() {
             onenewapi_create_key,
             onenewapi_update_key,
             onenewapi_delete_key,
+            sub2api_list_sites,
+            sub2api_create_site,
+            sub2api_update_site,
+            sub2api_delete_site,
+            sub2api_create_key,
+            sub2api_update_key,
+            sub2api_delete_key,
             get_config,
             set_config,
             system_ui_locale,
@@ -2668,15 +2877,15 @@ mod tests {
         commit_strip_state_after_apply, fail_state, load_config_from, set_config_in,
         fold_moonshot_into_kimi, forget_onenewapi_key_ids, forget_provider_snapshot,
         is_kimi_wallet_label, last_ok, onenewapi_after_site_save,
-        onenewapi_apply_zero_to_one_enable, onenewapi_snapshot_generations, persist_last_ok_at,
-        onenewapi_purge_restore_patch, purge_onenewapi_cards, purge_onenewapi_cards_coordinated,
-        purge_onenewapi_cards_with, purge_onenewapi_from_config,
+        onenewapi_apply_zero_to_one_enable, key_card_snapshot_generations, persist_last_ok_at,
+        key_cards_purge_restore_patch, purge_onenewapi_cards, purge_onenewapi_cards_coordinated,
+        purge_onenewapi_cards_with, purge_key_cards_from_config,
         rename_cached_snapshot, rename_cached_snapshot_in, rename_cached_snapshots_in,
         restore_kimi_wallet_rows,
         restore_last_success_after_error,
-        retain_current_onenewapi_results, strip_entry_application_order, strip_icon_ids_to_clear,
+        retain_current_key_card_results, strip_entry_application_order, strip_icon_ids_to_clear,
         strip_is_active, strip_reset_ids, updater_endpoint_strings, CachedSnap, FailState,
-        OneNewApiMutationGuard, StripEntry, SNAPSHOT_CACHE_MS, STALE_GRACE_MS,
+        KeyCardMutationGuard, StripEntry, SNAPSHOT_CACHE_MS, STALE_GRACE_MS,
     };
     use crate::alerts;
     use crate::providers::{Metric, Snapshot};
@@ -2841,6 +3050,108 @@ mod tests {
         assert!(ids.contains(&"claude".into()));
         assert!(ids.contains(&"claude@work".into()));
         assert!(ids.contains(&"codex".into()));
+    }
+
+    #[test]
+    fn sub2api_refresh_failure_keeps_history_and_marks_it_stale_immediately() {
+        let previous = Snapshot::ok(
+            "sub2api@wallet", "Panel · Key 1", None,
+            vec![Metric::progress("Total quota", 25.0, None)],
+        );
+        let mut current = Snapshot::error("sub2api@wallet", "Panel · Key 1", "HTTP 401".into());
+        assert!(restore_last_success_after_error(&mut current, &previous, 1_000));
+        assert!(current.stale);
+        assert_eq!(current.warning.as_deref(), Some("HTTP 401"));
+        assert_eq!(current.metrics[0].used_percent, Some(25.0));
+    }
+
+    #[test]
+    fn sub2api_history_remains_readable_after_a_day_offline() {
+        let previous = Snapshot::ok("sub2api@offline", "Panel · Offline", None,
+            vec![Metric::text("Balance", "$8.00".into())]);
+        let mut current = Snapshot::error("sub2api@offline", "Panel · Offline", "Network error".into());
+        assert!(restore_last_success_after_error(&mut current, &previous, SNAPSHOT_CACHE_MS + 1));
+        assert!(current.stale);
+        assert_eq!(current.metrics[0].value.as_deref(), Some("$8.00"));
+        assert_eq!(current.warning.as_deref(), Some("Network error"));
+    }
+
+    #[test]
+    fn sub2api_family_and_key_choices_are_independent() {
+        let family = vec!["sub2api".into(), "sub2api@b".into()];
+        assert!(card_is_disabled("sub2api@a", &family));
+        assert!(card_is_disabled("sub2api@b", &family));
+        assert!(!card_is_disabled("onenewapi@a", &family));
+        let key_only = vec!["sub2api@b".into()];
+        assert!(!card_is_disabled("sub2api@a", &key_only));
+        assert!(card_is_disabled("sub2api@b", &key_only));
+    }
+
+    #[test]
+    fn sub2api_changed_key_rejects_late_result_and_keeps_other_keys() {
+        let ids = ["sub2api@changed".to_string(), "sub2api@unrelated".to_string()];
+        let expected = key_card_snapshot_generations(ids.clone());
+        drop(KeyCardMutationGuard::begin(vec![ids[0].clone()]));
+        let current = key_card_snapshot_generations(ids.clone());
+        let mut snapshots = ids.iter().map(|id| Snapshot::ok(id, "Panel · Key", None, vec![]))
+            .collect::<Vec<_>>();
+        retain_current_key_card_results(&mut snapshots, &expected, &current);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].id, "sub2api@unrelated");
+    }
+
+    #[test]
+    fn sub2api_delete_removes_only_its_card_settings() {
+        let mut cfg = json!({
+            "disabled": ["sub2api", "sub2api@drop", "sub2api@keep", "onenewapi@drop"],
+            "layout": {
+                "providerOrder": ["sub2api@drop", "onenewapi@drop", "sub2api@keep"],
+                "providers": {"sub2api@drop": {"hidden": ["Balance"]}, "sub2api@keep": {"starred": ["Balance"]}}
+            },
+            "pinned": {"provider": "sub2api@drop", "label": "Primary quota"},
+            "trayProviders": ["sub2api@drop", "sub2api@keep"]
+        });
+        purge_key_cards_from_config(&mut cfg, &["sub2api@drop".into()]);
+        assert_eq!(cfg["disabled"], json!(["sub2api", "sub2api@keep", "onenewapi@drop"]));
+        assert_eq!(cfg["layout"]["providerOrder"], json!(["onenewapi@drop", "sub2api@keep"]));
+        assert_eq!(cfg["layout"]["providers"], json!({"sub2api@keep": {"starred": ["Balance"]}}));
+        assert!(cfg["pinned"].is_null());
+        assert_eq!(cfg["trayProviders"], json!(["sub2api@keep"]));
+    }
+
+    #[test]
+    fn sub2api_rename_preserves_usage_and_rotation_clears_only_that_key() {
+        let changed = "sub2api@lifecycle-changed";
+        let other = "sub2api@lifecycle-other";
+        let _changed = SnapCacheGuard::new(changed);
+        let _other = SnapCacheGuard::new(other);
+        for id in [changed, other] {
+            last_ok().lock().unwrap().insert(id.into(), CachedSnap {
+                at: 42,
+                snap: Snapshot::ok(id, "Original · Key", None,
+                    vec![Metric::text("Balance", "$8.00".into())]),
+            });
+            fail_state().lock().unwrap().insert(id.into(), FailState {
+                until_ms: i64::MAX, note: "HTTP 401".into(),
+            });
+        }
+        rename_cached_snapshot(changed, "Renamed · Key".into()).unwrap();
+        {
+            let map = last_ok().lock().unwrap();
+            let entry = &map[changed];
+            assert_eq!(entry.at, 42);
+            assert_eq!(entry.snap.id, changed);
+            assert_eq!(entry.snap.name, "Renamed · Key");
+            assert_eq!(entry.snap.metrics[0].value.as_deref(), Some("$8.00"));
+            assert_eq!(map[other].snap.name, "Original · Key");
+        }
+        alerts::insert_state_for_test(&format!("{changed}:Total quota"));
+        super::forget_sub2api_key_ids(["lifecycle-changed".into()]).unwrap();
+        assert!(!last_ok().lock().unwrap().contains_key(changed));
+        assert!(!fail_state().lock().unwrap().contains_key(changed));
+        assert!(!alerts::has_state_for_test(&format!("{changed}:Total quota")));
+        assert!(last_ok().lock().unwrap().contains_key(other));
+        assert!(fail_state().lock().unwrap().contains_key(other));
     }
 
     #[test]
@@ -3074,15 +3385,15 @@ mod tests {
 
     #[test]
     fn onenewapi_stale_refresh_results_are_discarded() {
-        let expected = onenewapi_snapshot_generations(["onenewapi@old".into()]);
-        let mutation = OneNewApiMutationGuard::begin(vec!["onenewapi@old".into()]);
+        let expected = key_card_snapshot_generations(["onenewapi@old".into()]);
+        let mutation = KeyCardMutationGuard::begin(vec!["onenewapi@old".into()]);
         drop(mutation);
-        let current = onenewapi_snapshot_generations(["onenewapi@old".into()]);
+        let current = key_card_snapshot_generations(["onenewapi@old".into()]);
         let mut snapshots = vec![
             Snapshot::ok("onenewapi@old", "Old · Key 1", None, vec![]),
             Snapshot::ok("claude", "Claude", None, vec![]),
         ];
-        let stale = retain_current_onenewapi_results(&mut snapshots, &expected, &current);
+        let stale = retain_current_key_card_results(&mut snapshots, &expected, &current);
         assert_eq!(stale, ["onenewapi@old"]);
         assert_eq!(snapshots.len(), 1);
         assert_eq!(snapshots[0].id, "claude");
@@ -3389,7 +3700,7 @@ mod tests {
             "pinned": {"provider": "onenewapi@drop", "label": "Usage"},
             "trayProviders": ["onenewapi@drop", "aihubmix", "onenewapi@keep"]
         });
-        let patch = purge_onenewapi_from_config(&mut cfg, &["onenewapi@drop".into()]);
+        let patch = purge_key_cards_from_config(&mut cfg, &["onenewapi@drop".into()]);
         assert_eq!(
             cfg["disabled"],
             json!(["onenewapi", "onenewapi@keep", "aihubmix"])
@@ -3425,7 +3736,7 @@ mod tests {
             "pinned": {"provider": "aihubmix", "label": "Usage"},
             "trayProviders": ["aihubmix"]
         });
-        let patch = purge_onenewapi_from_config(&mut cfg, &["onenewapi@drop".into()]);
+        let patch = purge_key_cards_from_config(&mut cfg, &["onenewapi@drop".into()]);
         assert_eq!(cfg["disabled"], json!(["onenewapi"]));
         assert_eq!(
             cfg["pinned"],
@@ -3462,7 +3773,7 @@ mod tests {
             "trayProviders": ["onenewapi@a1", "onenewapi@b1", "aihubmix"]
         });
         let patch =
-            purge_onenewapi_from_config(&mut cfg, &["onenewapi@a1".into(), "onenewapi@a2".into()]);
+            purge_key_cards_from_config(&mut cfg, &["onenewapi@a1".into(), "onenewapi@a2".into()]);
         assert_eq!(cfg["disabled"], json!(["onenewapi@b1", "aihubmix"]));
         assert_eq!(
             cfg["layout"]["providerOrder"],
@@ -3577,10 +3888,10 @@ mod tests {
             |ids| {
                 let mut cfg = cfg.borrow_mut();
                 let before = cfg.clone();
-                let patch = purge_onenewapi_from_config(&mut cfg, ids);
+                let patch = purge_key_cards_from_config(&mut cfg, ids);
                 assert!(!patch.as_object().unwrap().is_empty());
                 assert_ne!(*cfg, before);
-                Ok(onenewapi_purge_restore_patch(&before, &patch))
+                Ok(key_cards_purge_restore_patch(&before, &patch))
             },
             |_| Err("cache locked".into()),
             |restore| {

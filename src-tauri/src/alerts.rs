@@ -93,6 +93,14 @@ pub fn evaluate(snapshots: &[Snapshot], cfg: &Value) -> Vec<Alert> {
     let Ok(mut map) = states().lock() else { return alerts };
 
     for snapshot in snapshots.iter().filter(|s| s.status == "ok") {
+        if snapshot.id.starts_with("sub2api@") {
+            let disabled = cfg.get("disabled").and_then(Value::as_array);
+            if snapshot.stale || disabled.is_some_and(|ids| ids.iter().any(|id| {
+                id.as_str().is_some_and(|id| id == "sub2api" || id == snapshot.id)
+            })) {
+                continue;
+            }
+        }
         for metric in snapshot.metrics.iter().filter(|m| m.kind == "progress") {
             // Restored Kimi API rows are last-known, not live — don't
             // fire Almost Out off a wallet timeout.
@@ -103,6 +111,9 @@ pub fn evaluate(snapshots: &[Snapshot], cfg: &Value) -> Vec<Alert> {
                 continue;
             }
             let Some(used) = metric.used_percent else { continue };
+            if !used.is_finite() || used < 0.0 {
+                continue;
+            }
             let key = format!("{}:{}", snapshot.id, metric.label);
             let entry = map.entry(key).or_default();
 
@@ -205,6 +216,47 @@ pub fn has_state_for_test(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sub2api_alerts_ignore_stale_disabled_and_nonfinite_observations() {
+        let id = "sub2api@alert-eligibility";
+        let cfg = serde_json::json!({"notifyAlmostOut": true, "locale": "en"});
+        let make = |used| Snapshot::ok(id, "Site · Key", None,
+            vec![crate::providers::Metric::progress("Total quota", used, None)]);
+        forget_snapshot(id);
+        assert!(evaluate(&[make(50.0)], &cfg).is_empty());
+        let mut stale = make(95.0);
+        stale.stale = true;
+        assert!(evaluate(&[stale], &cfg).is_empty());
+        assert!(evaluate(&[make(f64::NAN)], &cfg).is_empty());
+        for disabled in ["sub2api", id] {
+            let mut off = cfg.clone();
+            off["disabled"] = serde_json::json!([disabled]);
+            assert!(evaluate(&[make(95.0)], &off).is_empty());
+        }
+        assert_eq!(evaluate(&[make(95.0)], &cfg).len(), 1);
+        forget_snapshot(id);
+    }
+
+    #[test]
+    fn sub2api_thresholds_are_independent_for_equal_keys_and_each_allowance() {
+        let ids = ["sub2api@alert-a", "sub2api@alert-b"];
+        let cfg = serde_json::json!({"notifyAlmostOut": true, "locale": "en"});
+        let make = |id: &str, used| Snapshot::ok(id, id, None, vec![
+            crate::providers::Metric::progress("5h", used, None),
+            crate::providers::Metric::progress("1d", used, None),
+        ]);
+        for id in ids { forget_snapshot(id); }
+        assert!(evaluate(&[make(ids[0], 40.0), make(ids[1], 40.0)], &cfg).is_empty());
+        let alerts = evaluate(&[make(ids[0], 95.0), make(ids[1], 95.0)], &cfg);
+        assert_eq!(alerts.len(), 4);
+        assert_eq!(alerts.iter().filter(|alert| alert.body.contains(ids[0])).count(), 2);
+        assert!(evaluate(&[make(ids[0], 95.0), make(ids[1], 95.0)], &cfg).is_empty());
+        let wallet = Snapshot::ok(ids[0], "Wallet", None,
+            vec![crate::providers::Metric::text("Balance", "$-20.00".into())]);
+        assert!(evaluate(&[wallet], &cfg).is_empty());
+        for id in ids { forget_snapshot(id); }
+    }
 
     #[test]
     fn forget_snapshot_drops_that_id_only() {

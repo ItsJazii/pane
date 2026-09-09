@@ -313,6 +313,30 @@
       </div>
 
       <div class="acc-group">
+        <button class="acc-head"><span data-i18n="settings.sub2api">Sub2API sites</span> <span class="chev">&#8964;</span></button>
+        <div class="acc-body"><div class="acc-inner">
+          <p class="settings-note" data-i18n="settings.sub2apiNote">
+            Register Sub2API sites. Usage is requested only from /v1/usage. Keys stay on this PC and are sent only to that site. Empty sites stay here; cards appear after you add a key.
+          </p>
+          <div class="setting-row">
+            <label class="toggle" data-i18n-title="settings.onenewapiFamilyTip" title="Turns off every key card at once. Per-key switches in Customize stay.">
+              <input id="sub2api-family-enabled" type="checkbox" />
+              <span data-i18n="settings.sub2apiFamily">Show Sub2API cards</span>
+            </label>
+          </div>
+          <div id="sub2api-sites"></div>
+          <form id="sub2api-add" class="ona-add" autocomplete="off">
+            <input id="sub2api-add-name" type="text" spellcheck="false" placeholder="Name (optional)" data-i18n-placeholder="settings.onenewapiNamePh" />
+            <input id="sub2api-add-url" type="text" spellcheck="false" placeholder="https://host" data-i18n-placeholder="settings.onenewapiUrlPh" />
+            <div class="ona-add-row">
+              <input id="sub2api-add-secret" type="password" placeholder="API key" data-i18n-placeholder="settings.onenewapiKeySecretPh" autocomplete="new-password" />
+              <button type="submit" data-i18n="settings.onenewapiAdd">Add site</button>
+            </div>
+          </form>
+        </div></div>
+      </div>
+
+      <div class="acc-group">
         <button class="acc-head"><span data-i18n="settings.advanced">Advanced</span> <span class="chev">&#8964;</span></button>
         <div class="acc-body"><div class="acc-inner">
           <p class="settings-note" data-i18n="settings.advancedNote">

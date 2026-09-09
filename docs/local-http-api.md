@@ -3,6 +3,22 @@
 Pane serves your usage as JSON so your own scripts, widgets, and overlays
 can read it.
 
+Sub2API cards use `GET /v1/usage/sub2api@<key-id>` and are also included
+in the collection. Each key stays independent even if its wallet or
+subscription values match another key. These entries additionally expose
+`status`, `stale`, `error`, and `warning` so failed refreshes cannot make
+historical data look current. Progress entries retain display amounts in
+`value`/`subtitle` as well as the percentage. Other providers keep their
+existing wire format.
+
+This reads Pane's published snapshots and never initiates a remote usage
+request. Disabled or deleted keys return 404 and disappear from the
+collection; rotating a secret or changing a site address clears the old
+context before publishing again. Renaming preserves the ID and updates
+`displayName`. Empty sites have no snapshot. Only display fields are
+included: no secret or fragment, origin, Dashboard URL, configuration
+object, arbitrary remote error text, or raw response.
+
 ```
 GET http://127.0.0.1:6736/v1/usage          # all enabled providers
 GET http://127.0.0.1:6736/v1/usage/:id      # one provider (e.g. /claude, /onenewapi@<key-id>)

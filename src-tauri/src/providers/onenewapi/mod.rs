@@ -1,9 +1,9 @@
 mod billing;
 mod fingerprint;
-mod ids;
+pub(super) mod ids;
 mod snapshot;
-mod store;
-mod url;
+pub(super) mod store;
+pub(super) mod url;
 
 use serde::Serialize;
 use std::path::{Path, PathBuf};
