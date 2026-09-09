@@ -256,13 +256,18 @@ fn read_usage_events(db: &std::path::Path) -> Result<Vec<HermesUsage>, String> {
         "''"
     };
     // last_seen/first_seen are epoch seconds as REAL; costs may be NULL.
+    // Everything interpolated into this SQL is a fixed literal — never
+    // ledger data.
+    let max_rows = super::MAX_LEDGER_ROWS;
     let sql = format!(
         "SELECT last_seen, model, billing_provider,
                 input_tokens, output_tokens, reasoning_tokens,
                 cache_read_tokens, cache_write_tokens,
                 COALESCE(actual_cost_usd, 0.0), COALESCE(estimated_cost_usd, 0.0),
                 {session_expr}, {url_expr}, {task_expr}
-         FROM session_model_usage"
+         FROM session_model_usage
+         ORDER BY last_seen DESC
+         LIMIT {max_rows}"
     );
     let mut stmt = conn
         .prepare(&sql)
@@ -287,7 +292,14 @@ fn read_usage_events(db: &std::path::Path) -> Result<Vec<HermesUsage>, String> {
             })
         })
         .map_err(|e| format!("read session_model_usage: {e}"))?;
-    Ok(rows.flatten().collect())
+    let events: Vec<HermesUsage> = rows.flatten().collect();
+    if events.len() as u64 >= super::MAX_LEDGER_ROWS {
+        eprintln!(
+            "[pane] hermes: session_model_usage hit the {}-row read cap — keeping newest rows, oldest usage is dropped",
+            super::MAX_LEDGER_ROWS
+        );
+    }
+    Ok(events)
 }
 
 fn table_columns(conn: &rusqlite::Connection) -> Result<Vec<String>, String> {

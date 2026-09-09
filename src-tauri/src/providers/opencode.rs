@@ -199,12 +199,17 @@ fn month_period_ending(resets_ms: i64) -> i64 {
 /// rows only, so shared subscriptions under-count here.
 fn local_windows_snapshot() -> Result<Snapshot, String> {
     let w = with_live_db(|db| {
-        let rows: Vec<(f64, f64)> = read_messages(db)?
+        let (msgs, capped) = read_messages(db)?;
+        let rows: Vec<(f64, f64)> = msgs
             .into_iter()
             .filter(|r| r.provider == "opencode-go" && r.cost > 0.0)
             .map(|r| (r.ts, r.cost))
             .collect();
-        Ok(go_windows(&rows, chrono::Utc::now().timestamp_millis() as f64))
+        // The monthly anchor is the earliest-ever Go row; when the row cap
+        // dropped the oldest rows, recover it with the bounded oldest-first
+        // probe instead of re-anchoring on the newest window's edge.
+        let anchor = if capped { earliest_go_anchor(db) } else { None };
+        Ok(go_windows(&rows, anchor, chrono::Utc::now().timestamp_millis() as f64))
     })?;
     let metrics = vec![
         Metric::progress(
@@ -245,7 +250,7 @@ struct GoWindows {
 /// week (Monday 00:00 start), and a month anchored to the day-of-month and
 /// time-of-day of the earliest-ever local Go usage (calendar month when
 /// there is none). Pure and UTC-based, so it unit-tests deterministically.
-fn go_windows(rows: &[(f64, f64)], now_ms: f64) -> GoWindows {
+fn go_windows(rows: &[(f64, f64)], anchor_override: Option<f64>, now_ms: f64) -> GoWindows {
     let sum_range = |start: f64, end: f64| -> f64 {
         let total: f64 =
             rows.iter().filter(|(ts, _)| *ts >= start && *ts < end).map(|(_, c)| c).sum();
@@ -268,8 +273,13 @@ fn go_windows(rows: &[(f64, f64)], now_ms: f64) -> GoWindows {
     let week_end = week_start + WEEK_MS;
     let weekly = sum_range(week_start, week_end);
 
-    // Monthly cycle anchor: the earliest-ever Go row on this machine.
-    let anchor_ms = rows.iter().map(|(ts, _)| *ts).fold(f64::INFINITY, f64::min);
+    // Monthly cycle anchor: the earliest-ever Go row on this machine. When
+    // the row cap dropped the oldest rows, the caller passes the probed
+    // anchor explicitly.
+    let anchor_ms = match anchor_override {
+        Some(a) => a,
+        None => rows.iter().map(|(ts, _)| *ts).fold(f64::INFINITY, f64::min),
+    };
     let (month_start, month_end) = anchored_month_bounds(
         now_ms,
         if anchor_ms.is_finite() { Some(anchor_ms) } else { None },
@@ -361,6 +371,7 @@ fn utc_date(year: i32, month: u32, day: u32, h: u32, m: u32, s: u32, ms: u32) ->
 pub fn collect_cost_events() -> Vec<(f64, f64, f64, String, String)> {
     with_live_db(|db| {
         Ok(read_messages(db)?
+            .0
             .into_iter()
             // Free models record cost 0 with real token counts — the
             // tokens are usage facts and count at their true $0 price.
@@ -381,10 +392,13 @@ pub struct MessageRow {
 }
 
 /// Raw assistant-message rows from opencode.db.
-fn read_messages(db: &Path) -> Result<Vec<MessageRow>, String> {
+fn read_messages(db: &Path) -> Result<(Vec<MessageRow>, bool), String> {
     let conn = super::open_readonly_sqlite(db)?;
     let mut stmt = conn
-        .prepare("SELECT time_created, data FROM message")
+        .prepare(&format!(
+            "SELECT time_created, data FROM message ORDER BY time_created DESC LIMIT {}",
+            super::MAX_LEDGER_ROWS
+        ))
         .map_err(|e| format!("query messages: {e}"))?;
 
     let rows = stmt
@@ -393,9 +407,11 @@ fn read_messages(db: &Path) -> Result<Vec<MessageRow>, String> {
         })
         .map_err(|e| format!("read messages: {e}"))?;
 
+    let mut scanned: u64 = 0;
     let mut out = Vec::new();
-    for row in rows.flatten() {
-        let (time_created, data) = row;
+    for row in rows {
+        scanned += 1;
+        let Ok((time_created, data)) = row else { continue };
         let Ok(msg) = serde_json::from_str::<Value>(&data) else { continue };
         if msg.get("role").and_then(Value::as_str) != Some("assistant") {
             continue;
@@ -422,7 +438,56 @@ fn read_messages(db: &Path) -> Result<Vec<MessageRow>, String> {
             .sum::<f64>();
         out.push(MessageRow { ts, cost, tokens, provider, model });
     }
-    Ok(out)
+    if scanned >= super::MAX_LEDGER_ROWS {
+        eprintln!(
+            "[pane] opencode: message table hit the {}-row read cap — keeping newest rows, oldest usage is dropped",
+            super::MAX_LEDGER_ROWS
+        );
+    }
+    Ok((out, scanned >= super::MAX_LEDGER_ROWS))
+}
+
+/// The monthly cycle anchors on the earliest-ever Go row — which the
+/// newest-first cap in read_messages intentionally drops. When (and only
+/// when) the cap binds, find the anchor with a small oldest-first probe:
+/// bounded regardless of table size, skipped entirely on normal DBs.
+///
+/// Known limitation: read_messages covers the newest MAX_LEDGER_ROWS and
+/// this probe covers the oldest MAX_ANCHOR_PROBE_ROWS, so a table with more
+/// than MAX_LEDGER_ROWS + MAX_ANCHOR_PROBE_ROWS rows leaves an unsearched
+/// middle band. If the earliest paid Go row falls in that band the monthly
+/// anchor lands late, shifting the reported billing boundary and reset time.
+/// Only reachable on an implausibly large local ledger (>2.1M rows).
+fn earliest_go_anchor(db: &Path) -> Option<f64> {
+    const MAX_ANCHOR_PROBE_ROWS: u64 = 100_000;
+    let conn = super::open_readonly_sqlite(db).ok()?;
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT time_created, data FROM message ORDER BY time_created ASC LIMIT {MAX_ANCHOR_PROBE_ROWS}"
+        ))
+        .ok()?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+        .ok()?;
+    for row in rows.flatten() {
+        let (time_created, data) = row;
+        let Ok(msg) = serde_json::from_str::<Value>(&data) else { continue };
+        if msg.get("role").and_then(Value::as_str) != Some("assistant")
+            || msg.get("providerID").and_then(Value::as_str) != Some("opencode-go")
+        {
+            continue;
+        }
+        if msg.get("cost").and_then(Value::as_f64).unwrap_or(0.0) <= 0.0 {
+            continue;
+        }
+        return Some(
+            msg.pointer("/time/completed")
+                .or_else(|| msg.pointer("/time/created"))
+                .and_then(Value::as_f64)
+                .unwrap_or(time_created as f64),
+        );
+    }
+    None
 }
 
 
@@ -494,7 +559,7 @@ mod tests {
         // Two rows inside the rolling 5h window; reset = oldest + 5h.
         let now = ms("2026-07-28T12:00:00Z");
         let rows = [(ms("2026-07-28T09:00:00Z"), 2.0), (ms("2026-07-28T11:00:00Z"), 1.0)];
-        let w = go_windows(&rows, now);
+        let w = go_windows(&rows, None, now);
         assert!((w.session - 3.0).abs() < 1e-9);
         assert_eq!(w.session_resets_at, ms("2026-07-28T14:00:00Z") as i64);
     }
@@ -502,7 +567,7 @@ mod tests {
     #[test]
     fn empty_session_resets_a_full_window_from_now() {
         let now = ms("2026-07-28T12:00:00Z");
-        let w = go_windows(&[], now);
+        let w = go_windows(&[], None, now);
         assert_eq!(w.session, 0.0);
         assert_eq!(w.session_resets_at, ms("2026-07-28T17:00:00Z") as i64);
     }
@@ -515,7 +580,7 @@ mod tests {
             (ms("2026-07-26T23:00:00Z"), 5.0), // Sunday: previous week
             (ms("2026-07-27T01:00:00Z"), 2.0), // Monday: this week
         ];
-        let w = go_windows(&rows, now);
+        let w = go_windows(&rows, None, now);
         assert!((w.weekly - 2.0).abs() < 1e-9, "rolling-7d would count 7.0");
         assert_eq!(w.weekly_resets_at, ms("2026-08-03T00:00:00Z") as i64);
     }
@@ -529,7 +594,20 @@ mod tests {
             (ms("2026-07-14T12:00:00Z"), 4.0), // before Jul 15: previous cycle
             (ms("2026-07-20T12:00:00Z"), 3.0), // current cycle
         ];
-        let w = go_windows(&rows, now);
+        let w = go_windows(&rows, None, now);
+        assert!((w.monthly - 3.0).abs() < 1e-9);
+        assert_eq!(w.monthly_resets_at, ms("2026-08-15T08:30:00Z") as i64);
+    }
+
+    /// When the row cap drops the oldest rows, the caller passes the probed
+    /// earliest-Go anchor explicitly so the monthly cycle stays put.
+    #[test]
+    fn monthly_anchor_survives_a_capped_row_window() {
+        let now = ms("2026-07-28T12:00:00Z");
+        // Only recent rows made it past the cap; the true anchor (Jun 15)
+        // is recovered separately and passed in.
+        let rows = [(ms("2026-07-20T12:00:00Z"), 3.0)];
+        let w = go_windows(&rows, Some(ms("2026-06-15T08:30:00Z")), now);
         assert!((w.monthly - 3.0).abs() < 1e-9);
         assert_eq!(w.monthly_resets_at, ms("2026-08-15T08:30:00Z") as i64);
     }
@@ -540,7 +618,7 @@ mod tests {
         // It has; use the 30th with "now" on the 28th: cycle began Jun 30.
         let now = ms("2026-07-28T12:00:00Z");
         let rows = [(ms("2026-05-30T10:00:00Z"), 1.0)];
-        let w = go_windows(&rows, now);
+        let w = go_windows(&rows, None, now);
         assert_eq!(w.monthly_resets_at, ms("2026-07-30T10:00:00Z") as i64);
         assert_eq!(
             w.monthly_period_ms,
@@ -553,7 +631,7 @@ mod tests {
         // Anchored to Jan 31; in February the cycle boundary clamps to Feb 28.
         let now = ms("2026-02-10T12:00:00Z");
         let rows = [(ms("2026-01-31T09:00:00Z"), 1.0)];
-        let w = go_windows(&rows, now);
+        let w = go_windows(&rows, None, now);
         assert_eq!(w.monthly_resets_at, ms("2026-02-28T09:00:00Z") as i64);
     }
 }
