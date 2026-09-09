@@ -2625,25 +2625,44 @@ fn updater_endpoint_strings(version: &str) -> [String; 2] {
 }
 
 fn build_updater(app: &tauri::AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
+    build_updater_with(app, Some(std::time::Duration::from_secs(30)))
+}
+
+/// The install path skips the 30 s ceiling: that bound keeps a hung
+/// manifest endpoint from stalling the background check loop, but applied
+/// to download_and_install it would kill a slow connection mid-download.
+fn build_updater_for_install(
+    app: &tauri::AppHandle,
+) -> Result<tauri_plugin_updater::Updater, String> {
+    build_updater_with(app, None)
+}
+
+fn build_updater_with(
+    app: &tauri::AppHandle,
+    timeout: Option<std::time::Duration>,
+) -> Result<tauri_plugin_updater::Updater, String> {
     use tauri_plugin_updater::UpdaterExt;
     let version = app.package_info().version.to_string();
     let endpoints = updater_endpoint_strings(&version)
         .into_iter()
         .map(|endpoint| endpoint.parse().map_err(|e| format!("endpoint parse: {e}")))
         .collect::<Result<Vec<_>, _>>()?;
-    app.updater_builder()
+    let builder = app
+        .updater_builder()
         .endpoints(endpoints)
-        .map_err(|e| e.to_string())?
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let builder = match timeout {
+        Some(t) => builder.timeout(t),
+        None => builder,
+    };
+    builder.build().map_err(|e| e.to_string())
 }
 
 /// Downloads and installs a pending update, then restarts the app. Only
 /// called from the frontend banner after check_for_update announced one.
 #[tauri::command]
 async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
-    let updater = build_updater(&app)?;
+    let updater = build_updater_for_install(&app)?;
     match updater.check().await.map_err(|e| e.to_string())? {
         Some(update) => {
             update
@@ -2659,16 +2678,38 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
     }
 }
 
-/// Popover-open update check: the footer asks on every tray click and
-/// shows an Update button when this returns a newer version.
-#[tauri::command]
-async fn check_update(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    let updater = build_updater(&app)?;
-    updater
+/// The 4 h cadence documented in docs/privacy.md is enforced HERE, so the
+/// frontend's launch/popover invokes and the background loop share one
+/// scheduler: inside the window, callers get the cached answer — no network.
+/// (last attempt epoch secs, cached available version)
+static UPDATE_CHECK: Mutex<(u64, Option<String>)> = Mutex::new((0, None));
+
+async fn gated_update_check(app: &tauri::AppHandle) -> Result<Option<String>, String> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    {
+        let st = UPDATE_CHECK.lock().unwrap();
+        if st.0 != 0 && now.saturating_sub(st.0) < 4 * 3600 {
+            return Ok(st.1.clone());
+        }
+    }
+    // Stamp the attempt before awaiting so concurrent callers take the
+    // cached path instead of doubling the request. Failures keep the stamp:
+    // an offline machine must not retry on every popover open.
+    UPDATE_CHECK.lock().unwrap().0 = now;
+    let found = build_updater(app)?
         .check()
         .await
-        .map(|u| u.map(|u| u.version.clone()))
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?
+        .map(|u| u.version);
+    *UPDATE_CHECK.lock().unwrap() = (now, found.clone());
+    Ok(found)
+}
+
+/// Update check for the footer button. The backend gate enforces the
+/// documented cadence, so launch/popover invokes are cheap cache reads.
+#[tauri::command]
+async fn check_update(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    gated_update_check(&app).await
 }
 
 /// Startup + every 4 h: quiet update check; a hit emits "update-available"
@@ -2678,14 +2719,12 @@ fn spawn_update_checker(app: &tauri::AppHandle) {
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         loop {
-            if let Ok(updater) = build_updater(&handle) {
-                match updater.check().await {
-                    Ok(Some(update)) => {
-                        let _ = handle.emit("update-available", update.version.clone());
-                    }
-                    Ok(None) => {}
-                    Err(e) => eprintln!("[pane] update check: {e}"),
+            match gated_update_check(&handle).await {
+                Ok(Some(version)) => {
+                    let _ = handle.emit("update-available", version);
                 }
+                Ok(None) => {}
+                Err(e) => eprintln!("[pane] update check: {e}"),
             }
             tokio::time::sleep(std::time::Duration::from_secs(4 * 3600)).await;
         }
