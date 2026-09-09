@@ -12,6 +12,11 @@
 - **AihubMix DeepSeek V4.1 Flash spend again.** That slug was missing
   from the baked table. AihubMix's live card is $0.142 / $0.284 /
   $0.0284 cache read (aihubmix.com/model/deepseek-v4.1-flash).
+- **Devin fast-tier spend no longer underpriced.** The Devin slug
+  normalizer stripped `-fast` from every model, so non-Cognition fast
+  requests (GPT, Grok, …) billed at base rates. Only Cognition's
+  SWE/Penguin stems lose the suffix now — there `-fast` is a Devin mode
+  on the base card; everywhere else the premium multiplier applies.
 
 ## 0.4.47 — 2026-09-07
 

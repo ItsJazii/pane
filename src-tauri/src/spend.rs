@@ -1785,11 +1785,17 @@ fn devin() -> ProviderSpend {
 /// reordered.
 fn devin_model(raw: &str) -> String {
     let mut base = raw;
-    // Effort tiers and Max/Ultra/Fast modes bill at the base model's
-    // rates. Cognition's `-fast` is a Devin mode (`swe-1-6-fast`), not
-    // Cursor's 2× SKU — keep `-lightning` so that 5× card stays distinct.
+    // Effort tiers and Max/Ultra modes bill at the base model's rates.
+    // `-fast` peels only on Cognition stems, where it is a Devin mode
+    // (`swe-1-6-fast`) on the base card; on every other model it is the
+    // premium fast SKU and must survive so pricing applies the
+    // multiplier. `-lightning` always stays so that 5× card keeps its
+    // own row.
     for suffix in ["-xhigh", "-light", "-low", "-medium", "-high", "-max", "-ultra", "-fast"] {
         if let Some(b) = raw.strip_suffix(suffix) {
+            if suffix == "-fast" && !cognition_stem(b) {
+                break;
+            }
             base = b;
             break;
         }
@@ -1811,6 +1817,19 @@ fn devin_model(raw: &str) -> String {
         }
     }
     base.to_string()
+}
+
+/// True when a `-fast`-stripped slug bottoms out at Cognition's SWE or
+/// Penguin — the same stem check pricing::resolve's `-fast` branch makes,
+/// so a Devin fast-mode session and a directly priced slug agree.
+fn cognition_stem(slug: &str) -> bool {
+    let mut stem = slug.rsplit('/').next().unwrap_or(slug);
+    for suf in ["-xhigh", "-light", "-low", "-medium", "-high", "-max", "-ultra"] {
+        if let Some(next) = stem.strip_suffix(suf) {
+            stem = next;
+        }
+    }
+    matches!(stem, "swe-1.7" | "swe-1-7" | "swe-1.6" | "swe-1-6" | "penguin")
 }
 
 /// One Kimi Code CLI wire.jsonl line → spend event. usage.record rows are
@@ -2654,6 +2673,30 @@ mod tests {
         assert_eq!(devin_model("swe-1-6-fast"), "swe-1-6");
         assert_eq!(devin_model("swe-1-7-medium"), "swe-1-7");
         assert_eq!(devin_model("swe-1-7-lightning"), "swe-1-7-lightning");
+    }
+
+    /// Devin review regression: `devin_model` used to strip `-fast` from
+    /// every slug, so a non-Cognition fast request billed at base rates.
+    /// Only Cognition stems may lose the suffix; everyone else keeps the
+    /// premium SKU so the lookup applies the fast multiplier.
+    #[test]
+    fn devin_fast_suffix_stays_priced_for_non_cognition_models() {
+        // Cognition `-fast` is a Devin mode — peels to the 1× base card.
+        assert_eq!(devin_model("swe-1-6-fast"), "swe-1-6");
+        assert_eq!(devin_model("swe-1-7-fast"), "swe-1-7");
+        assert_eq!(devin_model("penguin-fast"), "penguin");
+        // Every other `-fast` is the premium SKU and survives.
+        assert_eq!(devin_model("gpt-5-6-sol-fast"), "gpt-5.6-sol-fast");
+        assert_eq!(devin_model("gpt-5-6-sol-max-fast"), "gpt-5.6-sol-max-fast");
+        assert_eq!(devin_model("grok-4.6-fast"), "grok-4.6-fast");
+
+        // The surviving suffix must price above the base card, not at it.
+        let base = pricing::lookup("grok-4.6").expect("grok-4.6 prices");
+        let fast = pricing::lookup(&devin_model("grok-4.6-fast")).expect("grok fast prices");
+        assert!(
+            fast.input > base.input && fast.output > base.output,
+            "fast tier must bill a premium over {base:?}, got {fast:?}"
+        );
     }
 
     #[test]

@@ -166,7 +166,7 @@ pub fn generation() -> u64 {
 /// fingerprinted below — an app update that reprices the same files would
 /// otherwise leave history at the old dollars until upstream happens to
 /// rewrite a catalog.
-const CORRECTIONS_REV: u32 = 13; // 13: AihubMix DeepSeek V4.1 Flash baked rates
+const CORRECTIONS_REV: u32 = 14; // 14: Devin non-Cognition -fast keeps its multiplier
 
 /// The corrections revision on its own — the spend cache treats a changed
 /// revision as a hard discard (the *code* that prices changed), while a
