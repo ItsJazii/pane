@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 const ID: &str = "copilot";
 const NAME: &str = "Copilot";
+const MAX_CRED_BYTES: u64 = 64 * 1024;
 
 /// GitHub tokens can come from Copilot's editor config or the GitHub CLI.
 /// Every source is scoped to github.com: this snapshot only ever talks to
@@ -20,7 +21,7 @@ fn find_token() -> Option<String> {
         candidates.push(home.join(".config").join("github-copilot").join("hosts.json"));
     }
     for path in candidates {
-        let Ok(raw) = std::fs::read_to_string(&path) else { continue };
+        let Ok(raw) = super::read_small_text(&path, MAX_CRED_BYTES, "credentials") else { continue };
         if let Some(tok) = copilot_json_token(&raw) {
             return Some(tok);
         }
@@ -31,7 +32,7 @@ fn find_token() -> Option<String> {
     let mut usernames: Vec<String> = Vec::new();
     if let Ok(appdata) = std::env::var("APPDATA") {
         let hosts = PathBuf::from(appdata).join("GitHub CLI").join("hosts.yml");
-        if let Ok(raw) = std::fs::read_to_string(&hosts) {
+        if let Ok(raw) = super::read_small_text(&hosts, MAX_CRED_BYTES, "hosts.yml") {
             if let Some(tok) = hosts_yml_token(&raw, &mut usernames) {
                 return Some(tok);
             }
@@ -167,6 +168,27 @@ async fn fetch() -> Result<Snapshot, String> {
     Ok(Snapshot::ok(ID, NAME, plan, metrics))
 }
 
+fn push_quota(metrics: &mut Vec<Metric>, node: Option<&Value>, label: &str, resets_at: Option<i64>) {
+    const MONTH_MS: i64 = 30 * 86_400_000;
+    let Some(node) = node else { return };
+    if node.get("unlimited").and_then(Value::as_bool) == Some(true) {
+        metrics.push(Metric::text(label, "Unlimited".into()));
+        return;
+    }
+    let Some(percent_remaining) = node.get("percent_remaining").and_then(Value::as_f64) else {
+        return;
+    };
+    let detail = (|| {
+        let remaining = node.get("remaining").and_then(Value::as_f64)?;
+        let entitlement = node.get("entitlement").and_then(Value::as_f64)?;
+        Some(format!("{remaining:.0} of {entitlement:.0} left"))
+    })();
+    metrics.push(
+        Metric::progress(label, 100.0 - percent_remaining, detail)
+            .with_reset(resets_at, Some(MONTH_MS)),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::{copilot_json_token, hosts_yml_token};
@@ -227,25 +249,4 @@ mod tests {
             eprintln!("  {}: used={:?} value={:?}", m.label, m.used_percent, m.value);
         }
     }
-}
-
-fn push_quota(metrics: &mut Vec<Metric>, node: Option<&Value>, label: &str, resets_at: Option<i64>) {
-    const MONTH_MS: i64 = 30 * 86_400_000;
-    let Some(node) = node else { return };
-    if node.get("unlimited").and_then(Value::as_bool) == Some(true) {
-        metrics.push(Metric::text(label, "Unlimited".into()));
-        return;
-    }
-    let Some(percent_remaining) = node.get("percent_remaining").and_then(Value::as_f64) else {
-        return;
-    };
-    let detail = (|| {
-        let remaining = node.get("remaining").and_then(Value::as_f64)?;
-        let entitlement = node.get("entitlement").and_then(Value::as_f64)?;
-        Some(format!("{remaining:.0} of {entitlement:.0} left"))
-    })();
-    metrics.push(
-        Metric::progress(label, 100.0 - percent_remaining, detail)
-            .with_reset(resets_at, Some(MONTH_MS)),
-    );
 }

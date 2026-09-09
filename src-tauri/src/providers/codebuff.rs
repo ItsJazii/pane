@@ -3,6 +3,7 @@ use serde_json::Value;
 
 const ID: &str = "codebuff";
 const NAME: &str = "Codebuff";
+const MAX_CRED_BYTES: u64 = 64 * 1024;
 
 pub async fn snapshot() -> Snapshot {
     match fetch().await {
@@ -15,7 +16,8 @@ pub async fn snapshot() -> Snapshot {
 /// former name): { "default": { "authToken": … } } or a top-level authToken.
 fn cli_token() -> Option<String> {
     let path = dirs::home_dir()?.join(".config").join("manicode").join("credentials.json");
-    let doc: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let raw = super::read_small_text(&path, MAX_CRED_BYTES, "credentials").ok()?;
+    let doc: Value = serde_json::from_str(&raw).ok()?;
     doc.pointer("/default/authToken")
         .or_else(|| doc.get("authToken"))
         .and_then(Value::as_str)

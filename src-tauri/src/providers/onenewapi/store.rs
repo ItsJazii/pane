@@ -79,12 +79,12 @@ pub fn load(path: &Path) -> Result<StoreFile, String> {
         });
     }
     if path.is_file() {
-        let _ = restrict_owner_only(path);
+        restrict_owner_only(path)?;
     }
     let raw = super::super::read_small_text(path, 1_048_576, "onenewapi.json")?;
     let raw = raw.trim_start_matches('\u{feff}');
     let doc: StoreFile =
-        serde_json::from_str(raw).map_err(|e| format!("onenewapi.json is unreadable: {e}"))?;
+        serde_json::from_str(raw).map_err(|_| "onenewapi.json is unreadable".to_string())?;
     if doc.version != 1 {
         return Err(format!(
             "onenewapi.json has unsupported version {}",
@@ -448,6 +448,7 @@ pub fn update_site(
     Ok(dto)
 }
 
+#[cfg(test)]
 pub fn set_display_unit(path: &Path, id: &str, display: DisplayUnit) -> Result<(), String> {
     let mut doc = load(path)?;
     let site = doc

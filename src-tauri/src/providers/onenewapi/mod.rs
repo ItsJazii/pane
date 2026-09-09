@@ -2,7 +2,7 @@ mod billing;
 mod fingerprint;
 pub(super) mod ids;
 mod snapshot;
-pub(super) mod store;
+pub(crate) mod store;
 pub(super) mod url;
 
 use serde::Serialize;
@@ -135,14 +135,6 @@ pub async fn create_site_at(
     store::insert_site(path, &name, &normalized, display)
 }
 
-pub async fn update_site(
-    id: String,
-    name: Option<String>,
-    base_url: Option<String>,
-) -> Result<SiteDto, String> {
-    update_site_at(&store_path(), &id, name, base_url).await
-}
-
 pub(crate) fn normalize_site_url(base_url: &str) -> Result<String, String> {
     Ok(url::normalize_base_url(base_url)?.origin)
 }
@@ -170,6 +162,7 @@ where
     )
 }
 
+#[cfg(test)]
 pub async fn update_site_at(
     path: &Path,
     id: &str,
@@ -198,11 +191,6 @@ pub async fn update_site_at(
     store::update_site(path, id, name, new_url, display)
 }
 
-pub fn delete_site(id: String) -> Result<(), String> {
-    let _lock = lock_store_mutation()?;
-    store::delete_site(&store_path(), &id)
-}
-
 pub(crate) fn delete_site_consistently<Cleanup>(id: String, cleanup: Cleanup) -> Result<(), String>
 where
     Cleanup: FnOnce() -> Result<(), String>,
@@ -226,16 +214,6 @@ pub fn create_key(site_id: String, label: String, api_key: String) -> Result<Cre
     store::create_key(&store_path(), &site_id, &label, &api_key)
 }
 
-pub fn update_key(
-    site_id: String,
-    key_id: String,
-    label: Option<String>,
-    api_key: Option<String>,
-) -> Result<SiteDto, String> {
-    let _lock = lock_store_mutation()?;
-    store::update_key(&store_path(), &site_id, &key_id, label, api_key)
-}
-
 pub(crate) fn update_key_consistently<Cleanup>(
     site_id: String,
     key_id: String,
@@ -251,11 +229,6 @@ where
         |path| store::update_key(path, &site_id, &key_id, label, api_key),
         cleanup,
     )
-}
-
-pub fn delete_key(site_id: String, key_id: String) -> Result<SiteDto, String> {
-    let _lock = lock_store_mutation()?;
-    store::delete_key(&store_path(), &site_id, &key_id)
 }
 
 pub(crate) fn delete_key_consistently<Cleanup>(
