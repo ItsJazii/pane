@@ -62,7 +62,15 @@ fn note_config_error(context: &str) {
 fn parse_config_file(path: &PathBuf) -> Result<Value, String> {
     let raw = std::fs::read_to_string(path).map_err(|e| format!("read: {e}"))?;
     // Tolerate a UTF-8 BOM (Notepad and PowerShell 5.1 both write one).
-    serde_json::from_str(raw.trim_start_matches('\u{feff}')).map_err(|e| format!("parse: {e}"))
+    let value: Value =
+        serde_json::from_str(raw.trim_start_matches('\u{feff}')).map_err(|e| format!("parse: {e}"))?;
+    // `[]` / `null` / `"x"` parse, but Pane's contract is an object.
+    // Treating those as unreadable lets load fall back to the backup
+    // and stops a save from copying junk over the last good copy.
+    if !value.is_object() {
+        return Err("not an object".into());
+    }
+    Ok(value)
 }
 
 fn load_config() -> Value {
@@ -247,10 +255,21 @@ fn persist_config_at(dir: &Path, cfg: &Value, io: ConfigPersistIo) -> Result<(),
         return Err(format!("write config: {e}"));
     }
     if path.exists() && parse_config_file(&path).is_ok() {
-        if let Err(e) = std::fs::copy(&path, &backup) {
-            // Not fatal: the temp already holds the new valid config,
-            // and an older (or missing) backup still recovers a corrupt
-            // main. Logged so the degradation is diagnosable.
+        // Copy into a temp, then rename over the backup. A failed
+        // mid-copy must not truncate the last good .bak in place.
+        let bak_tmp = dir.join(format!(
+            "config.bak.{}.{}.tmp",
+            std::process::id(),
+            CONFIG_TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let refresh = (|| {
+            std::fs::copy(&path, &bak_tmp)?;
+            std::fs::rename(&bak_tmp, &backup)
+        })();
+        if let Err(e) = refresh {
+            let _ = std::fs::remove_file(&bak_tmp);
+            // Not fatal: the new config is already in `tmp`, and the
+            // previous backup (if any) is still intact.
             note_config_error(&format!("config backup refresh failed ({e})"));
         }
     }
@@ -3500,6 +3519,35 @@ mod tests {
 
     fn fail_replace(_tmp: &std::path::Path, _path: &std::path::Path) -> std::io::Result<()> {
         Err(std::io::Error::other("file in use"))
+    }
+
+    #[test]
+    fn non_object_main_config_does_not_clobber_or_lose_the_backup() {
+        let tmp = TempConfig::new();
+        let good = json!({"locale": "zh"});
+        std::fs::write(
+            tmp.dir.join("config.json.bak"),
+            serde_json::to_string(&good).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(tmp.dir.join("config.json"), "[]").unwrap();
+
+        set_config_in(&tmp.dir, json!({ "density": "compact" })).unwrap();
+
+        let backup: Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.dir.join("config.json.bak")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            backup["locale"], "zh",
+            "valid non-object JSON must not overwrite the object backup"
+        );
+        let main = load_config_from(&tmp.dir);
+        assert_eq!(main["density"], "compact");
+        assert_eq!(
+            main["locale"], "zh",
+            "the save must patch the recovered backup, not empty defaults"
+        );
     }
 
     #[test]
