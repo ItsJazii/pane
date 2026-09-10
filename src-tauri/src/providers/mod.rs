@@ -23,7 +23,9 @@ pub mod sub2api;
 pub mod zai;
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 /// One row inside a provider card, e.g. "Session ▓▓▓░░ 43% left · Resets in 2h".
 /// `resets_at` (epoch ms) + `period_ms` are the structured facts the pace
@@ -343,11 +345,89 @@ pub fn credit_meter(provider: &str, sign: &str, balance: f64) -> Option<Metric> 
     credit_meter_labeled(provider, sign, balance, "Credits used", "")
 }
 
+/// Shared with forget_credit_baselines_in so a key rotation cannot race
+/// a refresh that is raising the high-water mark.
+static CREDIT_BASELINE_LOCK: Mutex<()> = Mutex::new(());
+static CREDIT_BASELINE_GENERATIONS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+static CREDIT_METER_INFLIGHT: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+
+fn credit_baseline_generations() -> &'static Mutex<HashMap<String, u64>> {
+    CREDIT_BASELINE_GENERATIONS.get_or_init(Default::default)
+}
+
+/// Generation last bumped by `forget_credit_baselines_in`. A fetch that
+/// started before that bump must not persist its leftover balance.
+pub fn credit_baseline_generation(id: &str) -> u64 {
+    credit_baseline_generations()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(id)
+        .copied()
+        .unwrap_or(0)
+}
+
+fn bump_credit_baseline_generations(ids: &[String]) {
+    let mut generations = credit_baseline_generations()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for id in ids {
+        *generations.entry(id.clone()).or_default() += 1;
+    }
+}
+
+/// Remember the baseline generation a live fetch started under. Late
+/// `credit_meter_labeled` calls then refuse to rewrite a rotated key's
+/// high-water mark. Unbind from a drop guard so panics cannot leak it.
+pub fn bind_credit_meter_generation(id: &str, gen: u64) {
+    CREDIT_METER_INFLIGHT
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id.to_string(), gen);
+}
+
+pub fn unbind_credit_meter_generation(id: &str) {
+    CREDIT_METER_INFLIGHT
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(id);
+}
+
+fn expected_credit_meter_generation(provider: &str) -> u64 {
+    CREDIT_METER_INFLIGHT
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(provider)
+        .copied()
+        .unwrap_or_else(|| credit_baseline_generation(provider))
+}
+
 /// credit_meter with a caller-chosen row label and caption suffix —
 /// purchased-credit pools (Codex Extra credits, Devin's extra balance)
 /// meter identically but shouldn't all be called "Credits used", and some
 /// carry an extra unit in the caption ("· N credits").
+
 pub fn credit_meter_labeled(
+    provider: &str,
+    sign: &str,
+    balance: f64,
+    label: &str,
+    caption_suffix: &str,
+) -> Option<Metric> {
+    credit_meter_labeled_in(
+        &config_dir(),
+        provider,
+        sign,
+        balance,
+        label,
+        caption_suffix,
+    )
+}
+
+pub fn credit_meter_labeled_in(
+    dir: &Path,
     provider: &str,
     sign: &str,
     balance: f64,
@@ -357,12 +437,13 @@ pub fn credit_meter_labeled(
     if !balance.is_finite() || balance < 0.0 {
         return None;
     }
+    let expected_gen = expected_credit_meter_generation(provider);
     // Providers refresh concurrently and this is a read-modify-write on a
     // shared file — serialize it, or one card's just-raised high-water
     // mark can be overwritten by another's stale copy.
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = LOCK.lock();
-    let path = config_dir().join("credit_baselines.json");
+    let _guard = CREDIT_BASELINE_LOCK.lock();
+    let stale = credit_baseline_generation(provider) != expected_gen;
+    let path = dir.join("credit_baselines.json");
     let mut doc: serde_json::Value = std::fs::read_to_string(&path)
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok())
@@ -372,14 +453,16 @@ pub fn credit_meter_labeled(
         .get(provider)
         .and_then(serde_json::Value::as_f64)
         .unwrap_or(0.0);
-    if balance > high {
+    // A late result from a rotated key must not recreate the deleted
+    // baseline from the old account's leftover balance.
+    if !stale && balance > high {
         doc[provider] = serde_json::Value::from(balance);
         let _ = std::fs::write(
             &path,
             serde_json::to_string_pretty(&doc).unwrap_or_default(),
         );
     }
-    let high = high.max(balance);
+    let high = if stale { high } else { high.max(balance) };
     if high <= 0.0 {
         return None;
     }
@@ -391,6 +474,55 @@ pub fn credit_meter_labeled(
             "{sign}{balance:.2} of {sign}{high:.2} left{caption_suffix}"
         )),
     ))
+}
+
+/// Drop persisted high-water marks for the given provider ids. A rotated
+/// API key must not inherit the previous account's credit baseline, or
+/// the new balance is compared against the old pot until it exceeds it.
+/// Write failures are returned so a key save cannot report success while
+/// the old pot is still on disk.
+pub fn forget_credit_baselines_in(dir: &Path, ids: &[String]) -> Result<(), String> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let _guard = CREDIT_BASELINE_LOCK.lock();
+    bump_credit_baseline_generations(ids);
+    let path = dir.join("credit_baselines.json");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("read credit baselines: {e}")),
+    };
+    let mut doc: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("parse credit baselines: {e}"))?;
+    let Some(obj) = doc.as_object_mut() else {
+        return Ok(());
+    };
+    let mut changed = false;
+    for id in ids {
+        changed |= obj.remove(id).is_some();
+    }
+    if changed {
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&doc).unwrap_or_default(),
+        )
+        .map_err(|e| format!("write credit baselines: {e}"))?;
+    }
+    Ok(())
+}
+
+pub fn credit_baselines_contain(dir: &Path, ids: &[String]) -> bool {
+    if ids.is_empty() {
+        return false;
+    }
+    let Ok(raw) = std::fs::read_to_string(dir.join("credit_baselines.json")) else {
+        return false;
+    };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    ids.iter().any(|id| doc.get(id).is_some())
 }
 
 /// Candidate roots where a second account's CLI config dir may live:
@@ -782,5 +914,88 @@ mod sqlite_temp_tests {
         ));
         // Don't write 64MB; the helper treats a missing file as too large.
         assert!(!super::temp_sqlite_copy_allowed(&huge));
+    }
+}
+
+#[cfg(test)]
+mod credit_baseline_tests {
+    use super::{
+        bind_credit_meter_generation, credit_baseline_generation, credit_meter_labeled_in,
+        forget_credit_baselines_in, unbind_credit_meter_generation,
+    };
+    use serde_json::Value;
+    use std::path::PathBuf;
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let dir = std::env::temp_dir().join(format!(
+                "pane-credit-{}-{stamp}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn read_baselines(dir: &std::path::Path) -> Value {
+        serde_json::from_str(&std::fs::read_to_string(dir.join("credit_baselines.json")).unwrap())
+            .unwrap()
+    }
+
+    #[test]
+    fn late_credit_meter_does_not_restore_forgotten_baseline() {
+        let tmp = TempDir::new();
+        std::fs::write(
+            tmp.0.join("credit_baselines.json"),
+            r#"{"deepseek": 40.0}"#,
+        )
+        .unwrap();
+        let started = credit_baseline_generation("deepseek");
+        bind_credit_meter_generation("deepseek", started);
+        forget_credit_baselines_in(&tmp.0, &["deepseek".into()]).unwrap();
+        assert!(
+            credit_baseline_generation("deepseek") > started,
+            "forget must bump the generation a late fetch still holds"
+        );
+        let meter = credit_meter_labeled_in(&tmp.0, "deepseek", "$", 12.0, "Credits used", "");
+        unbind_credit_meter_generation("deepseek");
+        assert!(
+            meter.is_none(),
+            "a stale leftover balance must not become the new high-water"
+        );
+        let doc = read_baselines(&tmp.0);
+        assert!(
+            doc.get("deepseek").is_none(),
+            "late credit_meter must not rewrite the deleted baseline"
+        );
+    }
+
+    #[test]
+    fn forget_credit_baselines_reports_unreadable_file() {
+        let tmp = TempDir::new();
+        std::fs::create_dir(tmp.0.join("credit_baselines.json")).unwrap();
+        let err = forget_credit_baselines_in(&tmp.0, &["deepseek".into()]).unwrap_err();
+        assert!(
+            err.contains("credit baselines"),
+            "baseline IO failures must reach the key-save caller: {err}"
+        );
+    }
+
+    #[test]
+    fn forget_credit_baselines_missing_file_is_ok() {
+        let tmp = TempDir::new();
+        forget_credit_baselines_in(&tmp.0, &["deepseek".into()]).unwrap();
     }
 }
