@@ -197,18 +197,46 @@ pub fn http_no_redirect() -> reqwest::Client {
 /// JSON bodies from vendor APIs are tiny (quota + token responses). Cap
 /// before parse so a huge payload can't stall a refresh or blow RAM —
 /// same idea as the share-card decode bound.
+/// Bounded body reader shared by every JSON vendor call: downloads in
+/// chunks and stops the moment the running total exceeds `max_bytes`.
+/// Without Content-Length there is no header to trust, so the cap has to
+/// be enforced WHILE downloading — `resp.bytes()` buffers the whole
+/// payload in RAM first and only then notices. Content-Length, when
+/// present, is only an early-reject shortcut. Transport errors are
+/// stripped of their URL: vendor origins (One/New API panels especially)
+/// stay out of error text.
+pub(crate) async fn read_body_bounded(
+    resp: &mut reqwest::Response,
+    max_bytes: usize,
+    what: &str,
+) -> Result<Vec<u8>, String> {
+    if resp.content_length().is_some_and(|n| n > max_bytes as u64) {
+        return Err(format!("{what}: response too large"));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("{what}: {}", e.without_url()))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(format!("{what}: response too large"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+/// JSON bodies from vendor APIs are tiny (quota + token responses). Cap
+/// before parse so a huge payload can't stall a refresh or blow RAM —
+/// same idea as the share-card decode bound.
 pub(crate) async fn json_body(
     resp: reqwest::Response,
     max_bytes: usize,
     what: &str,
 ) -> Result<serde_json::Value, String> {
-    if resp.content_length().is_some_and(|n| n > max_bytes as u64) {
-        return Err(format!("{what}: response too large"));
-    }
-    let bytes = resp.bytes().await.map_err(|e| format!("{what}: {e}"))?;
-    if bytes.len() > max_bytes {
-        return Err(format!("{what}: response too large"));
-    }
+    let mut resp = resp;
+    let bytes = read_body_bounded(&mut resp, max_bytes, what).await?;
     serde_json::from_slice(&bytes).map_err(|e| format!("{what} parse: {e}"))
 }
 
@@ -540,6 +568,166 @@ fn sweep_temp_dir(dir: std::path::PathBuf, keep: impl Fn(&str) -> bool) {
         if keep(name) {
             let _ = std::fs::remove_file(ent.path());
         }
+    }
+}
+
+#[cfg(test)]
+mod json_body_tests {
+    use super::json_body;
+
+    const MAX_BYTES: usize = 16;
+
+    enum After {
+        /// Send the payload, then close the socket.
+        Close,
+        /// Send the payload, then hold the connection open forever — a
+        /// stream whose end never arrives.
+        Hold,
+    }
+
+    /// One-shot mock vendor on a raw TCP socket: full control over
+    /// headers, chunk boundaries, and whether the stream ever ends.
+    fn serve_once(head: &str, body: &str, after: After) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let head = head.to_string();
+        let body = body.to_string();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            use std::io::Read;
+            let _ = stream.read(&mut buf);
+            use std::io::Write;
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(body.as_bytes());
+            let _ = stream.flush();
+            if let After::Close = after {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            } else {
+                std::thread::park();
+            }
+        });
+        addr
+    }
+
+    fn chunked(chunks: &[&str]) -> String {
+        let mut body = String::new();
+        for chunk in chunks {
+            body.push_str(&format!("{:x}\r\n{chunk}\r\n", chunk.len()));
+        }
+        body.push_str("0\r\n\r\n");
+        body
+    }
+
+    async fn get(addr: &str) -> reqwest::Response {
+        reqwest::Client::new()
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn chunked_body_over_limit_is_refused_without_waiting_for_the_end() {
+        // No Content-Length; the cap must trip on the accumulated chunks,
+        // not on the terminator that never arrives.
+        let addr = serve_once(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+            &chunked(&["0123456789abcdef", "more"]),
+            After::Hold,
+        );
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(5), get(&addr))
+            .await
+            .expect("request");
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            json_body(resp, MAX_BYTES, "test"),
+        )
+        .await
+        .expect("over-limit stream must be refused without waiting for its end");
+        assert!(result.unwrap_err().contains("too large"));
+    }
+
+    #[tokio::test]
+    async fn declared_oversized_content_length_is_rejected_up_front() {
+        let addr = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Length: 999\r\n\r\n",
+            "",
+            After::Hold,
+        );
+        let resp = get(&addr).await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            json_body(resp, MAX_BYTES, "test"),
+        )
+        .await
+        .expect("declared size must be rejected before any body arrives");
+        assert!(result.unwrap_err().contains("too large"));
+    }
+
+    #[tokio::test]
+    async fn body_exactly_at_the_limit_parses() {
+        let mut body = r#"{"ok":true}"#.to_string();
+        while body.len() < MAX_BYTES {
+            body.push(' '); // trailing whitespace is legal JSON
+        }
+        assert_eq!(body.len(), MAX_BYTES);
+        let addr = serve_once(
+            &format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()),
+            &body,
+            After::Close,
+        );
+        let resp = get(&addr).await;
+        let doc = json_body(resp, MAX_BYTES, "test").await.unwrap();
+        assert_eq!(doc["ok"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn accumulation_across_chunks_enforces_the_limit() {
+        // Two chunks of 12 bytes each: fine individually, over the 16-byte
+        // cap together — the reader must add, not replace.
+        let addr = serve_once(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+            &chunked(&["0123456789ab", "cdefghij"]),
+            After::Close,
+        );
+        let resp = get(&addr).await;
+        assert!(json_body(resp, MAX_BYTES, "test")
+            .await
+            .unwrap_err()
+            .contains("too large"));
+    }
+
+    #[tokio::test]
+    async fn stream_broken_mid_body_is_a_transport_error_without_the_origin() {
+        // A truncated chunk frame: the body neither completes nor exceeds
+        // the cap — the connection itself breaks.
+        let addr = serve_once(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+            "5\r\nab",
+            After::Close,
+        );
+        let resp = get(&addr).await;
+        let error = json_body(resp, MAX_BYTES, "test").await.unwrap_err();
+        assert!(!error.contains("too large"), "{error}");
+        assert!(
+            !error.contains(&addr),
+            "origin must stay out of error text: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn size_ok_but_invalid_json_is_a_parse_error() {
+        let addr = serve_once(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+            &chunked(&["{not json"]),
+            After::Close,
+        );
+        let resp = get(&addr).await;
+        assert!(json_body(resp, MAX_BYTES, "test")
+            .await
+            .unwrap_err()
+            .contains("parse"));
     }
 }
 
