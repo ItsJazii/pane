@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- **Update checks are eager again.** Opening the popover asks the
+  update server every time, like it did before 0.4.49's 4 h gate, so
+  a just-published release shows up on the next tray click. A quiet
+  background check still runs every 4 h if the popover never opens.
+
 ## 0.4.49 — 2026-09-10
 
 ### Added
