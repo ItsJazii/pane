@@ -20,6 +20,9 @@ const NAME: &str = "Hermes";
 #[derive(Clone)]
 pub struct HermesUsage {
     pub ts_ms: i64,
+    /// Session start (first_seen) — peak pricing splits boundary-crossing
+    /// sessions by duration share; equals ts_ms when unknown.
+    pub start_ms: i64,
     pub model: String,
     pub billing_provider: String,
     pub billing_base_url: String,
@@ -189,6 +192,11 @@ pub fn price_lookup_slug(model: &str, provider: &str, base_url: &str) -> String 
             "qwen3.8-max-0902" | "qwen3.8-max-2026-09-02" => {
                 "aihubmix/qwen3.8-max-2026-09-02".into()
             }
+            // AihubMix bills its own card for V4.1 Flash (~3.3% over
+            // official) — route to the gateway SKU, don't price direct.
+            "deepseek-v4.1-flash" | "deepseek-v4-1-flash" => {
+                "aihubmix/deepseek-v4.1-flash".into()
+            }
             _ => model.into(),
         };
     }
@@ -255,6 +263,12 @@ fn read_usage_events(db: &std::path::Path) -> Result<Vec<HermesUsage>, String> {
     } else {
         "''"
     };
+    // Session start drives the peak-window split; fall back to last_seen.
+    let first_expr = if cols.iter().any(|c| c == "first_seen") {
+        "COALESCE(first_seen, last_seen)"
+    } else {
+        "last_seen"
+    };
     // last_seen/first_seen are epoch seconds as REAL; costs may be NULL.
     // Everything interpolated into this SQL is a fixed literal — never
     // ledger data.
@@ -264,7 +278,7 @@ fn read_usage_events(db: &std::path::Path) -> Result<Vec<HermesUsage>, String> {
                 input_tokens, output_tokens, reasoning_tokens,
                 cache_read_tokens, cache_write_tokens,
                 COALESCE(actual_cost_usd, 0.0), COALESCE(estimated_cost_usd, 0.0),
-                {session_expr}, {url_expr}, {task_expr}
+                {session_expr}, {url_expr}, {task_expr}, {first_expr}
          FROM session_model_usage
          ORDER BY last_seen DESC
          LIMIT {max_rows}"
@@ -278,6 +292,7 @@ fn read_usage_events(db: &std::path::Path) -> Result<Vec<HermesUsage>, String> {
             let estimated: f64 = row.get(9).unwrap_or(0.0);
             Ok(HermesUsage {
                 ts_ms: (row.get::<_, f64>(0).unwrap_or(0.0) * 1000.0) as i64,
+                start_ms: (row.get::<_, f64>(13).unwrap_or(0.0) * 1000.0) as i64,
                 model: row.get::<_, String>(1).unwrap_or_default(),
                 billing_provider: row.get::<_, String>(2).unwrap_or_default(),
                 input: row.get::<_, f64>(3).unwrap_or(0.0),
@@ -319,6 +334,7 @@ mod tests {
     fn ev(ts: i64, model: &str, provider: &str, url: &str, session: &str) -> HermesUsage {
         HermesUsage {
             ts_ms: ts,
+            start_ms: ts,
             model: model.into(),
             billing_provider: provider.into(),
             billing_base_url: url.into(),
