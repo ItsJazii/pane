@@ -23,7 +23,8 @@ pub mod sub2api;
 pub mod zai;
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// One row inside a provider card, e.g. "Session ▓▓▓░░ 43% left · Resets in 2h".
 /// `resets_at` (epoch ms) + `period_ms` are the structured facts the pace
@@ -343,10 +344,15 @@ pub fn credit_meter(provider: &str, sign: &str, balance: f64) -> Option<Metric> 
     credit_meter_labeled(provider, sign, balance, "Credits used", "")
 }
 
+/// Shared with forget_credit_baselines_in so a key rotation cannot race
+/// a refresh that is raising the high-water mark.
+static CREDIT_BASELINE_LOCK: Mutex<()> = Mutex::new(());
+
 /// credit_meter with a caller-chosen row label and caption suffix —
 /// purchased-credit pools (Codex Extra credits, Devin's extra balance)
 /// meter identically but shouldn't all be called "Credits used", and some
 /// carry an extra unit in the caption ("· N credits").
+
 pub fn credit_meter_labeled(
     provider: &str,
     sign: &str,
@@ -360,8 +366,7 @@ pub fn credit_meter_labeled(
     // Providers refresh concurrently and this is a read-modify-write on a
     // shared file — serialize it, or one card's just-raised high-water
     // mark can be overwritten by another's stale copy.
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = LOCK.lock();
+    let _guard = CREDIT_BASELINE_LOCK.lock();
     let path = config_dir().join("credit_baselines.json");
     let mut doc: serde_json::Value = std::fs::read_to_string(&path)
         .ok()
@@ -391,6 +396,36 @@ pub fn credit_meter_labeled(
             "{sign}{balance:.2} of {sign}{high:.2} left{caption_suffix}"
         )),
     ))
+}
+
+/// Drop persisted high-water marks for the given provider ids. A rotated
+/// API key must not inherit the previous account's credit baseline, or
+/// the new balance is compared against the old pot until it exceeds it.
+pub fn forget_credit_baselines_in(dir: &Path, ids: &[String]) {
+    if ids.is_empty() {
+        return;
+    }
+    let _guard = CREDIT_BASELINE_LOCK.lock();
+    let path = dir.join("credit_baselines.json");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return;
+    };
+    let Some(obj) = doc.as_object_mut() else {
+        return;
+    };
+    let mut changed = false;
+    for id in ids {
+        changed |= obj.remove(id).is_some();
+    }
+    if changed {
+        let _ = std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&doc).unwrap_or_default(),
+        );
+    }
 }
 
 /// Candidate roots where a second account's CLI config dir may live:
