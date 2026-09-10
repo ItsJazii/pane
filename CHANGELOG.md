@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.50 — 2026-09-11
 
 ### Changed
 - **Update checks are eager again.** Opening the popover asks the
@@ -21,6 +21,12 @@
   mark. Moonshot and Kimi share a folded wallet, so rotating either
   key clears both. In-flight results from the old key cannot bench or
   restore the new one (closes #204).
+
+### Security
+- **Vendor JSON bodies are capped while they stream in.** `json_body`
+  used to download the whole response, then check the size cap, so a
+  chunked or lying Content-Length could fill RAM. The read now stops
+  at the running cap (closes #202).
 
 ## 0.4.49 — 2026-09-10
 
