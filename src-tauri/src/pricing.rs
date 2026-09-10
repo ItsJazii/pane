@@ -101,6 +101,26 @@ pub fn request_cost_at(p: &Price, u: &Usage, threshold: f64) -> f64 {
         / 1e6
 }
 
+/// DeepSeek V4.1 Flash peak hours bill at 2× the whole card (official
+/// schedule effective 2026-09-10, mirrored by AihubMix): 01:00–04:00 and
+/// 06:00–10:00 UTC on weekdays; weekends are always off-peak. (Public
+/// holidays are off-peak too, but we can't detect those — a handful of
+/// days a year read as peak.) Every other model: 1.0.
+pub fn peak_multiplier(model: &str, ts_ms: i64) -> f64 {
+    use chrono::{Datelike, Timelike};
+    // Peel gateway prefixes, and Pi's `{card}\u{1}` routing tag.
+    let bare = model.rsplit(['/', '\u{1}']).next().unwrap_or(model);
+    if !matches!(bare, "deepseek-v4.1-flash" | "deepseek-v4-1-flash") {
+        return 1.0;
+    }
+    let Some(ts) = chrono::DateTime::from_timestamp_millis(ts_ms) else { return 1.0 };
+    if ts.weekday().num_days_from_monday() > 4 {
+        return 1.0; // weekend
+    }
+    let mins = ts.num_seconds_from_midnight() / 60;
+    if (60..240).contains(&mins) || (360..600).contains(&mins) { 2.0 } else { 1.0 }
+}
+
 /// The supplement's fast multiplier for a model, 1.0 when none is
 /// published — a fast-flagged request without data bills at standard
 /// rates rather than a guessed premium (Mac behavior).
@@ -166,7 +186,7 @@ pub fn generation() -> u64 {
 /// fingerprinted below — an app update that reprices the same files would
 /// otherwise leave history at the old dollars until upstream happens to
 /// rewrite a catalog.
-const CORRECTIONS_REV: u32 = 14; // 14: Devin non-Cognition -fast keeps its multiplier
+const CORRECTIONS_REV: u32 = 15; // 15: DeepSeek V4.1 Flash new card + 2x weekday peak windows
 
 /// The corrections revision on its own — the spend cache treats a changed
 /// revision as a hard discard (the *code* that prices changed), while a
@@ -865,13 +885,16 @@ fn builtin_price(canonical: &str) -> Option<Price> {
         // retry, so a catalog that learns the base slug outranks them.
         "deepseek-v4-pro" => Some(Price::flat(0.464, 0.928, 0.004, 0.464)),
         "deepseek-v4-flash" => Some(Price::flat(0.154, 0.308, 0.003, 0.154)),
-        // AihubMix DeepSeek V4.1 Flash (aihubmix.com/model/deepseek-v4.1-flash,
-        // listed 2026-09-08): $0.142 in / $0.284 out / $0.0284 cache read.
-        // Cache write is unpublished, so writes bill at input. Its own
-        // SKU — must not inherit v4-flash's $0.154/$0.003 card. The
-        // hyphen spelling covers logs that drop the version dot.
+        // DeepSeek V4.1 Flash — official card effective 2026-09-10
+        // (deepseek.com pricing; AihubMix mirrors it with a ~3.3% gateway
+        // markup): off-peak $0.15 in / $0.60 out / $0.003 cache read.
+        // Cache write is unpublished, so writes bill at input. Weekday
+        // peak hours (01:00–04:00 and 06:00–10:00 UTC) bill at 2× the
+        // whole card — applied per event by peak_multiplier(), not here.
+        // Its own SKU — must not inherit v4-flash's $0.154/$0.003 card.
+        // The hyphen spelling covers logs that drop the version dot.
         "deepseek-v4.1-flash" | "deepseek-v4-1-flash" => {
-            Some(Price::flat(0.142, 0.284, 0.0284, 0.142))
+            Some(Price::flat(0.15, 0.60, 0.003, 0.15))
         }
         // AihubMix GLM-5.3 preview (aihubmix.com/model/coding-glm-5.3):
         // $0.060 in / $0.220 out per MTok. No cache rate is published, so
@@ -1052,8 +1075,9 @@ mod tests {
             assert!((p.input - 0.154).abs() < 1e-9, "{slug}");
             assert!((p.cache_read - 0.003).abs() < 1e-9, "{slug}");
         }
-        // AihubMix V4.1 Flash is a different SKU ($0.142/$0.284/$0.0284),
-        // not the older v4-flash headline card.
+        // V4.1 Flash's official card (effective 2026-09-10): off-peak
+        // $0.15/$0.60/$0.003 — its own SKU, not v4-flash's card. Weekday
+        // peak hours double it (peak_multiplier suite below).
         for slug in [
             "deepseek-v4.1-flash",
             "deepseek-v4-1-flash",
@@ -1061,13 +1085,36 @@ mod tests {
             "deepseek/deepseek-v4.1-flash",
         ] {
             let p = super::resolve(&store, slug, 0).unwrap_or_else(|| panic!("{slug} unpriced"));
-            assert!((p.input - 0.142).abs() < 1e-9, "{slug}");
-            assert!((p.output - 0.284).abs() < 1e-9, "{slug}");
-            assert!((p.cache_read - 0.0284).abs() < 1e-9, "{slug}");
+            assert!((p.input - 0.15).abs() < 1e-9, "{slug}");
+            assert!((p.output - 0.60).abs() < 1e-9, "{slug}");
+            assert!((p.cache_read - 0.003).abs() < 1e-9, "{slug}");
         }
         // The trimmer never eats non-date tails or other families.
         assert!(super::resolve(&store, "deepseek-v4", 0).is_none());
         assert!(super::resolve(&store, "deepseek-v3.2", 0).is_none());
+
+        // Peak windows: 01:00–04:00 and 06:00–10:00 UTC on WEEKDAYS only.
+        // 2026-09-10 is a Thursday; 2026-09-12 a Saturday.
+        let ms = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis();
+        let peak = ["2026-09-10T01:00:00Z", "2026-09-10T02:00:00Z", "2026-09-10T08:00:00Z"];
+        for t in peak {
+            assert_eq!(super::peak_multiplier("deepseek-v4.1-flash", ms(t)), 2.0, "{t}");
+            assert_eq!(super::peak_multiplier("aihubmix/deepseek-v4.1-flash", ms(t)), 2.0, "{t}");
+        }
+        let off = [
+            "2026-09-10T00:59:00Z", // just before window 1
+            "2026-09-10T04:00:00Z", // window 1 ends (exclusive)
+            "2026-09-10T05:30:00Z", // between windows
+            "2026-09-10T10:00:00Z", // window 2 ends
+            "2026-09-10T23:00:00Z", // late night
+            "2026-09-12T02:00:00Z", // Saturday in a peak window
+        ];
+        for t in off {
+            assert_eq!(super::peak_multiplier("deepseek-v4.1-flash", ms(t)), 1.0, "{t}");
+        }
+        // Other models and the older flat SKU never scale.
+        assert_eq!(super::peak_multiplier("gpt-5.6-sol", ms("2026-09-10T02:00:00Z")), 1.0);
+        assert_eq!(super::peak_multiplier("deepseek-v4-flash", ms("2026-09-10T02:00:00Z")), 1.0);
 
         // Self-retirement holds for dated spellings too: once any catalog
         // learns the BASE slug, dated snapshots follow the catalog, not

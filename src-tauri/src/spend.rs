@@ -1152,7 +1152,7 @@ fn minimax(extra: FileData) -> ProviderSpend {
                     cache_write_5m: ev.cache_write,
                     cache_write_1h: 0.0,
                 };
-                add_event(&mut data, ts, &model, pricing::request_cost(&p, &u, true), tokens);
+                add_event(&mut data, ts, &model, pricing::request_cost(&p, &u, true) * pricing::peak_multiplier(&model, ts.timestamp_millis()), tokens);
             }
             None => note_unpriced(&mut data, ts, &model, tokens),
         }
@@ -1208,7 +1208,7 @@ fn hermes() -> Vec<(&'static str, &'static str, FileData)> {
                 // Rows aggregate a whole session's requests, so no single
                 // request can be proven long-context — stay on base rates
                 // (same reasoning as the Cursor CSV scanner).
-                add_event(data, ts, &ev.model, pricing::request_cost(&p, &u, false), tokens);
+                add_event(data, ts, &ev.model, pricing::request_cost(&p, &u, false) * pricing::peak_multiplier(&ev.model, ts.timestamp_millis()), tokens);
             }
             None => note_unpriced(data, ts, &ev.model, tokens),
         }
@@ -1539,7 +1539,7 @@ fn codex_line(st: &mut CodexFileState, line: &str, data: &mut FileData) {
         cache_write_5m: 0.0,
         cache_write_1h: 0.0,
     };
-    add_event(data, ts, &model, pricing::request_cost_at(&p, &u, threshold) * mult, tokens);
+    add_event(data, ts, &model, pricing::request_cost_at(&p, &u, threshold) * mult * pricing::peak_multiplier(&model, ts.timestamp_millis()), tokens);
 }
 
 /// `codex-auto-review` release timeline (newest first), from ccusage's
@@ -1734,7 +1734,7 @@ fn pi_line(seen: &mut HashSet<String>, line: &str, data: &mut FileData) {
                 cache_write_5m: (cache_write - cache_write_1h).max(0.0),
                 cache_write_1h,
             };
-            add_event(data, ts, &tagged, pricing::request_cost(&p, &u, true), tokens);
+            add_event(data, ts, &tagged, pricing::request_cost(&p, &u, true) * pricing::peak_multiplier(&tagged, ts.timestamp_millis()), tokens);
         }
         None => note_unpriced(data, ts, &tagged, tokens),
     }
@@ -1859,7 +1859,7 @@ fn grok() -> ProviderSpend {
                 cache_write_5m: 0.0,
                 cache_write_1h: 0.0,
             };
-            add_event(data, ts, &model, pricing::request_cost(&p, &u, true), tokens);
+            add_event(data, ts, &model, pricing::request_cost(&p, &u, true) * pricing::peak_multiplier(&model, ts.timestamp_millis()), tokens);
         });
         merge_data(&mut all, data);
     }
@@ -1910,7 +1910,7 @@ fn devin() -> ProviderSpend {
                     cache_write_5m: ev.cache_write,
                     cache_write_1h: 0.0,
                 };
-                add_event(&mut data, ts, &model, pricing::request_cost(&p, &u, true), tokens);
+                add_event(&mut data, ts, &model, pricing::request_cost(&p, &u, true) * pricing::peak_multiplier(&model, ts.timestamp_millis()), tokens);
             }
             None => note_unpriced(&mut data, ts, &model, tokens),
         }
@@ -2016,7 +2016,7 @@ fn kimi_line(line: &str, data: &mut FileData) {
                 cache_write_5m: cache_write,
                 cache_write_1h: 0.0,
             };
-            add_event(data, ts, &model, pricing::request_cost(&p, &usage, true), tokens);
+            add_event(data, ts, &model, pricing::request_cost(&p, &usage, true) * pricing::peak_multiplier(&model, ts.timestamp_millis()), tokens);
         }
         None => note_unpriced(data, ts, &model, tokens),
     }
@@ -2058,7 +2058,7 @@ fn qwen_line(line: &str, data: &mut FileData) {
                 cache_write_5m: 0.0,
                 cache_write_1h: 0.0,
             };
-            add_event(data, ts, &model, pricing::request_cost(&p, &usage, true), tokens);
+            add_event(data, ts, &model, pricing::request_cost(&p, &usage, true) * pricing::peak_multiplier(&model, ts.timestamp_millis()), tokens);
         }
         None => note_unpriced(data, ts, &model, tokens),
     }
@@ -2187,7 +2187,7 @@ pub fn cursor_from_csv(csv: &str) -> ProviderSpend {
                     };
                     // CSV rows aggregate requests, so no single-request
                     // long-context call can be proven — stay on base rates.
-                    add_event(&mut data, ts, &model, pricing::request_cost(&p, &u, false), tokens);
+                    add_event(&mut data, ts, &model, pricing::request_cost(&p, &u, false) * pricing::peak_multiplier(&model, ts.timestamp_millis()), tokens);
                 }
                 None => note_unpriced(&mut data, ts, &model, tokens),
             }
