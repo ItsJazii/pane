@@ -874,10 +874,28 @@ fn claude_tokens(u: &Value) -> Option<ClaudeTokens> {
     })
 }
 
+/// Every computed-cost path funnels here: effective-dated cards (DeepSeek
+/// V4.1 Flash's 2026-09-10 changeover bills earlier events at the flat
+/// launch card) and the weekday peak windows. Carried costs — dollars the
+/// vendor already billed, recorded in the logs — never pass through here,
+/// so they're never re-multiplied.
+fn cost_for(
+    model: &str,
+    p: &pricing::Price,
+    u: &pricing::Usage,
+    long_context_threshold: f64,
+    ts: DateTime<Utc>,
+) -> f64 {
+    let legacy = pricing::v41_flash_legacy_card(model, ts.timestamp_millis());
+    let p = legacy.as_ref().unwrap_or(p);
+    pricing::request_cost_at(p, u, long_context_threshold)
+        * pricing::peak_multiplier(model, ts.timestamp_millis())
+}
+
 /// Price one Claude entry: live catalog → static family fallback → None
 /// (excluded, never a guessed $0). Fast-flagged requests scale by the
 /// supplement's multiplier.
-fn claude_cost(model: &str, t: &ClaudeTokens) -> Option<f64> {
+fn claude_cost(model: &str, t: &ClaudeTokens, ts: DateTime<Utc>) -> Option<f64> {
     let price = probe_lookup(model).or_else(|| {
         claude_price(model).map(|(i, o, cr, cw)| pricing::Price::flat(i, o, cr, cw))
     })?;
@@ -889,7 +907,7 @@ fn claude_cost(model: &str, t: &ClaudeTokens) -> Option<f64> {
         cache_write_1h: t.w1h,
     };
     let mult = if t.fast { probe_fast_multiplier(model) } else { 1.0 };
-    Some(pricing::request_cost(&price, &u, true) * mult)
+    Some(cost_for(model, &price, &u, 200_000.0, ts) * mult)
 }
 
 /// Per-file dedup state for the Claude scanner.
@@ -956,7 +974,7 @@ fn claude_line(st: &mut ClaudeFileState, line: &str, data: &mut FileData) {
             }
         }
         None if synthetic => {}
-        None => match claude_cost(&model, &t) {
+        None => match claude_cost(&model, &t, ts) {
             Some(c) => {
                 if t.total() > 0.0 || c > 0.0 {
                     add_event(data, ts, &model, c, t.total());
@@ -990,7 +1008,7 @@ fn claude_line(st: &mut ClaudeFileState, line: &str, data: &mut FileData) {
         if at.total() <= 0.0 {
             continue;
         }
-        match claude_cost(advisor, &at) {
+        match claude_cost(advisor, &at, ts) {
             Some(c) => add_event(data, ts, advisor, c, at.total()),
             None => note_unpriced(data, ts, advisor, at.total()),
         }
@@ -1152,7 +1170,7 @@ fn minimax(extra: FileData) -> ProviderSpend {
                     cache_write_5m: ev.cache_write,
                     cache_write_1h: 0.0,
                 };
-                add_event(&mut data, ts, &model, pricing::request_cost(&p, &u, true), tokens);
+                add_event(&mut data, ts, &model, cost_for(&model, &p, &u, 200_000.0, ts), tokens);
             }
             None => note_unpriced(&mut data, ts, &model, tokens),
         }
@@ -1205,10 +1223,35 @@ fn hermes() -> Vec<(&'static str, &'static str, FileData)> {
                     cache_write_5m: ev.cache_write,
                     cache_write_1h: 0.0,
                 };
-                // Rows aggregate a whole session's requests, so no single
-                // request can be proven long-context — stay on base rates
-                // (same reasoning as the Cursor CSV scanner).
-                add_event(data, ts, &ev.model, pricing::request_cost(&p, &u, false), tokens);
+                // Rows aggregate a whole session's requests — long-context
+                // stays base (same reasoning as the Cursor CSV scanner).
+                // A session can straddle the card changeover AND a peak
+                // boundary: price each duration share at its own card and
+                // window (legacy 1×, new off-peak 1×, new peak 2×). One
+                // event keeps the day attribution on last_seen.
+                let total_ms = (ev.ts_ms - ev.start_ms).max(0);
+                let peak_ms = pricing::peak_overlap_ms(ev.start_ms, ev.ts_ms);
+                let legacy_ms = pricing::V41_FLASH_CHANGEOVER_MS
+                    .min(ev.ts_ms)
+                    .saturating_sub(ev.start_ms)
+                    .clamp(0, total_ms);
+                let cost = if pricing::peak_windowed(&ev.model)
+                    && total_ms > 0
+                    && (peak_ms > 0 || legacy_ms > 0)
+                {
+                    let new_base = pricing::request_cost(&p, &u, false);
+                    let legacy_base = pricing::v41_flash_legacy_card(&ev.model, ev.start_ms)
+                        .map(|lp| pricing::request_cost(&lp, &u, false))
+                        .unwrap_or(new_base);
+                    let off_ms = total_ms - legacy_ms - peak_ms;
+                    (legacy_base * legacy_ms as f64
+                        + new_base * off_ms as f64
+                        + new_base * 2.0 * peak_ms as f64)
+                        / total_ms as f64
+                } else {
+                    cost_for(&ev.model, &p, &u, f64::INFINITY, ts)
+                };
+                add_event(data, ts, &ev.model, cost, tokens);
             }
             None => note_unpriced(data, ts, &ev.model, tokens),
         }
@@ -1539,7 +1582,7 @@ fn codex_line(st: &mut CodexFileState, line: &str, data: &mut FileData) {
         cache_write_5m: 0.0,
         cache_write_1h: 0.0,
     };
-    add_event(data, ts, &model, pricing::request_cost_at(&p, &u, threshold) * mult, tokens);
+    add_event(data, ts, &model, cost_for(&model, &p, &u, threshold, ts) * mult, tokens);
 }
 
 /// `codex-auto-review` release timeline (newest first), from ccusage's
@@ -1734,7 +1777,7 @@ fn pi_line(seen: &mut HashSet<String>, line: &str, data: &mut FileData) {
                 cache_write_5m: (cache_write - cache_write_1h).max(0.0),
                 cache_write_1h,
             };
-            add_event(data, ts, &tagged, pricing::request_cost(&p, &u, true), tokens);
+            add_event(data, ts, &tagged, cost_for(&tagged, &p, &u, 200_000.0, ts), tokens);
         }
         None => note_unpriced(data, ts, &tagged, tokens),
     }
@@ -1859,7 +1902,7 @@ fn grok() -> ProviderSpend {
                 cache_write_5m: 0.0,
                 cache_write_1h: 0.0,
             };
-            add_event(data, ts, &model, pricing::request_cost(&p, &u, true), tokens);
+            add_event(data, ts, &model, cost_for(&model, &p, &u, 200_000.0, ts), tokens);
         });
         merge_data(&mut all, data);
     }
@@ -1910,7 +1953,7 @@ fn devin() -> ProviderSpend {
                     cache_write_5m: ev.cache_write,
                     cache_write_1h: 0.0,
                 };
-                add_event(&mut data, ts, &model, pricing::request_cost(&p, &u, true), tokens);
+                add_event(&mut data, ts, &model, cost_for(&model, &p, &u, 200_000.0, ts), tokens);
             }
             None => note_unpriced(&mut data, ts, &model, tokens),
         }
@@ -2016,7 +2059,7 @@ fn kimi_line(line: &str, data: &mut FileData) {
                 cache_write_5m: cache_write,
                 cache_write_1h: 0.0,
             };
-            add_event(data, ts, &model, pricing::request_cost(&p, &usage, true), tokens);
+            add_event(data, ts, &model, cost_for(&model, &p, &usage, 200_000.0, ts), tokens);
         }
         None => note_unpriced(data, ts, &model, tokens),
     }
@@ -2058,7 +2101,7 @@ fn qwen_line(line: &str, data: &mut FileData) {
                 cache_write_5m: 0.0,
                 cache_write_1h: 0.0,
             };
-            add_event(data, ts, &model, pricing::request_cost(&p, &usage, true), tokens);
+            add_event(data, ts, &model, cost_for(&model, &p, &usage, 200_000.0, ts), tokens);
         }
         None => note_unpriced(data, ts, &model, tokens),
     }
@@ -2187,7 +2230,7 @@ pub fn cursor_from_csv(csv: &str) -> ProviderSpend {
                     };
                     // CSV rows aggregate requests, so no single-request
                     // long-context call can be proven — stay on base rates.
-                    add_event(&mut data, ts, &model, pricing::request_cost(&p, &u, false), tokens);
+                    add_event(&mut data, ts, &model, cost_for(&model, &p, &u, f64::INFINITY, ts), tokens);
                 }
                 None => note_unpriced(&mut data, ts, &model, tokens),
             }

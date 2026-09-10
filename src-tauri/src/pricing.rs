@@ -101,6 +101,93 @@ pub fn request_cost_at(p: &Price, u: &Usage, threshold: f64) -> f64 {
         / 1e6
 }
 
+/// 2026-09-10T04:00Z — DeepSeek's V4.1 Flash card changeover: before it
+/// the model billed at AihubMix's flat launch card, and no peak windows
+/// existed at all.
+pub const V41_FLASH_CHANGEOVER_MS: i64 = 1_789_012_800_000;
+
+/// The V4.1 Flash SKU under any log spelling: gateway prefixes and Pi's
+/// routing tag peeled, dated snapshot tails and effort suffixes stripped
+/// (the same trims resolve() does, so every name that prices at this
+/// card also peaks at it).
+fn v41_flash_slug(model: &str) -> bool {
+    let mut bare = model.rsplit(['/', '\u{1}']).next().unwrap_or(model);
+    for suf in ["-xhigh", "-light", "-low", "-medium", "-high", "-max", "-ultra"] {
+        if let Some(next) = bare.strip_suffix(suf) {
+            bare = next;
+        }
+    }
+    if let Some((head, tail)) = bare.rsplit_once('-') {
+        if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) {
+            bare = head;
+        }
+    }
+    matches!(bare, "deepseek-v4.1-flash" | "deepseek-v4-1-flash")
+}
+
+/// DeepSeek V4.1 Flash peak hours bill at 2× the whole card (official
+/// schedule effective 2026-09-10, mirrored by AihubMix): 01:00–04:00 and
+/// 06:00–10:00 UTC on weekdays; weekends are always off-peak. (Public
+/// holidays are off-peak too, but we can't detect those — a handful of
+/// days a year read as peak.) Every other model: 1.0.
+pub fn peak_multiplier(model: &str, ts_ms: i64) -> f64 {
+    use chrono::{Datelike, Timelike};
+    if ts_ms < V41_FLASH_CHANGEOVER_MS || !v41_flash_slug(model) {
+        return 1.0;
+    }
+    let Some(ts) = chrono::DateTime::from_timestamp_millis(ts_ms) else { return 1.0 };
+    if ts.weekday().num_days_from_monday() > 4 {
+        return 1.0; // weekend
+    }
+    let mins = ts.num_seconds_from_midnight() / 60;
+    if (60..240).contains(&mins) || (360..600).contains(&mins) { 2.0 } else { 1.0 }
+}
+
+/// Whether peak_multiplier can ever return 2× for this model.
+pub fn peak_windowed(model: &str) -> bool {
+    v41_flash_slug(model)
+}
+
+/// The pre-changeover card (AihubMix's flat launch pricing) for V4.1
+/// Flash events before 2026-09-10T04:00Z. None for other models or
+/// later events — those use the resolved card as-is.
+pub fn v41_flash_legacy_card(model: &str, ts_ms: i64) -> Option<Price> {
+    if ts_ms >= V41_FLASH_CHANGEOVER_MS || !v41_flash_slug(model) {
+        return None;
+    }
+    Some(Price::flat(0.142, 0.284, 0.0284, 0.142))
+}
+
+/// Milliseconds of [start_ms, end_ms) inside V4.1 Flash peak windows —
+/// Hermes rows aggregate whole sessions, so a boundary-crossing session
+/// splits its cost by this share. The changeover clamps the interval:
+/// peak windows didn't exist before it.
+pub fn peak_overlap_ms(start_ms: i64, end_ms: i64) -> i64 {
+    use chrono::Datelike;
+    let start_ms = start_ms.max(V41_FLASH_CHANGEOVER_MS);
+    if end_ms <= start_ms {
+        return 0;
+    }
+    let mut total = 0;
+    let mut day = start_ms - start_ms.rem_euclid(86_400_000);
+    // Sessions don't span weeks; the cap just bounds a corrupt interval.
+    for _ in 0..45 {
+        if day >= end_ms {
+            break;
+        }
+        let Some(ts) = chrono::DateTime::from_timestamp_millis(day) else { break };
+        if ts.weekday().num_days_from_monday() <= 4 {
+            for (s, e) in [(60_i64, 240), (360, 600)] {
+                let window_start = day + s * 60_000;
+                let window_end = day + e * 60_000;
+                total += (end_ms.min(window_end) - start_ms.max(window_start)).max(0);
+            }
+        }
+        day += 86_400_000;
+    }
+    total
+}
+
 /// The supplement's fast multiplier for a model, 1.0 when none is
 /// published — a fast-flagged request without data bills at standard
 /// rates rather than a guessed premium (Mac behavior).
@@ -166,7 +253,7 @@ pub fn generation() -> u64 {
 /// fingerprinted below — an app update that reprices the same files would
 /// otherwise leave history at the old dollars until upstream happens to
 /// rewrite a catalog.
-const CORRECTIONS_REV: u32 = 14; // 14: Devin non-Cognition -fast keeps its multiplier
+const CORRECTIONS_REV: u32 = 15; // 15: DeepSeek V4.1 Flash new card + 2x weekday peak windows
 
 /// The corrections revision on its own — the spend cache treats a changed
 /// revision as a hard discard (the *code* that prices changed), while a
@@ -865,13 +952,23 @@ fn builtin_price(canonical: &str) -> Option<Price> {
         // retry, so a catalog that learns the base slug outranks them.
         "deepseek-v4-pro" => Some(Price::flat(0.464, 0.928, 0.004, 0.464)),
         "deepseek-v4-flash" => Some(Price::flat(0.154, 0.308, 0.003, 0.154)),
-        // AihubMix DeepSeek V4.1 Flash (aihubmix.com/model/deepseek-v4.1-flash,
-        // listed 2026-09-08): $0.142 in / $0.284 out / $0.0284 cache read.
-        // Cache write is unpublished, so writes bill at input. Its own
-        // SKU — must not inherit v4-flash's $0.154/$0.003 card. The
-        // hyphen spelling covers logs that drop the version dot.
+        // DeepSeek V4.1 Flash — official card effective 2026-09-10
+        // (deepseek.com pricing): off-peak $0.15 in / $0.60 out /
+        // $0.003 cache read. AihubMix routes bill the gateway's own card
+        // (~3.3% over official, per aihubmix.com/model/deepseek-v4.1-flash).
+        // Cache write is unpublished, so writes bill at input. Weekday
+        // peak hours (01:00–04:00 and 06:00–10:00 UTC) bill at 2× the
+        // whole card — applied per event by peak_multiplier(); events
+        // before the changeover bill the flat launch card via
+        // v41_flash_legacy_card(). Its own SKU — must not inherit
+        // v4-flash's $0.154/$0.003 card. The hyphen spelling covers logs
+        // that drop the version dot.
         "deepseek-v4.1-flash" | "deepseek-v4-1-flash" => {
-            Some(Price::flat(0.142, 0.284, 0.0284, 0.142))
+            if canonical.starts_with("aihubmix/") {
+                Some(Price::flat(0.155, 0.62, 0.0031, 0.155))
+            } else {
+                Some(Price::flat(0.15, 0.60, 0.003, 0.15))
+            }
         }
         // AihubMix GLM-5.3 preview (aihubmix.com/model/coding-glm-5.3):
         // $0.060 in / $0.220 out per MTok. No cache rate is published, so
@@ -1052,22 +1149,78 @@ mod tests {
             assert!((p.input - 0.154).abs() < 1e-9, "{slug}");
             assert!((p.cache_read - 0.003).abs() < 1e-9, "{slug}");
         }
-        // AihubMix V4.1 Flash is a different SKU ($0.142/$0.284/$0.0284),
-        // not the older v4-flash headline card.
-        for slug in [
-            "deepseek-v4.1-flash",
-            "deepseek-v4-1-flash",
-            "aihubmix/deepseek-v4.1-flash",
-            "deepseek/deepseek-v4.1-flash",
-        ] {
+        // V4.1 Flash's official card (effective 2026-09-10): off-peak
+        // $0.15/$0.60/$0.003 — its own SKU, not v4-flash's card. Weekday
+        // peak hours double it (peak_multiplier suite below). AihubMix
+        // routes bill the gateway's ~3.3% markup card.
+        for slug in ["deepseek-v4.1-flash", "deepseek-v4-1-flash", "deepseek/deepseek-v4.1-flash"] {
             let p = super::resolve(&store, slug, 0).unwrap_or_else(|| panic!("{slug} unpriced"));
-            assert!((p.input - 0.142).abs() < 1e-9, "{slug}");
-            assert!((p.output - 0.284).abs() < 1e-9, "{slug}");
-            assert!((p.cache_read - 0.0284).abs() < 1e-9, "{slug}");
+            assert!((p.input - 0.15).abs() < 1e-9, "{slug}");
+            assert!((p.output - 0.60).abs() < 1e-9, "{slug}");
+            assert!((p.cache_read - 0.003).abs() < 1e-9, "{slug}");
         }
+        let p = super::resolve(&store, "aihubmix/deepseek-v4.1-flash", 0).unwrap();
+        assert!((p.input - 0.155).abs() < 1e-9 && (p.output - 0.62).abs() < 1e-9);
+        assert!((p.cache_read - 0.0031).abs() < 1e-9);
         // The trimmer never eats non-date tails or other families.
         assert!(super::resolve(&store, "deepseek-v4", 0).is_none());
         assert!(super::resolve(&store, "deepseek-v3.2", 0).is_none());
+
+        // Peak windows: 01:00–04:00 and 06:00–10:00 UTC on WEEKDAYS only,
+        // and never before the 2026-09-10T04:00Z changeover. 2026-09-10 is
+        // a Thursday; 2026-09-11 Friday; 2026-09-12 Saturday.
+        let ms = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis();
+        let peak = ["2026-09-10T06:00:00Z", "2026-09-10T08:00:00Z", "2026-09-11T01:00:00Z"];
+        for t in peak {
+            assert_eq!(super::peak_multiplier("deepseek-v4.1-flash", ms(t)), 2.0, "{t}");
+            assert_eq!(super::peak_multiplier("aihubmix/deepseek-v4.1-flash", ms(t)), 2.0, "{t}");
+            // Dated snapshot tails and effort suffixes peak too.
+            assert_eq!(super::peak_multiplier("deepseek-v4.1-flash-0910", ms(t)), 2.0, "{t}");
+            assert_eq!(super::peak_multiplier("deepseek-v4.1-flash-high", ms(t)), 2.0, "{t}");
+        }
+        let off = [
+            "2026-09-11T00:59:00Z", // just before window 1
+            "2026-09-11T04:00:00Z", // window 1 ends (exclusive)
+            "2026-09-11T05:30:00Z", // between windows
+            "2026-09-11T10:00:00Z", // window 2 ends
+            "2026-09-11T23:00:00Z", // late night
+            "2026-09-12T02:00:00Z", // Saturday in a peak window
+            "2026-09-09T02:00:00Z", // in-window but before the changeover
+        ];
+        for t in off {
+            assert_eq!(super::peak_multiplier("deepseek-v4.1-flash", ms(t)), 1.0, "{t}");
+        }
+        // Other models and the older flat SKU never scale.
+        assert_eq!(super::peak_multiplier("gpt-5.6-sol", ms("2026-09-11T02:00:00Z")), 1.0);
+        assert_eq!(super::peak_multiplier("deepseek-v4-flash", ms("2026-09-11T02:00:00Z")), 1.0);
+
+        // Pre-changeover events bill the flat launch card; later ones don't.
+        let legacy = super::v41_flash_legacy_card("deepseek-v4.1-flash", ms("2026-09-09T02:00:00Z"));
+        assert!(legacy.is_some());
+        let l = legacy.unwrap();
+        assert!((l.input - 0.142).abs() < 1e-9 && (l.output - 0.284).abs() < 1e-9);
+        assert!((l.cache_read - 0.0284).abs() < 1e-9);
+        assert!(super::v41_flash_legacy_card("deepseek-v4.1-flash", ms("2026-09-11T02:00:00Z")).is_none());
+        assert!(super::v41_flash_legacy_card("gpt-5.6-sol", ms("2026-09-09T02:00:00Z")).is_none());
+
+        // Session-window overlap: fully inside, spanning a boundary,
+        // weekend-only, pre-changeover clamp.
+        assert_eq!(
+            super::peak_overlap_ms(ms("2026-09-11T01:00:00Z"), ms("2026-09-11T02:00:00Z")),
+            3_600_000
+        );
+        assert_eq!(
+            super::peak_overlap_ms(ms("2026-09-11T00:30:00Z"), ms("2026-09-11T02:30:00Z")),
+            5_400_000 // 01:00–02:30
+        );
+        assert_eq!(
+            super::peak_overlap_ms(ms("2026-09-12T01:00:00Z"), ms("2026-09-12T02:00:00Z")),
+            0
+        );
+        assert_eq!(
+            super::peak_overlap_ms(ms("2026-09-09T02:00:00Z"), ms("2026-09-09T03:00:00Z")),
+            0
+        );
 
         // Self-retirement holds for dated spellings too: once any catalog
         // learns the BASE slug, dated snapshots follow the catalog, not

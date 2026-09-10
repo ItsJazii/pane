@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Changed
+- **DeepSeek V4.1 Flash repriced to the new official card.** Effective
+  2026-09-10: off-peak is $0.15 in / $0.60 out / $0.003 cache read, and
+  weekday peak hours (01:00–04:00 and 06:00–10:00 UTC) bill at 2× the
+  whole card — Pane's first time-of-day pricing, applied per spend
+  event. Events before the changeover keep the flat launch card, and
+  AihubMix-routed spend bills that gateway's own ~3% markup. Session-
+  aggregated logs (Hermes) split boundary-crossing sessions by
+  duration. Cached spend from before this update is discarded.
+
 ### Security
 - **Bundled SQLite moved past the public FTS5 CVEs.** Pane opens
   databases that several CLIs own, so the SQLite vendored through
@@ -13,8 +23,9 @@
   parent, and a temp-file-then-rename write so a crash mid-save cannot
   truncate your keys.
 - **Webview permissions cut to the minimum.** The main window's Tauri
-  capability is down to `core:default` — the UI only ever talks to Rust
-  through app commands, so every plugin permission is denied by
+  capability is down to event listen/unlisten and app version — the UI
+  only ever talks to Rust through app commands, so every plugin
+  permission (including the arbitrary image-file reader) is denied by
   default.
 - **Antigravity's loopback client no longer follows redirects.** A legit
   language server never redirects, and one could have carried the
