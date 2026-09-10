@@ -1011,7 +1011,7 @@ fn retain_current_key_card_results(
     let stale: Vec<String> = all
         .iter()
         .filter(|snapshot| {
-            is_managed_key_card(&snapshot.id)
+            is_credential_scoped_card(&snapshot.id)
                 && expected.get(&snapshot.id) != current.get(&snapshot.id)
         })
         .map(|snapshot| snapshot.id.clone())
@@ -1019,6 +1019,19 @@ fn retain_current_key_card_results(
     let stale_set: HashSet<&str> = stale.iter().map(String::as_str).collect();
     all.retain(|snapshot| !stale_set.contains(snapshot.id.as_str()));
     stale
+}
+
+/// The "current" side of the generation check: one map covering every
+/// credential-scoped snapshot in the batch. Built from the same id
+/// universe as the expected side — if this ever narrows back to managed
+/// cards only, every plain provider's `Some(0)` would compare unequal to
+/// a missing entry and each refresh would silently drop its results.
+fn current_credential_scoped_generations(all: &[providers::Snapshot]) -> HashMap<String, u64> {
+    key_card_snapshot_generations(
+        all.iter()
+            .filter(|snapshot| is_credential_scoped_card(&snapshot.id))
+            .map(|snapshot| snapshot.id.clone()),
+    )
 }
 
 static KEY_CARD_MUTATION_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -1342,6 +1355,40 @@ fn is_managed_key_card(id: &str) -> bool {
 
 /// Managed API families disable all their key cards together.
 /// Claude/Codex extra accounts stay independent of the bare family id.
+
+/// The plain API-key providers set_api_key accepts, in
+/// %APPDATA%\Pane\<provider>.json. Single source of truth for both the
+/// save command's validation and the credential-context bookkeeping below.
+const API_KEY_PROVIDERS: &[&str] = &[
+    "openrouter",
+    "zai",
+    "minimax",
+    "deepseek",
+    "moonshot",
+    "kimi",
+    "elevenlabs",
+    "codebuff",
+    "kilo",
+    "aihubmix",
+    "qwen",
+];
+
+fn is_plain_api_key_provider(family: &str) -> bool {
+    API_KEY_PROVIDERS.contains(&family)
+}
+
+/// Cards whose cached snapshots, cooldowns, and alerts belong to one
+/// specific credential and must be dropped when that credential changes:
+/// managed key cards plus the plain API-key providers. Everything else
+/// (CLI-login families like claude/codex) is handled by the separate
+/// cache-identity stamp, not by generations.
+fn is_credential_scoped_card(id: &str) -> bool {
+    let family = family_of(id);
+    is_managed_key_card(id) || is_plain_api_key_provider(&family)
+}
+
+/// Managed API families disable all their key cards together.
+/// Claude/Codex extra accounts stay independent of the bare family id.
 fn card_is_disabled(id: &str, disabled: &[String]) -> bool {
     if disabled.iter().any(|d| d == id) {
         return true;
@@ -1357,6 +1404,14 @@ where
 {
     let id = id.as_str();
     let name = name.as_str();
+    // A credential rotation bumps this card's generation under the
+    // publication lock. Capturing it before the request and comparing after
+    // means a result that outlived its own key neither benches nor unbenches
+    // the replacement's fail state (fetch_usage drops it separately).
+    let expected_generation = key_card_snapshot_generations([id.to_string()])
+        .get(id)
+        .copied()
+        .unwrap_or(0);
     let now = now_ms() as i64;
     let benched = {
         let map = fail_state().lock().unwrap();
@@ -1368,6 +1423,13 @@ where
         return providers::Snapshot::error(id, name, note);
     }
     let snap = fut.await;
+    let generation_now = key_card_snapshot_generations([id.to_string()])
+        .get(id)
+        .copied()
+        .unwrap_or(0);
+    if generation_now != expected_generation {
+        return snap;
+    }
     let mut map = fail_state().lock().unwrap();
     if snap.status == "error" {
         let err = snap.error.clone().unwrap_or_default();
@@ -1730,13 +1792,27 @@ async fn fetch_usage(
             )),
         ));
     }
-    let mut expected_key_card_generations = HashMap::new();
+    // Plain API-key providers ride the same generation scheme as managed
+    // key cards: set_api_key bumps a provider's generation when its stored
+    // credential actually changes, so a request the old key started can be
+    // refused at every write-back below (cache, cooldown, publication).
+    let mut expected_key_card_generations = key_card_snapshot_generations(
+        futs.iter()
+            .map(|(id, _)| id.clone())
+            .filter(|id| is_credential_scoped_card(id) && !is_managed_key_card(id)),
+    );
     let onenewapi_generation_before = key_card_mutation_generation();
     let onenewapi_active_before = KEY_CARD_ACTIVE_MUTATIONS.load(Ordering::Acquire);
     if !disabled.iter().any(|d| d == "onenewapi") {
         if let Ok(cards) = providers::onenewapi::prepare_key_cards().await {
-            expected_key_card_generations =
-                key_card_snapshot_generations(cards.iter().map(|card| card.id.clone()));
+            // Merge, never replace: the initial map also carries the plain
+            // API-key providers, whose requests are unaffected by One/New
+            // API card churn.
+            for (id, generation) in
+                key_card_snapshot_generations(cards.iter().map(|card| card.id.clone()))
+            {
+                expected_key_card_generations.insert(id, generation);
+            }
             let onenewapi_generation_after = key_card_mutation_generation();
             let onenewapi_active_after = KEY_CARD_ACTIVE_MUTATIONS.load(Ordering::Acquire);
             let stable = onenewapi_active_before == 0
@@ -1760,7 +1836,8 @@ async fn fetch_usage(
                     ));
                 }
             } else {
-                expected_key_card_generations.clear();
+                expected_key_card_generations
+                    .retain(|id, _| !is_managed_key_card(id));
             }
         }
     }
@@ -1816,11 +1893,7 @@ async fn fetch_usage(
         }
     }
     let _publication = KEY_CARD_PUBLICATION.lock().unwrap_or_else(|e| e.into_inner());
-    let current_key_card_generations = key_card_snapshot_generations(
-        all.iter()
-            .filter(|snapshot| is_managed_key_card(&snapshot.id))
-            .map(|snapshot| snapshot.id.clone()),
-    );
+    let current_key_card_generations = current_credential_scoped_generations(&all);
     let stale_key_card_ids = retain_current_key_card_results(
         &mut all,
         &expected_key_card_generations,
@@ -1930,7 +2003,7 @@ async fn fetch_usage(
         if let Ok(mut map) = cache.lock() {
             let mut dirty = false;
             for s in all.iter_mut() {
-                if is_managed_key_card(&s.id) {
+                if is_credential_scoped_card(&s.id) {
                     let current = key_card_snapshot_generations([s.id.clone()]);
                     if expected_key_card_generations.get(&s.id) != current.get(&s.id) {
                         continue;
@@ -1983,11 +2056,7 @@ async fn fetch_usage(
 
     // Recheck before publishing; the publication lock keeps local mutations
     // from interleaving cache updates, HTTP publication, and alerts.
-    let current_key_card_generations = key_card_snapshot_generations(
-        all.iter()
-            .filter(|snapshot| is_managed_key_card(&snapshot.id))
-            .map(|snapshot| snapshot.id.clone()),
-    );
+    let current_key_card_generations = current_credential_scoped_generations(&all);
     let stale_key_card_ids = retain_current_key_card_results(
         &mut all,
         &expected_key_card_generations,
@@ -2224,37 +2293,77 @@ async fn fetch_spend() -> Vec<spend::ProviderSpend> {
     result
 }
 
-/// Saves (or clears, when `key` is empty) a user-pasted API key to
-/// %APPDATA%\Pane\<provider>.json.
-#[tauri::command]
-fn set_api_key(provider: String, key: String) -> Result<(), String> {
-    if !matches!(
-        provider.as_str(),
-        "openrouter"
-            | "zai"
-            | "minimax"
-            | "deepseek"
-            | "moonshot"
-            | "kimi"
-            | "elevenlabs"
-            | "codebuff"
-            | "kilo"
-            | "aihubmix"
-            | "qwen"
-    ) {
+/// The key a provider's credential file currently holds (None when the
+/// file is absent or unreadable). Used to tell a real credential change
+/// from a re-save of the identical key, so an unchanged save doesn't dump
+/// the cached snapshot. The key never leaves this comparison — not
+/// logged, not returned, not published.
+fn stored_pane_api_key(path: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let doc = serde_json::from_str::<Value>(&raw).ok()?;
+    doc.get("apiKey")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_string)
+}
+
+/// A credential actually changed: everything the old key produced — the
+/// last-good snapshot (memory + disk), the local HTTP publication, the
+/// fail-state cooldown, and the alert history — belongs to the old
+/// account, and requests the old key started must be refused when they
+/// land. The mutation guard bumps this provider's generation under the
+/// publication lock (fetch_usage drops late arrivals against it);
+/// forget_provider_snapshots then clears the derived state. Called only
+/// after the new credential is durably on disk, so a failed write never
+/// destroys the still-valid old context.
+fn invalidate_api_key_context(provider: &str) -> Result<(), String> {
+    let _mutation = KeyCardMutationGuard::begin(vec![provider.to_string()]);
+    forget_provider_snapshot(provider).map_err(|e| {
+        format!("the key change is saved, but clearing the previous key's cached data failed: {e}")
+    })
+}
+
+fn set_api_key_in(dir: &Path, provider: &str, key: &str) -> Result<(), String> {
+    if !is_plain_api_key_provider(provider) {
         return Err(format!("unknown provider: {provider}"));
     }
-    let dir = providers::config_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create config dir: {e}"))?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("create config dir: {e}"))?;
     let path = dir.join(format!("{provider}.json"));
+    let previous_key = stored_pane_api_key(&path);
     let key = key.trim();
     if key.is_empty() {
-        let _ = std::fs::remove_file(&path);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            // Already cleared is success; anything else (permissions, a
+            // locked file) must reach the UI instead of showing "saved".
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("remove key file: {e}")),
+        }
+        // No key was stored, so the provider was already running on its
+        // fallback (environment) credentials and its cache already
+        // matches that context.
+        if previous_key.is_some() {
+            invalidate_api_key_context(provider)?;
+        }
         return Ok(());
     }
     let raw = serde_json::json!({ "apiKey": key }).to_string();
     providers::onenewapi::store::atomic_write(&path, &raw)
-        .map_err(|e| format!("write key file: {e}"))
+        .map_err(|e| format!("write key file: {e}"))?;
+    if previous_key.as_deref() != Some(key) {
+        invalidate_api_key_context(provider)?;
+    }
+    Ok(())
+}
+
+/// Saves (or clears, when `key` is empty) a user-pasted API key to
+/// %APPDATA%\Pane\<provider>.json. A successful change drops the old
+/// key's snapshots, cooldowns, and published data; clearing never touches
+/// environment or CLI credentials — those stay fallback sources.
+#[tauri::command]
+fn set_api_key(provider: String, key: String) -> Result<(), String> {
+    set_api_key_in(&providers::config_dir(), &provider, &key)
 }
 
 #[tauri::command]
@@ -2954,6 +3063,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
+        current_credential_scoped_generations, guarded, is_credential_scoped_card,
+        is_plain_api_key_provider, set_api_key_in, stored_pane_api_key,
         cached_kimi_ok_from, cached_onenewapi_id_is_configured, card_is_disabled,
         commit_strip_state_after_apply, fail_state, load_config_from, set_config_in,
         fold_moonshot_into_kimi, forget_onenewapi_key_ids, forget_provider_snapshot,
@@ -3434,6 +3545,276 @@ mod tests {
             );
             assert_eq!(cfg["locale"], json!("zh"), "round {round} lost locale patch");
         }
+    }
+
+    // ---- set_api_key credential-context isolation --------------------------
+
+    /// Open a file so Windows won't let another handle delete or replace
+    /// it: FILE_SHARE_READ only, no FILE_SHARE_DELETE. Deterministic fault
+    /// injection — no permission games on the developer's real dirs.
+    fn hold_no_delete(path: &std::path::Path) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1) // FILE_SHARE_READ
+            .open(path)
+            .expect("open held key file")
+    }
+
+    #[test]
+    fn api_key_context_scopes_only_key_backed_families() {
+        assert!(is_credential_scoped_card("deepseek"));
+        assert!(is_credential_scoped_card("sub2api@k1"));
+        assert!(is_credential_scoped_card("onenewapi@k1"));
+        // CLI-login families are governed by the cache-identity stamp
+        // instead — a generation bump there would clear nothing useful.
+        assert!(!is_credential_scoped_card("claude"));
+        assert!(!is_credential_scoped_card("claude@abcd1234"));
+        assert!(!is_credential_scoped_card("codex"));
+        assert!(!is_credential_scoped_card("grok"));
+        assert!(!is_plain_api_key_provider("claude"));
+        assert!(is_plain_api_key_provider("kimi"));
+    }
+
+    #[test]
+    fn current_generations_cover_plain_providers_like_the_expected_side() {
+        // The generation check compares two maps: expected (captured from
+        // the full credential-scoped id set) and current (built from the
+        // batch). If the current side ever narrows back to managed cards,
+        // every plain provider's Some(0) compares unequal to a missing
+        // entry and each refresh silently drops its snapshot.
+        let _deepseek = SnapCacheGuard::new("deepseek");
+        let batch = vec![
+            Snapshot::ok("deepseek", "DeepSeek", None, vec![]),
+            Snapshot::ok("claude", "Claude", None, vec![]),
+        ];
+        let current = current_credential_scoped_generations(&batch);
+        let expected = key_card_snapshot_generations(["deepseek".to_string()]);
+        assert_eq!(
+            current.get("deepseek"),
+            expected.get("deepseek"),
+            "no rotation must compare equal and survive the retain"
+        );
+        assert!(!current.contains_key("claude"));
+
+        let mut all = batch;
+        let stale = retain_current_key_card_results(&mut all, &expected, &current);
+        assert!(stale.is_empty(), "nothing dropped without a rotation");
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn rotating_plain_api_key_clears_only_that_providers_old_state() {
+        let tmp = TempConfig::new();
+        let rotated = "deepseek";
+        let bystander = "aihubmix";
+        let _rotated = SnapCacheGuard::new(rotated);
+        let _bystander = SnapCacheGuard::new(bystander);
+        set_api_key_in(&tmp.dir, rotated, "key-a").unwrap();
+        set_api_key_in(&tmp.dir, bystander, "key-z").unwrap();
+        // Old-key state: a success snapshot, a 429 cooldown, alert history.
+        // (Provider ids are unique per test: last_ok is a process-global
+        // map, and parallel tests must not evict each other's fixtures.)
+        last_ok().lock().unwrap().insert(
+            rotated.into(),
+            CachedSnap {
+                at: 1_000,
+                snap: Snapshot::ok(
+                    rotated,
+                    "DeepSeek",
+                    None,
+                    vec![Metric::progress("Credits used", 80.0, None)],
+                ),
+            },
+        );
+        fail_state().lock().unwrap().insert(
+            rotated.into(),
+            FailState {
+                until_ms: i64::MAX,
+                note: "HTTP 429 rate limited".into(),
+            },
+        );
+        alerts::insert_state_for_test(&format!("{rotated}:Credits used"));
+        last_ok().lock().unwrap().insert(
+            bystander.into(),
+            CachedSnap {
+                at: 2_000,
+                snap: Snapshot::ok(bystander, "Z.ai", None, vec![]),
+            },
+        );
+
+        set_api_key_in(&tmp.dir, rotated, "key-b").unwrap();
+
+        {
+            let cache = last_ok().lock().unwrap();
+            assert!(
+                !cache.contains_key(rotated),
+                "the old account's success snapshot must not survive a rotation"
+            );
+            assert!(
+                cache.contains_key(bystander),
+                "an untouched provider keeps its cache"
+            );
+        }
+        assert!(
+            fail_state().lock().unwrap().get(rotated).is_none(),
+            "the new key must not inherit the old key's 429 cooldown"
+        );
+        assert!(!alerts::has_state_for_test(&format!(
+            "{rotated}:Credits used"
+        )));
+        assert_eq!(
+            stored_pane_api_key(&tmp.dir.join(format!("{rotated}.json"))).as_deref(),
+            Some("key-b")
+        );
+        // Re-saving the identical key is not a credential change.
+        let before = key_card_snapshot_generations([rotated.to_string()]);
+        set_api_key_in(&tmp.dir, rotated, "key-b").unwrap();
+        let after = key_card_snapshot_generations([rotated.to_string()]);
+        assert_eq!(before.get(rotated), after.get(rotated));
+    }
+
+    #[test]
+    fn rotated_key_late_result_is_refused_and_401_shows_no_old_data() {
+        let tmp = TempConfig::new();
+        let id = "openrouter";
+        let _guard = SnapCacheGuard::new(id);
+        set_api_key_in(&tmp.dir, id, "key-a").unwrap();
+        // The refresh that starts under key A captures its generation…
+        let expected = key_card_snapshot_generations([id.to_string()]);
+        set_api_key_in(&tmp.dir, id, "key-b").unwrap();
+        // …so A's late success never re-enters anything downstream: the
+        // cache is already forgotten, and the publication-side retain
+        // drops the stale result while a CLI-login card is untouched.
+        assert!(!last_ok().lock().unwrap().contains_key(id));
+        let mut publishable = vec![
+            Snapshot::ok(id, "OpenRouter", None, vec![]),
+            Snapshot::ok("claude", "Claude", None, vec![]),
+        ];
+        let current = current_credential_scoped_generations(&publishable);
+        let stale = retain_current_key_card_results(&mut publishable, &expected, &current);
+        assert_eq!(stale, vec![id.to_string()]);
+        assert_eq!(publishable.len(), 1);
+        assert_eq!(publishable[0].id, "claude");
+    }
+
+    #[test]
+    fn late_failure_after_key_rotation_cannot_bench_the_new_context() {
+        let id = "kilo";
+        let _guard = SnapCacheGuard::new(id);
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let fut = async move {
+            // First poll = guarded() has captured the generation and read
+            // the bench state; the "request" is now in flight.
+            started_tx.send(()).expect("test gate open");
+            release_rx.await.expect("test release");
+            Snapshot::error(id, "Kilo", "HTTP 429 rate limited".into())
+        };
+        let handle = std::thread::spawn(move || {
+            tauri::async_runtime::block_on(guarded(id.to_string(), "Kilo".into(), fut))
+        });
+        started_rx.recv().unwrap();
+        // Rotate the credential while the old request is blocked.
+        drop(KeyCardMutationGuard::begin(vec![id.to_string()]));
+        release_tx.send(()).unwrap();
+        let snap = handle.join().expect("guarded thread");
+        assert_eq!(snap.status, "error");
+        assert!(
+            fail_state().lock().unwrap().get(id).is_none(),
+            "a late failure from the old key must not bench the new key"
+        );
+    }
+
+    #[test]
+    fn fresh_failure_without_rotation_still_benches() {
+        // Positive control for the test above: without a rotation the same
+        // failure does establish the cooldown.
+        let id = "kilo-control";
+        let _guard = SnapCacheGuard::new(id);
+        let snap = tauri::async_runtime::block_on(guarded(id.to_string(), "Kilo".into(), async {
+            Snapshot::error(id, "Kilo", "HTTP 429 rate limited".into())
+        }));
+        assert_eq!(snap.status, "error");
+        assert!(fail_state().lock().unwrap().contains_key(id));
+    }
+
+    #[test]
+    fn clearing_missing_key_file_succeeds_and_changes_nothing() {
+        let tmp = TempConfig::new();
+        let id = "qwen";
+        let _guard = SnapCacheGuard::new(id);
+        let before = key_card_snapshot_generations([id.to_string()]);
+        set_api_key_in(&tmp.dir, id, "").unwrap();
+        let after = key_card_snapshot_generations([id.to_string()]);
+        assert_eq!(
+            before.get(id),
+            after.get(id),
+            "clearing an absent key file is a no-op success"
+        );
+        assert!(!tmp.dir.join(format!("{id}.json")).exists());
+    }
+
+    #[test]
+    fn clearing_blocked_key_file_reports_failure_and_keeps_state() {
+        let tmp = TempConfig::new();
+        let id = "zai";
+        let _guard = SnapCacheGuard::new(id);
+        set_api_key_in(&tmp.dir, id, "key-a").unwrap();
+        last_ok().lock().unwrap().insert(
+            id.into(),
+            CachedSnap {
+                at: 1,
+                snap: Snapshot::ok(id, "Z.ai", None, vec![]),
+            },
+        );
+        let held = hold_no_delete(&tmp.dir.join(format!("{id}.json")));
+        let result = set_api_key_in(&tmp.dir, id, "");
+        drop(held);
+        let error = result.expect_err("a locked key file must not report success");
+        assert!(error.contains("remove key file"), "{error}");
+        assert!(
+            stored_pane_api_key(&tmp.dir.join(format!("{id}.json"))).is_some(),
+            "the key file itself must survive the failed clear"
+        );
+        assert!(
+            last_ok().lock().unwrap().contains_key(id),
+            "cached state stays consistent with the still-stored key"
+        );
+    }
+
+    #[test]
+    fn failed_key_save_keeps_the_old_credential_and_state() {
+        let tmp = TempConfig::new();
+        let id = "minimax";
+        let _guard = SnapCacheGuard::new(id);
+        set_api_key_in(&tmp.dir, id, "key-a").unwrap();
+        last_ok().lock().unwrap().insert(
+            id.into(),
+            CachedSnap {
+                at: 1,
+                snap: Snapshot::ok(id, "DeepSeek", None, vec![]),
+            },
+        );
+        let expected = key_card_snapshot_generations([id.to_string()]);
+        // ReplaceFile is blocked by the un-shared handle: the write fails
+        // after the temp file, before any state invalidation.
+        let held = hold_no_delete(&tmp.dir.join(format!("{id}.json")));
+        let result = set_api_key_in(&tmp.dir, id, "key-b");
+        drop(held);
+        assert!(result.is_err(), "a failed write must not report success");
+        assert_eq!(
+            stored_pane_api_key(&tmp.dir.join(format!("{id}.json"))).as_deref(),
+            Some("key-a"),
+            "the still-valid old key must survive a failed save"
+        );
+        assert!(last_ok().lock().unwrap().contains_key(id));
+        let after = key_card_snapshot_generations([id.to_string()]);
+        assert_eq!(
+            expected.get(id),
+            after.get(id),
+            "no context invalidation without a durable credential change"
+        );
     }
 
     #[test]
