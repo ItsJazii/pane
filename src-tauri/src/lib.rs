@@ -921,25 +921,45 @@ fn persist_last_ok_at(
     std::fs::write(path, serialized).map_err(|e| format!("write snapshot cache: {e}"))
 }
 
+#[cfg(test)]
+static TEST_PERSIST_LAST_OK_FAIL: AtomicBool = AtomicBool::new(false);
+static SNAPSHOT_CACHE_NEEDS_FLUSH: AtomicBool = AtomicBool::new(false);
+
 fn persist_last_ok(map: &HashMap<String, CachedSnap>) -> Result<(), String> {
+    #[cfg(test)]
+    if TEST_PERSIST_LAST_OK_FAIL.swap(false, Ordering::SeqCst) {
+        SNAPSHOT_CACHE_NEEDS_FLUSH.store(true, Ordering::Release);
+        return Err("test: persist last_ok failed".into());
+    }
     if cfg!(test) {
+        SNAPSHOT_CACHE_NEEDS_FLUSH.store(false, Ordering::Release);
         return Ok(());
     }
     let cache_file = providers::config_dir().join("last_snapshots.json");
-    persist_last_ok_at(&cache_file, map)
+    let result = persist_last_ok_at(&cache_file, map);
+    SNAPSHOT_CACHE_NEEDS_FLUSH.store(result.is_err(), Ordering::Release);
+    result
 }
 
 fn forget_provider_snapshots(ids: &[String]) -> Result<(), String> {
+    forget_provider_snapshots_inner(ids, false)
+}
+
+/// Drop cached snapshots for `ids`. Memory, fail-state, alerts, and the
+/// local HTTP publication are always cleared so a failed disk write cannot
+/// keep serving the old account. `persist_even_if_unchanged` rewrites the
+/// cache file on retry after a persist failure (memory may already be clean).
+fn forget_provider_snapshots_inner(
+    ids: &[String],
+    persist_even_if_unchanged: bool,
+) -> Result<(), String> {
     let mut map = last_ok().lock().unwrap();
     let mut next = map.clone();
     let mut changed = false;
     for id in ids {
         changed |= next.remove(id).is_some();
     }
-    if changed {
-        persist_last_ok(&next)?;
-        *map = next;
-    }
+    *map = next.clone();
     drop(map);
     let mut failures = fail_state().lock().unwrap();
     for id in ids {
@@ -947,6 +967,9 @@ fn forget_provider_snapshots(ids: &[String]) -> Result<(), String> {
         alerts::forget_snapshot(id);
     }
     httpapi::forget_snapshots(ids);
+    if changed || persist_even_if_unchanged {
+        persist_last_ok(&next)?;
+    }
     Ok(())
 }
 
@@ -1384,14 +1407,21 @@ fn is_credential_scoped_card(id: &str) -> bool {
     is_managed_key_card(id) || is_plain_api_key_provider(&family)
 }
 
-/// Moonshot's wallet folds into the Kimi card. Rotating either key must
-/// drop both snapshots and bump both generations, or the old wallet
-/// reappears on the surviving card.
-fn api_key_context_ids(provider: &str) -> Vec<String> {
+/// Snapshots to drop when this pasted key changes. Moonshot's wallet
+/// folds into the Kimi card, so rotating Moonshot must also forget the
+/// Kimi snapshot. Rotating only Kimi leaves the Moonshot snapshot —
+/// that wallet key did not change.
+fn api_key_snapshot_ids(provider: &str) -> Vec<String> {
     match provider {
-        "moonshot" | "kimi" => vec!["moonshot".into(), "kimi".into()],
+        "moonshot" => vec!["moonshot".into(), "kimi".into()],
         _ => vec![provider.to_string()],
     }
+}
+
+/// Credit high-water marks belong to one pasted key. Kimi and Moonshot
+/// do not share a pot — rotating Kimi must not zero Moonshot's meter.
+fn api_key_baseline_ids(provider: &str) -> Vec<String> {
+    vec![provider.to_string()]
 }
 
 /// Managed API families disable all their key cards together.
@@ -1419,6 +1449,7 @@ where
         .get(id)
         .copied()
         .unwrap_or(0);
+    let _credit_bind = CreditMeterBindGuard::begin(credit_meter_bind_ids(id));
     let now = now_ms() as i64;
     let benched = {
         let map = fail_state().lock().unwrap();
@@ -2311,19 +2342,82 @@ fn stored_pane_api_key(path: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
+struct CreditMeterBindGuard {
+    ids: Vec<String>,
+}
+
+impl CreditMeterBindGuard {
+    fn begin(ids: Vec<String>) -> Self {
+        for id in &ids {
+            providers::bind_credit_meter_generation(
+                id,
+                providers::credit_baseline_generation(id),
+            );
+        }
+        Self { ids }
+    }
+}
+
+impl Drop for CreditMeterBindGuard {
+    fn drop(&mut self) {
+        for id in &self.ids {
+            providers::unbind_credit_meter_generation(id);
+        }
+    }
+}
+
+fn credit_meter_bind_ids(id: &str) -> Vec<String> {
+    match id {
+        "kimi" => vec!["kimi".into(), "moonshot".into()],
+        _ => vec![id.to_string()],
+    }
+}
+
+fn api_key_context_is_dirty(dir: &Path, provider: &str) -> bool {
+    let snapshot_ids = api_key_snapshot_ids(provider);
+    let baseline_ids = api_key_baseline_ids(provider);
+    if SNAPSHOT_CACHE_NEEDS_FLUSH.load(Ordering::Acquire) {
+        return true;
+    }
+    {
+        let cache = last_ok().lock().unwrap();
+        if snapshot_ids.iter().any(|id| cache.contains_key(id)) {
+            return true;
+        }
+    }
+    {
+        let failures = fail_state().lock().unwrap();
+        if snapshot_ids.iter().any(|id| failures.contains_key(id)) {
+            return true;
+        }
+    }
+    providers::credit_baselines_contain(dir, &baseline_ids)
+}
+
+fn context_cleanup_error(error: String) -> String {
+    format!("the key change is saved, but clearing the previous key's cached data failed: {error}")
+}
+
 /// A credential actually changed: everything the old key produced — the
 /// last-good snapshot (memory + disk), the local HTTP publication, the
 /// fail-state cooldown, the alert history, and the credit high-water
-/// mark — belongs to the old account. Moonshot's wallet folds into the
-/// Kimi card, so those two ids always invalidate together.
+/// mark — belongs to the old account. Moonshot rotation also drops the
+/// folded Kimi snapshot; each key's credit baseline is forgotten alone.
 fn invalidate_api_key_context(dir: &Path, provider: &str) -> Result<(), String> {
-    let ids = api_key_context_ids(provider);
-    let _mutation = KeyCardMutationGuard::begin(ids.clone());
-    forget_provider_snapshots(&ids).map_err(|e| {
-        format!("the key change is saved, but clearing the previous key's cached data failed: {e}")
-    })?;
-    providers::forget_credit_baselines_in(dir, &ids);
-    Ok(())
+    let snapshot_ids = api_key_snapshot_ids(provider);
+    let baseline_ids = api_key_baseline_ids(provider);
+    let _mutation = KeyCardMutationGuard::begin(snapshot_ids.clone());
+    let snap_err = forget_provider_snapshots_inner(&snapshot_ids, true)
+        .err()
+        .map(context_cleanup_error);
+    let base_err = providers::forget_credit_baselines_in(dir, &baseline_ids)
+        .err()
+        .map(context_cleanup_error);
+    match (snap_err, base_err) {
+        (None, None) => Ok(()),
+        (Some(error), None) | (None, Some(error)) => Err(error),
+        (Some(left), Some(right)) => Err(format!("{left}; {right}")),
+    }
 }
 
 fn set_api_key_in(dir: &Path, provider: &str, key: &str) -> Result<(), String> {
@@ -2340,7 +2434,7 @@ fn set_api_key_in(dir: &Path, provider: &str, key: &str) -> Result<(), String> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(format!("remove key file: {e}")),
         }
-        if previous_key.is_some() {
+        if previous_key.is_some() || api_key_context_is_dirty(dir, provider) {
             invalidate_api_key_context(dir, provider)?;
         }
         return Ok(());
@@ -2348,7 +2442,9 @@ fn set_api_key_in(dir: &Path, provider: &str, key: &str) -> Result<(), String> {
     let raw = serde_json::json!({ "apiKey": key }).to_string();
     providers::onenewapi::store::atomic_write(&path, &raw)
         .map_err(|e| format!("write key file: {e}"))?;
-    if previous_key.as_deref() != Some(key) {
+    // Same-key retries still invalidate when a previous cleanup left
+    // snapshots, cooldowns, or credit baselines behind.
+    if previous_key.as_deref() != Some(key) || api_key_context_is_dirty(dir, provider) {
         invalidate_api_key_context(dir, provider)?;
     }
     Ok(())
@@ -3073,12 +3169,14 @@ mod tests {
         retain_current_key_card_results, strip_entry_application_order, strip_icon_ids_to_clear,
         strip_is_active, strip_reset_ids, telemetry_starred_id, is_stable_metric_label,
         updater_endpoint_strings, CachedSnap, FailState,
-        KeyCardMutationGuard, StripEntry, SNAPSHOT_CACHE_MS, STALE_GRACE_MS,
+        KeyCardMutationGuard, StripEntry, SNAPSHOT_CACHE_MS, SNAPSHOT_CACHE_NEEDS_FLUSH,
+        STALE_GRACE_MS, TEST_PERSIST_LAST_OK_FAIL,
     };
     use crate::alerts;
     use crate::providers::{Metric, Snapshot};
     use serde_json::{json, Value};
     use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::Ordering;
 
     fn strip_entry(id: &str, value: u32) -> StripEntry {
         StripEntry {
@@ -3772,6 +3870,116 @@ mod tests {
             doc["moonshot"], 12.0,
             "an untouched provider keeps its baseline"
         );
+    }
+
+    #[test]
+    fn rotating_kimi_does_not_reset_moonshot_usage() {
+        let tmp = TempConfig::new();
+        let _kimi = SnapCacheGuard::new("kimi");
+        let _moonshot = SnapCacheGuard::new("moonshot");
+        set_api_key_in(&tmp.dir, "kimi", "kimi-a").unwrap();
+        set_api_key_in(&tmp.dir, "moonshot", "ms-a").unwrap();
+        seed_cached_ok("kimi", "Kimi Code");
+        seed_cached_ok("moonshot", "Kimi API");
+        std::fs::write(
+            tmp.dir.join("credit_baselines.json"),
+            r#"{"kimi": 5.0, "moonshot": 12.0}"#,
+        )
+        .unwrap();
+
+        set_api_key_in(&tmp.dir, "kimi", "kimi-b").unwrap();
+
+        let cache = last_ok().lock().unwrap();
+        assert!(
+            !cache.contains_key("kimi"),
+            "rotated Kimi snapshot must go"
+        );
+        assert!(
+            cache.contains_key("moonshot"),
+            "Moonshot's key did not change, so its snapshot and meter stay"
+        );
+        let doc: Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.dir.join("credit_baselines.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(doc.get("kimi").is_none());
+        assert_eq!(doc["moonshot"], 12.0);
+    }
+
+    #[test]
+    fn leftover_cache_is_cleared_when_retrying_the_same_key() {
+        let tmp = TempConfig::new();
+        let id = "openrouter";
+        let _guard = SnapCacheGuard::new(id);
+        set_api_key_in(&tmp.dir, id, "key-b").unwrap();
+        seed_cached_ok(id, "OpenRouter");
+        fail_state().lock().unwrap().insert(
+            id.into(),
+            FailState {
+                until_ms: i64::MAX,
+                note: "HTTP 429 rate limited".into(),
+            },
+        );
+
+        set_api_key_in(&tmp.dir, id, "key-b").unwrap();
+
+        assert!(
+            !last_ok().lock().unwrap().contains_key(id),
+            "retrying the already-saved key must finish a leftover cleanup"
+        );
+        assert!(fail_state().lock().unwrap().get(id).is_none());
+    }
+
+    #[test]
+    fn blocked_credit_baselines_file_is_reported() {
+        let tmp = TempConfig::new();
+        let id = "qwen";
+        let _guard = SnapCacheGuard::new(id);
+        set_api_key_in(&tmp.dir, id, "key-a").unwrap();
+        std::fs::create_dir(tmp.dir.join("credit_baselines.json")).unwrap();
+        let error = set_api_key_in(&tmp.dir, id, "key-b").expect_err("baseline IO must surface");
+        assert!(
+            error.contains("credit baselines") || error.contains("cached data"),
+            "a baseline rewrite failure must not report success: {error}"
+        );
+        assert_eq!(
+            stored_pane_api_key(&tmp.dir.join(format!("{id}.json"))).as_deref(),
+            Some("key-b")
+        );
+    }
+
+    #[test]
+    fn failed_snapshot_persist_clears_memory_and_is_retryable() {
+        let tmp = TempConfig::new();
+        let id = "deepseek";
+        let _guard = SnapCacheGuard::new(id);
+        struct PersistFailGuard;
+        impl Drop for PersistFailGuard {
+            fn drop(&mut self) {
+                TEST_PERSIST_LAST_OK_FAIL.store(false, Ordering::SeqCst);
+                SNAPSHOT_CACHE_NEEDS_FLUSH.store(false, Ordering::Release);
+            }
+        }
+        let _persist_guard = PersistFailGuard;
+        set_api_key_in(&tmp.dir, id, "key-a").unwrap();
+        seed_cached_ok(id, "DeepSeek");
+        TEST_PERSIST_LAST_OK_FAIL.store(true, Ordering::SeqCst);
+        let error = set_api_key_in(&tmp.dir, id, "key-b").expect_err("persist fail must surface");
+        assert!(
+            error.contains("cached data"),
+            "cleanup failure must not look like a successful save: {error}"
+        );
+        assert_eq!(
+            stored_pane_api_key(&tmp.dir.join(format!("{id}.json"))).as_deref(),
+            Some("key-b")
+        );
+        assert!(
+            !last_ok().lock().unwrap().contains_key(id),
+            "memory must drop the old snapshot even when disk persist fails"
+        );
+        set_api_key_in(&tmp.dir, id, "key-b").unwrap();
+        assert!(!last_ok().lock().unwrap().contains_key(id));
+        assert!(!SNAPSHOT_CACHE_NEEDS_FLUSH.load(Ordering::Acquire));
     }
 
     #[test]
