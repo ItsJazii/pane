@@ -1,11 +1,13 @@
 # Roadmap — full Mac parity (and beyond)
 
-**Status (v0.4.48, 2026-09-09): every wave below is shipped, and the
+**Status (v0.4.49, 2026-09-10): every wave below is shipped, and the
 post-launch releases keep going.** Pane has full feature parity with the
-macOS original plus 22 providers, multi-site One/New API key management,
+macOS original plus 23 providers (Sub2API multi-site key tracking
+landed), multi-site One/New API key management,
 Kimi Code plan keys without a CLI login, resilient modern Cursor plan
 fallbacks, English/Chinese/Russian UI, signed CI updates, live model
-pricing, and a Mac-parity design pass (inset cards, wedge spend donut,
+pricing (now with time-of-day peak windows), and a Mac-parity design
+pass (inset cards, wedge spend donut,
 in-popover drag reorder, curated share cards). The primary site is
 `trypane.xyz`, and recent cuts keep spend honest against fast-moving
 vendor pricing (Cognition SWE/Penguin, AihubMix DeepSeek, Devin's fast

@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.4.49 — 2026-09-10
+
+### Added
+- **Sub2API usage tracking with multiple sites and keys.** Each saved
+  site+key pair gets a stable card with total and rolling key quotas,
+  daily/weekly/monthly subscription allowances, wallet balances
+  (including debt), expiry, and collapsible request/token/cost
+  summaries. Cards survive edits, failed refreshes keep explicitly
+  stale history, and the tightest allowance projects into the tray
+  with quota alerts.
 
 ### Changed
 - **DeepSeek V4.1 Flash repriced to the new official card.** Effective
