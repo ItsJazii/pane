@@ -3,6 +3,12 @@
 ## Unreleased
 
 ### Fixed
+- **A corrupt config.json can no longer eat the last good backup.**
+  Saves used to copy the main file over `config.json.bak` first. If
+  the main file was already garbage, that clobbered the only
+  recoverable copy — and a failed write after that left both files
+  bad. The backup now refreshes only while the main file still
+  parses (closes #203).
 - **Pasting a new API key no longer keeps the old account's numbers.**
   Rotating a plain key (DeepSeek, Moonshot, OpenRouter, …) now drops
   that card's cached snapshot, cooldown, alerts, and credit high-water
