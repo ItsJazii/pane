@@ -9,6 +9,12 @@
   recoverable copy — and a failed write after that left both files
   bad. The backup now refreshes only while the main file still
   parses (closes #203).
+- **Pasting a new API key no longer keeps the old account's numbers.**
+  Rotating a plain key (DeepSeek, Moonshot, OpenRouter, …) now drops
+  that card's cached snapshot, cooldown, alerts, and credit high-water
+  mark. Moonshot and Kimi share a folded wallet, so rotating either
+  key clears both. In-flight results from the old key cannot bench or
+  restore the new one (closes #204).
 
 ## 0.4.49 — 2026-09-10
 
