@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Changed
+- **Update checks are eager again.** Opening the popover asks the
+  update server every time, like it did before 0.4.49's 4 h gate, so
+  a just-published release shows up on the next tray click. A quiet
+  background check still runs every 4 h if the popover never opens.
+
 ### Fixed
 - **A corrupt config.json can no longer eat the last good backup.**
   Saves used to copy the main file over `config.json.bak` first. If

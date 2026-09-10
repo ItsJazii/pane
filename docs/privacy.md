@@ -15,7 +15,7 @@ This is the complete list. Anything not listed here does not happen.
 | User-configured One/New API origins | Status probe when saving/changing a site, plus one unauthenticated backfill if a stored site has no display unit; billing on every refresh for enabled keys | `/api/status` with no key. Subscription + usage send that site's key as Bearer, **only to that origin** — never to Pane servers. |
 | User-configured Sub2API origins | Each enabled key's scheduled refresh; saving only validates local input | `GET /v1/usage` with that key as Bearer, only to its configured origin, without redirects or fallback endpoints. |
 | `raw.githubusercontent.com` (LiteLLM), `models.dev`, `robinebers.github.io` | ~Daily | Anonymous GET for public model price tables (no identifying data) |
-| `trypane.xyz/api/update` (the legacy `pane.jazii.dev/api/update` redirects there; GitHub Releases is the final fallback) | On launch + every 4 h | Anonymous GET for the update manifest, carrying the app version. See "The update check" below for exactly what this counts. |
+| `trypane.xyz/api/update` (the legacy `pane.jazii.dev/api/update` redirects there; GitHub Releases is the final fallback) | On launch, whenever the popover opens, and every 4 h in the background | Anonymous GET for the update manifest, carrying the app version. See "The update check" below for exactly what this counts. |
 | `us.i.posthog.com` | Once per day (unless switched off) | The two anonymous daily-statistic events described in "Anonymous usage statistics" below — a random ID, version, enabled-provider list, and per-provider success/failure counts. Never usage amounts, spend, keys, or error text. |
 | `127.0.0.1:11434` (your own PC) | Every refresh, if Ollama is enabled | Local-only query of your Ollama server |
 
@@ -65,7 +65,8 @@ auditable file: [`src-tauri/src/telemetry.rs`](../src-tauri/src/telemetry.rs)
 ## The update check
 
 Pane has to ask *somewhere* "is there a newer version?" — that request
-existed from day one. New builds ask `trypane.xyz` first and use GitHub as
+existed from day one. It runs at launch, whenever you open the
+popover, and every 4 h in the background if the popover never opens. New builds ask `trypane.xyz` first and use GitHub as
 the automatic fallback. Old builds that still call `pane.jazii.dev` are
 handled by a permanent redirect to `trypane.xyz`. Every endpoint serves
 the same manifest, and every update is still signature-verified against

@@ -2942,48 +2942,30 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
     }
 }
 
-/// The 4 h cadence documented in docs/privacy.md is enforced HERE, so the
-/// frontend's launch/popover invokes and the background loop share one
-/// scheduler: inside the window, callers get the cached answer — no network.
-/// (last attempt epoch secs, cached available version)
-static UPDATE_CHECK: Mutex<(u64, Option<String>)> = Mutex::new((0, None));
-
-async fn gated_update_check(app: &tauri::AppHandle) -> Result<Option<String>, String> {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-    {
-        let st = UPDATE_CHECK.lock().unwrap();
-        if st.0 != 0 && now.saturating_sub(st.0) < 4 * 3600 {
-            return Ok(st.1.clone());
-        }
-    }
-    // Stamp the attempt before awaiting so concurrent callers take the
-    // cached path instead of doubling the request. Failures keep the stamp:
-    // an offline machine must not retry on every popover open.
-    UPDATE_CHECK.lock().unwrap().0 = now;
-    let found = build_updater(app)?
+async fn live_update_check(app: &tauri::AppHandle) -> Result<Option<String>, String> {
+    Ok(build_updater(app)?
         .check()
         .await
         .map_err(|e| e.to_string())?
-        .map(|u| u.version);
-    *UPDATE_CHECK.lock().unwrap() = (now, found.clone());
-    Ok(found)
+        .map(|u| u.version))
 }
 
-/// Update check for the footer button. The backend gate enforces the
-/// documented cadence, so launch/popover invokes are cheap cache reads.
+/// Update check for the footer. Launch and every popover open hit the
+/// network — same as before the 0.4.49 4 h gate — so a just-published
+/// release shows up the next time you open Pane.
 #[tauri::command]
 async fn check_update(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    gated_update_check(&app).await
+    live_update_check(&app).await
 }
 
-/// Startup + every 4 h: quiet update check; a hit emits "update-available"
-/// with the new version so the frontend can show its banner. 404 (no
-/// releases yet) and offline are non-events.
+/// Quiet backup if the popover never opens: check at startup, then every
+/// 4 h. A hit emits "update-available" so the footer can show the button.
+/// 404 (no releases yet) and offline are non-events.
 fn spawn_update_checker(app: &tauri::AppHandle) {
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         loop {
-            match gated_update_check(&handle).await {
+            match live_update_check(&handle).await {
                 Ok(Some(version)) => {
                     let _ = handle.emit("update-available", version);
                 }
