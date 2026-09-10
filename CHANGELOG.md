@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **A corrupt config.json can no longer eat the last good backup.**
+  Saves used to copy the main file over `config.json.bak` first. If
+  the main file was already garbage, that clobbered the only
+  recoverable copy — and a failed write after that left both files
+  bad. The backup now refreshes only while the main file still
+  parses (closes #203).
+
 ## 0.4.49 — 2026-09-10
 
 ### Added
