@@ -7,8 +7,10 @@
   2026-09-10: off-peak is $0.15 in / $0.60 out / $0.003 cache read, and
   weekday peak hours (01:00–04:00 and 06:00–10:00 UTC) bill at 2× the
   whole card — Pane's first time-of-day pricing, applied per spend
-  event. AihubMix mirrors the same windows with its ~3% gateway markup.
-  Cached spend from before this update is discarded.
+  event. Events before the changeover keep the flat launch card, and
+  AihubMix-routed spend bills that gateway's own ~3% markup. Session-
+  aggregated logs (Hermes) split boundary-crossing sessions by
+  duration. Cached spend from before this update is discarded.
 
 ### Security
 - **Bundled SQLite moved past the public FTS5 CVEs.** Pane opens
