@@ -185,17 +185,24 @@ pub fn spend_slice(provider: &str, base_url: &str) -> (&'static str, &'static st
 /// keys that cannot leak those rates onto other routes.
 pub fn price_lookup_slug(model: &str, provider: &str, base_url: &str) -> String {
     if route_blob(provider, base_url).contains("aihubmix") {
-        return match display_model(model) {
+        let bare = display_model(model);
+        // V4.1 Flash — including dated snapshots — bills AihubMix's own
+        // card (~3.3% over official), never the direct DeepSeek rates.
+        let mut sku = bare;
+        if let Some((head, tail)) = bare.rsplit_once('-') {
+            if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) {
+                sku = head;
+            }
+        }
+        if matches!(sku, "deepseek-v4.1-flash" | "deepseek-v4-1-flash") {
+            return "aihubmix/deepseek-v4.1-flash".into();
+        }
+        return match bare {
             "glm-5.3" => "coding-glm-5.3".into(),
             "hy4-preview" => "aihubmix/hy4-preview".into(),
             "qwen3.8-flash" => "aihubmix/qwen3.8-flash".into(),
             "qwen3.8-max-0902" | "qwen3.8-max-2026-09-02" => {
                 "aihubmix/qwen3.8-max-2026-09-02".into()
-            }
-            // AihubMix bills its own card for V4.1 Flash (~3.3% over
-            // official) — route to the gateway SKU, don't price direct.
-            "deepseek-v4.1-flash" | "deepseek-v4-1-flash" => {
-                "aihubmix/deepseek-v4.1-flash".into()
             }
             _ => model.into(),
         };
@@ -470,6 +477,19 @@ mod tests {
         assert_eq!(
             price_lookup_slug("qwen3.8-max-0902", "nous-api", ""),
             "qwen3.8-max-0902"
+        );
+        // V4.1 Flash (and dated snapshots) route to the AihubMix SKU.
+        assert_eq!(
+            price_lookup_slug("deepseek-v4.1-flash", "custom", "https://aihubmix.com/v1"),
+            "aihubmix/deepseek-v4.1-flash"
+        );
+        assert_eq!(
+            price_lookup_slug("deepseek-v4.1-flash-0910", "custom", "https://aihubmix.com/v1"),
+            "aihubmix/deepseek-v4.1-flash"
+        );
+        assert_eq!(
+            price_lookup_slug("deepseek-v4.1-flash", "deepseek", ""),
+            "deepseek-v4.1-flash"
         );
     }
 

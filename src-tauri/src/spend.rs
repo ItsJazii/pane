@@ -1225,15 +1225,29 @@ fn hermes() -> Vec<(&'static str, &'static str, FileData)> {
                 };
                 // Rows aggregate a whole session's requests — long-context
                 // stays base (same reasoning as the Cursor CSV scanner).
-                // Peak pricing: a session spanning a boundary splits its
-                // cost by duration share (the only signal we have) —
-                // off-peak at 1×, the peak share at 2×. One event keeps
-                // the day attribution on last_seen.
+                // A session can straddle the card changeover AND a peak
+                // boundary: price each duration share at its own card and
+                // window (legacy 1×, new off-peak 1×, new peak 2×). One
+                // event keeps the day attribution on last_seen.
                 let total_ms = (ev.ts_ms - ev.start_ms).max(0);
                 let peak_ms = pricing::peak_overlap_ms(ev.start_ms, ev.ts_ms);
-                let cost = if pricing::peak_windowed(&ev.model) && total_ms > 0 && peak_ms > 0 {
-                    let base = pricing::request_cost(&p, &u, false);
-                    base * (1.0 + peak_ms as f64 / total_ms as f64)
+                let legacy_ms = pricing::V41_FLASH_CHANGEOVER_MS
+                    .min(ev.ts_ms)
+                    .saturating_sub(ev.start_ms)
+                    .clamp(0, total_ms);
+                let cost = if pricing::peak_windowed(&ev.model)
+                    && total_ms > 0
+                    && (peak_ms > 0 || legacy_ms > 0)
+                {
+                    let new_base = pricing::request_cost(&p, &u, false);
+                    let legacy_base = pricing::v41_flash_legacy_card(&ev.model, ev.start_ms)
+                        .map(|lp| pricing::request_cost(&lp, &u, false))
+                        .unwrap_or(new_base);
+                    let off_ms = total_ms - legacy_ms - peak_ms;
+                    (legacy_base * legacy_ms as f64
+                        + new_base * off_ms as f64
+                        + new_base * 2.0 * peak_ms as f64)
+                        / total_ms as f64
                 } else {
                     cost_for(&ev.model, &p, &u, f64::INFINITY, ts)
                 };

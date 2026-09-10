@@ -104,7 +104,7 @@ pub fn request_cost_at(p: &Price, u: &Usage, threshold: f64) -> f64 {
 /// 2026-09-10T04:00Z — DeepSeek's V4.1 Flash card changeover: before it
 /// the model billed at AihubMix's flat launch card, and no peak windows
 /// existed at all.
-const V41_FLASH_CHANGEOVER_MS: i64 = 1_789_012_800_000;
+pub const V41_FLASH_CHANGEOVER_MS: i64 = 1_789_012_800_000;
 
 /// The V4.1 Flash SKU under any log spelling: gateway prefixes and Pi's
 /// routing tag peeled, dated snapshot tails and effort suffixes stripped
