@@ -1919,16 +1919,44 @@ fn grok() -> ProviderSpend {
 /// Returns OpenCode's spend plus the AihubMix rows as raw FileData — the
 /// caller merges in AihubMix traffic from other CLIs (Claude Code) before
 /// building the card's spend.
-fn opencode() -> (ProviderSpend, FileData) {
+fn fold_opencode_data(
+    events: impl IntoIterator<Item = (f64, f64, f64, String, String)>,
+) -> (FileData, FileData) {
     let mut oc = FileData::default();
     let mut aihubmix = FileData::default();
-    for (ts_ms, cost, tokens, model, provider) in providers::opencode::collect_cost_events() {
+    for (ts_ms, cost, tokens, model, provider) in events {
         if let Some(ts) = DateTime::from_timestamp_millis(ts_ms as i64) {
             let target = if provider == "aihubmix" { &mut aihubmix } else { &mut oc };
             add_event(target, ts, &model, cost, tokens);
         }
     }
-    (build_spend("opencode", "OpenCode", oc), aihubmix)
+    (oc, aihubmix)
+}
+
+/// One discovery pass, then partition. Calling extra_ledger_homes twice
+/// could move a dir across the default/extra boundary if auth swapped
+/// between the two reads and double-count that ledger.
+fn opencode_accounts() -> (ProviderSpend, Vec<ProviderSpend>, FileData) {
+    let homes = providers::opencode::extra_ledger_homes();
+    let (mut oc, mut aihubmix) =
+        fold_opencode_data(providers::opencode::collect_cost_events());
+    let mut groups: std::collections::BTreeMap<String, (String, FileData)> =
+        std::collections::BTreeMap::new();
+    for (id, name, dir) in homes {
+        let (data, extra_ai) = fold_opencode_data(providers::opencode::collect_cost_events_in(&dir));
+        merge_data(&mut aihubmix, extra_ai);
+        if id == "opencode" {
+            merge_data(&mut oc, data);
+        } else {
+            let entry = groups.entry(id).or_insert((name, FileData::default()));
+            merge_data(&mut entry.1, data);
+        }
+    }
+    let extras = groups
+        .into_iter()
+        .map(|(id, (name, data))| build_spend(id, name, data))
+        .collect();
+    (build_spend("opencode", "OpenCode", oc), extras, aihubmix)
 }
 
 /// Devin CLI keeps per-request token metrics in its local sessions.db
@@ -2309,7 +2337,7 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
             hermes_rest.push(build_spend(id, name, data));
         }
     }
-    let (opencode_sp, mut aihubmix_data) = opencode();
+    let (opencode_sp, extra_opencode_spends, mut aihubmix_data) = opencode_accounts();
     merge_data(&mut aihubmix_data, qwen_via_claude);
     let aihubmix_sp = build_spend("aihubmix", "AihubMix", aihubmix_data);
     let (codex_sp, kimi_via_codex) = codex(pi_codex);
@@ -2329,6 +2357,7 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
     ];
     list.extend(extra_claude_spends);
     list.extend(extra_codex_spends);
+    list.extend(extra_opencode_spends);
     list.extend(hermes_rest);
     if let Some(csv) = cursor_csv {
         list.push(cursor_from_csv(&csv));

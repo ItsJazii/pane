@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 const ID: &str = "opencode";
 const NAME: &str = "OpenCode";
+const MAX_AUTH_BYTES: u64 = 64 * 1024;
 
 // Primary source: the official account-wide usage API that shipped in
 // anomalyco/opencode#16513 (2026-08-11) — GET /zen/go/v1/usage with the Go
@@ -33,19 +34,229 @@ pub fn data_dir() -> PathBuf {
 /// Reads an entry like {"opencode-go": {"type": "api", "key": "..."}} from
 /// OpenCode's auth.json. Also used by the OpenRouter provider.
 pub fn auth_entry_key(entry: &str) -> Option<String> {
-    let raw = std::fs::read_to_string(data_dir().join("auth.json")).ok()?;
+    auth_entry_key_in(&data_dir(), entry)
+}
+
+fn auth_entry_key_in(dir: &Path, entry: &str) -> Option<String> {
+    let raw = super::read_small_text(&dir.join("auth.json"), MAX_AUTH_BYTES, "auth.json").ok()?;
     let doc: Value = serde_json::from_str(&raw).ok()?;
     doc.get(entry)?
         .get("key")
         .and_then(Value::as_str)
+        .filter(|k| !k.is_empty())
         .map(str::to_string)
+}
+
+/// Stable fingerprint of a credential — never the key itself. Written
+/// next to the snapshot cache so swapping auth.json drops the old
+/// account's last-good numbers instead of painting them under `opencode`.
+fn fingerprint_key(key: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in key.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn dir_identity(dir: &Path) -> Option<String> {
+    match dir_auth_state(dir) {
+        DirAuth::Identified(fp) => Some(fp),
+        _ => None,
+    }
+}
+
+/// Parsed-no-Go is safe to keep discovering (OpenRouter-only default).
+/// An existing auth.json that we could not read or parse might be a
+/// truncate-and-rewrite; abort extras so the later default snapshot
+/// cannot card the same key twice.
+enum DirAuth {
+    Identified(String),
+    ParsedNoGo,
+    Unreadable,
+    Missing,
+}
+
+fn dir_auth_state(dir: &Path) -> DirAuth {
+    let path = dir.join("auth.json");
+    if !path.exists() {
+        return DirAuth::Missing;
+    }
+    let Ok(raw) = super::read_small_text(&path, MAX_AUTH_BYTES, "auth.json") else {
+        return DirAuth::Unreadable;
+    };
+    let Ok(doc) = serde_json::from_str::<Value>(&raw) else {
+        return DirAuth::Unreadable;
+    };
+    match doc
+        .get("opencode-go")
+        .and_then(|e| e.get("key"))
+        .and_then(Value::as_str)
+        .filter(|k| !k.is_empty())
+    {
+        Some(k) => DirAuth::Identified(fingerprint_key(k)),
+        None => DirAuth::ParsedNoGo,
+    }
+}
+
+/// The default login's account identity, for the snapshot-cache stamp.
+pub fn default_identity() -> Option<String> {
+    dir_identity(&data_dir())
+}
+
+pub struct OpenCodeAccount {
+    pub id: String,
+    pub name: String,
+    pub dir: PathBuf,
+    pub fingerprint: String,
+}
+
+/// Extra OpenCode profiles beyond `~/.local/share/opencode`: OPENCODE_HOME,
+/// `~/.local/share/opencode-*`, and the same scan roots Claude/Codex use.
+/// A dir that can't name its account never becomes a card; a dir whose
+/// fingerprint matches an already-seen login is skipped.
+pub fn discover_extra_accounts() -> Vec<OpenCodeAccount> {
+    discover_from(&data_dir(), extra_data_dirs(), true)
+}
+
+fn discover_from(
+    default: &Path,
+    extras: Vec<PathBuf>,
+    abort_unreadable_default: bool,
+) -> Vec<OpenCodeAccount> {
+    // Claude/Codex abort when the default login exists but can't be
+    // named. OpenCode splits that: a parsed file with no Go key is
+    // OpenRouter-only (empty `seen`, extras still card). A file that
+    // exists but will not parse is treated as mid-write — usage cards
+    // stay hidden so a later successful default snapshot cannot
+    // duplicate. Spend still walks extras (`abort_unreadable_default`
+    // = false) so those ledgers are not dropped for one rewrite.
+    let mut seen = Vec::new();
+    match dir_auth_state(default) {
+        DirAuth::Unreadable if abort_unreadable_default => return Vec::new(),
+        DirAuth::Unreadable | DirAuth::ParsedNoGo | DirAuth::Missing => {}
+        DirAuth::Identified(fp) => seen.push(fp),
+    }
+
+    let mut out = Vec::new();
+    for dir in extras {
+        if same_dir(&dir, default) {
+            continue;
+        }
+        let Some(fp) = dir_identity(&dir) else { continue };
+        if !scoped_id_charset(&fp) {
+            continue;
+        }
+        if seen.iter().any(|s| s == &fp) {
+            continue;
+        }
+        seen.push(fp.clone());
+        let hash8: String = fp.chars().take(8).collect();
+        let name = match dir_label(&dir) {
+            Some(l) => format!("OpenCode — {l}"),
+            None => format!("OpenCode @{hash8}"),
+        };
+        out.push(OpenCodeAccount {
+            id: format!("opencode@{hash8}"),
+            name,
+            dir,
+            fingerprint: fp,
+        });
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+/// Extra homes that have a Go key, including dirs that share a
+/// fingerprint with the default login. Cards stay one-per-fingerprint;
+/// spend merges every ledger onto the matching card.
+pub fn extra_ledger_homes() -> Vec<(String, String, PathBuf)> {
+    extra_ledger_homes_from(&data_dir(), extra_data_dirs())
+}
+
+fn extra_ledger_homes_from(
+    default: &Path,
+    extras: Vec<PathBuf>,
+) -> Vec<(String, String, PathBuf)> {
+    let default_fp = match dir_auth_state(default) {
+        DirAuth::Identified(fp) => Some(fp),
+        _ => None,
+    };
+    let mut seen_dirs: Vec<PathBuf> = Vec::new();
+    let mut out = Vec::new();
+    for dir in extras {
+        if same_dir(&dir, &default) {
+            continue;
+        }
+        if seen_dirs.iter().any(|d| same_dir(d, &dir)) {
+            continue;
+        }
+        let Some(fp) = dir_identity(&dir) else { continue };
+        if !scoped_id_charset(&fp) {
+            continue;
+        }
+        seen_dirs.push(dir.clone());
+        let (id, name) = if default_fp.as_ref() == Some(&fp) {
+            (ID.to_string(), NAME.to_string())
+        } else {
+            let hash8: String = fp.chars().take(8).collect();
+            let name = match dir_label(&dir) {
+                Some(l) => format!("OpenCode — {l}"),
+                None => format!("OpenCode @{hash8}"),
+            };
+            (format!("opencode@{hash8}"), name)
+        };
+        out.push((id, name, dir));
+    }
+    out
+}
+
+fn extra_data_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(home) = std::env::var("OPENCODE_HOME") {
+        let home = home.trim();
+        if !home.is_empty() {
+            dirs.push(PathBuf::from(home));
+        }
+    }
+    if let Some(share) = dirs::home_dir().map(|h| h.join(".local").join("share")) {
+        if let Ok(entries) = std::fs::read_dir(share) {
+            for e in entries.flatten() {
+                let name = e.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with("opencode-") && e.path().is_dir() {
+                    dirs.push(e.path());
+                }
+            }
+        }
+    }
+    dirs.extend(super::account_scan_roots());
+    dirs
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(aa), Ok(bb)) => aa == bb,
+        _ => a == b,
+    }
+}
+
+fn dir_label(dir: &Path) -> Option<String> {
+    let name = dir.file_name()?.to_string_lossy();
+    name.strip_prefix("opencode-")
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+fn scoped_id_charset(raw: &str) -> bool {
+    !raw.is_empty() && raw.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 /// Query the live OpenCode ledger read-only. Copying db+WAL into
 /// `%APPDATA%\Pane\tmp` used the same pattern that grew Devin's temp
 /// journal to tens of GB — never clone a vendor database onto C:.
-fn with_live_db<T>(f: impl FnOnce(&Path) -> Result<T, String>) -> Result<T, String> {
-    let db_path = data_dir().join("opencode.db");
+fn with_live_db<T>(dir: &Path, f: impl FnOnce(&Path) -> Result<T, String>) -> Result<T, String> {
+    let db_path = dir.join("opencode.db");
     if !db_path.exists() {
         return Err("opencode.db not found — has OpenCode been used on this PC?".into());
     }
@@ -53,28 +264,47 @@ fn with_live_db<T>(f: impl FnOnce(&Path) -> Result<T, String>) -> Result<T, Stri
 }
 
 pub async fn snapshot() -> Snapshot {
-    match fetch().await {
+    snapshot_at(data_dir(), ID.to_string(), NAME.to_string(), None).await
+}
+
+pub async fn snapshot_at(
+    dir: PathBuf,
+    id: String,
+    name: String,
+    expected_fp: Option<String>,
+) -> Snapshot {
+    match fetch(&dir, &id, &name, expected_fp.as_deref()).await {
         Ok(s) => s,
-        Err(e) => Snapshot::error(ID, NAME, e),
+        Err(e) => Snapshot::error(&id, &name, e),
     }
 }
 
-async fn fetch() -> Result<Snapshot, String> {
-    let auth_path = data_dir().join("auth.json");
+async fn fetch(
+    dir: &Path,
+    id: &str,
+    name: &str,
+    expected_fp: Option<&str>,
+) -> Result<Snapshot, String> {
+    let auth_path = dir.join("auth.json");
     if !auth_path.exists() {
         return Ok(Snapshot::no_credentials(
-            ID,
-            NAME,
+            id,
+            name,
             "OpenCode sign-in not found. Run `opencode` and log in.",
         ));
     }
-    let Some(key) = auth_entry_key("opencode-go") else {
+    let Some(key) = auth_entry_key_in(dir, "opencode-go") else {
         return Ok(Snapshot::no_credentials(
-            ID,
-            NAME,
+            id,
+            name,
             "No OpenCode Go subscription found in auth.json.",
         ));
     };
+    if let Some(expected) = expected_fp {
+        if fingerprint_key(&key) != expected {
+            return Err("OpenCode login changed during refresh.".into());
+        }
+    }
 
     // Account-wide truth first; the local windows only when it fails
     // (offline, revoked key, or a gateway hiccup). The fallback names its
@@ -85,7 +315,7 @@ async fn fetch() -> Result<Snapshot, String> {
     match fetch_official(&key).await {
         Ok(metrics) => {
             FALLBACK_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
-            Ok(Snapshot::ok(ID, NAME, Some("Go".into()), metrics))
+            Ok(Snapshot::ok(id, name, Some("Go".into()), metrics))
         }
         Err(e) => {
             // Log the TRANSITION into fallback, not every refresh — an
@@ -98,7 +328,7 @@ async fn fetch() -> Result<Snapshot, String> {
             // history), the card must carry both causes — surfacing only
             // "opencode.db not found" would send someone troubleshooting
             // an offline/revoked-key card after the wrong problem.
-            let mut snap = local_windows_snapshot()
+            let mut snap = local_windows_snapshot(dir, id, name)
                 .map_err(|db| format!("usage API failed ({e}); local fallback: {db}"))?;
             snap.plan = Some("Go — this PC only".into());
             Ok(snap)
@@ -197,8 +427,8 @@ fn month_period_ending(resets_ms: i64) -> i64 {
 
 /// Fallback: the pre-API local computation from opencode.db — this PC's
 /// rows only, so shared subscriptions under-count here.
-fn local_windows_snapshot() -> Result<Snapshot, String> {
-    let w = with_live_db(|db| {
+fn local_windows_snapshot(dir: &Path, id: &str, name: &str) -> Result<Snapshot, String> {
+    let w = with_live_db(dir, |db| {
         let (msgs, capped) = read_messages(db)?;
         let rows: Vec<(f64, f64)> = msgs
             .into_iter()
@@ -231,7 +461,7 @@ fn local_windows_snapshot() -> Result<Snapshot, String> {
         )
         .with_reset(Some(w.monthly_resets_at), Some(w.monthly_period_ms)),
     ];
-    Ok(Snapshot::ok(ID, NAME, Some("Go".into()), metrics))
+    Ok(Snapshot::ok(id, name, Some("Go".into()), metrics))
 }
 
 struct GoWindows {
@@ -369,7 +599,11 @@ fn utc_date(year: i32, month: u32, day: u32, h: u32, m: u32, s: u32, ms: u32) ->
 /// Total Spend. The provider id lets the spend engine split gateway
 /// providers (AihubMix) into their own slice.
 pub fn collect_cost_events() -> Vec<(f64, f64, f64, String, String)> {
-    with_live_db(|db| {
+    collect_cost_events_in(&data_dir())
+}
+
+pub fn collect_cost_events_in(dir: &Path) -> Vec<(f64, f64, f64, String, String)> {
+    with_live_db(dir, |db| {
         Ok(read_messages(db)?
             .0
             .into_iter()
@@ -633,5 +867,120 @@ mod tests {
         let rows = [(ms("2026-01-31T09:00:00Z"), 1.0)];
         let w = go_windows(&rows, None, now);
         assert_eq!(w.monthly_resets_at, ms("2026-02-28T09:00:00Z") as i64);
+    }
+
+    #[test]
+    fn credential_fingerprint_is_stable_and_never_the_key() {
+        let key = "oc-secret-key-please-do-not-store";
+        let a = fingerprint_key(key);
+        let b = fingerprint_key(key);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 16);
+        assert!(scoped_id_charset(&a));
+        assert!(!a.contains(key));
+        assert_ne!(fingerprint_key(key), fingerprint_key("other-account"));
+    }
+
+    fn disc_root() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "pane-opencode-disc-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn write_auth(dir: &Path, body: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("auth.json"), body).unwrap();
+    }
+
+    #[test]
+    fn extra_profile_dir_becomes_its_own_card() {
+        let root = disc_root();
+        let extra = root.join("opencode-work");
+        write_auth(
+            &extra,
+            r#"{"opencode-go":{"type":"api","key":"work-key-aaa"}}"#,
+        );
+        let found = discover_from(&root.join("default"), vec![extra.clone()], true);
+        let fp = dir_identity(&extra).expect("fingerprint");
+        let hash8: String = fp.chars().take(8).collect();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, format!("opencode@{hash8}"));
+        assert_eq!(dir_label(&extra).as_deref(), Some("work"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn openrouter_only_default_still_discovers_extras() {
+        let root = disc_root();
+        let default = root.join("default");
+        let extra = root.join("opencode-work");
+        write_auth(
+            &default,
+            r#"{"openrouter":{"type":"api","key":"or-only"}}"#,
+        );
+        write_auth(
+            &extra,
+            r#"{"opencode-go":{"type":"api","key":"work-key-aaa"}}"#,
+        );
+        let found = discover_from(&default, vec![extra], true);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].id.starts_with("opencode@"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn unreadable_default_auth_hides_extras() {
+        let root = disc_root();
+        let default = root.join("default");
+        let extra = root.join("opencode-work");
+        write_auth(&default, "{not-json");
+        write_auth(
+            &extra,
+            r#"{"opencode-go":{"type":"api","key":"work-key-aaa"}}"#,
+        );
+        assert!(discover_from(&default, vec![extra.clone()], true).is_empty());
+        assert_eq!(discover_from(&default, vec![extra], false).len(), 1);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn extra_ledger_homes_merge_shared_and_default_keys() {
+        let root = disc_root();
+        let default = root.join("default");
+        let work = root.join("opencode-work");
+        let copy = root.join("opencode-copy");
+        let other = root.join("opencode-other");
+        write_auth(
+            &default,
+            r#"{"opencode-go":{"type":"api","key":"alice-key"}}"#,
+        );
+        write_auth(
+            &work,
+            r#"{"opencode-go":{"type":"api","key":"alice-key"}}"#,
+        );
+        write_auth(
+            &copy,
+            r#"{"opencode-go":{"type":"api","key":"alice-key"}}"#,
+        );
+        write_auth(
+            &other,
+            r#"{"opencode-go":{"type":"api","key":"bob-key"}}"#,
+        );
+        let found = extra_ledger_homes_from(
+            &default,
+            vec![work, copy.clone(), copy, other],
+        );
+        let alice: Vec<_> = found.iter().filter(|(id, _, _)| id == "opencode").collect();
+        let bob: Vec<_> = found
+            .iter()
+            .filter(|(id, _, _)| id.starts_with("opencode@"))
+            .collect();
+        assert_eq!(alice.len(), 2, "two extra homes share the default key");
+        assert_eq!(bob.len(), 1, "one distinct extra login");
+        std::fs::remove_dir_all(&root).ok();
     }
 }

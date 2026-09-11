@@ -3,12 +3,23 @@
 ## Unreleased
 
 ### Added
+- **OpenCode extra profiles each get their own card.** `OPENCODE_HOME`
+  and `~\.local\share\opencode-*` are discovered like Claude/Codex
+  extra logins. Swapping `auth.json` no longer restores the previous
+  account's numbers — a fingerprint of the current key (never the key
+  itself) stamps the snapshot cache (closes #218).
 - **Minimal view: one starred meter per card.** A Settings toggle (and
   a sidebar button) hides plan chips, extra rows, quick-links, and
   share. The percentage, reset countdown, Outdated chip, and drag
   grip stay. Total Spend is unchanged (closes #212).
 
 ### Fixed
+- **The local HTTP API no longer stamps restored snapshots as fresh.**
+  `fetchedAt` is the last successful fetch, and every provider now
+  reports `status` / `stale`. A failed refresh during the 3-minute
+  UI grace still looks current in the popover, but widgets see
+  `stale: true`. Alerts skip explicitly stale cards for every
+  provider, not just Sub2API (closes #216).
 - **Mainland GLM keys work on the Z.ai card.** The quota call used to
   hit only `api.z.ai`, so a `open.bigmodel.cn` key got a 401 and an
   error card — and some mainland networks cannot reach z.ai at all.

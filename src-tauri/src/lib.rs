@@ -1651,11 +1651,20 @@ fn restore_last_success_after_error(
     }
     let warning = current.error.clone();
     *current = previous.clone();
+    current.attempt_failed = true;
     if sub2api || age_ms > STALE_GRACE_MS {
         current.stale = true;
         current.warning = warning;
     }
     true
+}
+
+/// Old `last_snapshots.json` entries have no `fetched_at` on the snap
+/// itself. The cache clock (`CachedSnap.at`) is the last success time.
+fn hydrate_fetch_time(s: &mut providers::Snapshot, at: i64) {
+    if s.fetched_at.is_none() {
+        s.fetched_at = Some(at);
+    }
 }
 
 /// Called by the UI. Refreshes every enabled provider at the same time and
@@ -1677,6 +1686,11 @@ async fn fetch_usage(
             })
             .unwrap_or_default()
     });
+
+    // Bind the default OpenCode fingerprint to this refresh so a swap of
+    // auth.json while the request is in flight cannot cache the old key's
+    // numbers under the new identity.
+    let opencode_identity_at_start = providers::opencode::default_identity();
 
     // Each provider future is boxed onto the heap and spawned as its own
     // task. A single tokio::join! over 28 inlined futures builds one huge
@@ -1901,6 +1915,17 @@ async fn fetch_usage(
             )),
         ));
     }
+    for acct in providers::opencode::discover_extra_accounts() {
+        let (id, name, dir, fp) = (acct.id, acct.name, acct.dir, acct.fingerprint);
+        futs.push((
+            id.clone(),
+            Box::pin(guarded(
+                id.clone(),
+                name.clone(),
+                providers::opencode::snapshot_at(dir, id, name, Some(fp)),
+            )),
+        ));
+    }
     // Plain API-key providers ride the same generation scheme as managed
     // key cards: set_api_key bumps a provider's generation when its stored
     // credential actually changes, so a request the old key started can be
@@ -1993,7 +2018,13 @@ async fn fetch_usage(
         .collect();
     let mut all = Vec::with_capacity(handles.len());
     for h in handles {
-        if let Ok(snap) = h.await {
+        if let Ok(mut snap) = h.await {
+            // Stamp each provider as it lands — not once after the
+            // slowest sibling finishes — so fetchedAt is that card's
+            // last success, not the batch join clock.
+            if snap.status == "ok" && snap.fetched_at.is_none() {
+                snap.fetched_at = Some(now_ms() as i64);
+            }
             all.push(snap);
         }
     }
@@ -2014,6 +2045,22 @@ async fn fetch_usage(
         let mut failures = fail_state().lock().unwrap();
         for id in stale_key_card_ids {
             failures.remove(&id);
+        }
+    }
+    let opencode_identity_now = providers::opencode::default_identity();
+    let opencode_swapped_mid_refresh = matches!(
+        (&opencode_identity_at_start, &opencode_identity_now),
+        (Some(old), Some(current)) if old != current
+    );
+    if opencode_swapped_mid_refresh {
+        for s in &mut all {
+            if s.id == "opencode" {
+                *s = providers::Snapshot::error(
+                    "opencode",
+                    "OpenCode",
+                    "OpenCode login changed during refresh.".into(),
+                );
+            }
         }
     }
 
@@ -2055,6 +2102,7 @@ async fn fetch_usage(
             let current = json!({
                 "claude": providers::claude::default_identity(),
                 "codex": providers::codex::default_identity(),
+                "opencode": providers::opencode::default_identity(),
             });
             let stored: Value = std::fs::read_to_string(&stamp_file)
                 .ok()
@@ -2063,7 +2111,7 @@ async fn fetch_usage(
             let mut map = cache.lock().unwrap();
             let mut removed = false;
             let mut to_store = serde_json::Map::new();
-            for fam in ["claude", "codex"] {
+            for fam in ["claude", "codex", "opencode"] {
                 let cur = current.get(fam).cloned().unwrap_or(Value::Null);
                 let old = stored.get(fam).cloned().unwrap_or(Value::Null);
                 // Only a KNOWN stored identity differing from a KNOWN
@@ -2072,6 +2120,23 @@ async fn fetch_usage(
                 // unreadable identity file must not dump the last-good
                 // cache — that's the safety net, not a swap.
                 if !old.is_null() && !cur.is_null() && old != cur && map.remove(fam).is_some() {
+                    removed = true;
+                } else if fam == "opencode"
+                    && opencode_swapped_mid_refresh
+                    && map.remove(fam).is_some()
+                {
+                    // Mid-refresh A→B with two known fingerprints: drop
+                    // the last-good so error restore cannot paint A as B.
+                    removed = true;
+                } else if fam == "opencode"
+                    && old.is_null()
+                    && !cur.is_null()
+                    && map.remove(fam).is_some()
+                {
+                    // First stamp after upgrade: the cached snapshot
+                    // predates identity tracking and may belong to a
+                    // previous login. Drop it rather than pin it to the
+                    // current key.
                     removed = true;
                 }
                 // And a transient null never OVERWRITES a known identity:
@@ -2128,6 +2193,7 @@ async fn fetch_usage(
                             restore_kimi_wallet_rows(s, &previous.snap);
                             if s.metrics.len() > n {
                                 skip_cache = true;
+                                s.attempt_failed = true;
                                 if age > STALE_GRACE_MS {
                                     s.stale = true;
                                 }
@@ -2136,10 +2202,13 @@ async fn fetch_usage(
                     }
                 }
                 if s.status == "ok" && !skip_cache {
+                    let at = s.fetched_at.unwrap_or(now_ms);
+                    s.fetched_at = Some(at);
+                    s.attempt_failed = false;
                     map.insert(
                         s.id.clone(),
                         CachedSnap {
-                            at: now_ms,
+                            at,
                             snap: s.clone(),
                         },
                     );
@@ -2147,7 +2216,10 @@ async fn fetch_usage(
                 } else if s.status == "error" {
                     if let Some(previous) = map.get(&s.id) {
                         let age = now_ms - previous.at;
-                        restore_last_success_after_error(s, &previous.snap, age);
+                        let previous_at = previous.at;
+                        if restore_last_success_after_error(s, &previous.snap, age) {
+                            hydrate_fetch_time(s, previous_at);
+                        }
                     }
                 }
             }
@@ -2334,6 +2406,7 @@ fn cached_usage() -> Vec<providers::Snapshot> {
     let swapped: Vec<&str> = [
         ("claude", providers::claude::default_identity()),
         ("codex", providers::codex::default_identity()),
+        ("opencode", providers::opencode::default_identity()),
     ]
     .into_iter()
     .filter(|(fam, current)| {
@@ -2359,6 +2432,7 @@ fn cached_usage() -> Vec<providers::Snapshot> {
         .map(|(_, c)| {
             let mut s = c.snap;
             s.stale = true;
+            hydrate_fetch_time(&mut s, c.at);
             s
         })
         .collect();
@@ -3219,7 +3293,7 @@ mod tests {
         purge_onenewapi_cards_with, purge_key_cards_from_config,
         rename_cached_snapshot, rename_cached_snapshot_in, rename_cached_snapshots_in,
         restore_kimi_wallet_rows,
-        restore_last_success_after_error,
+        hydrate_fetch_time, restore_last_success_after_error,
         retain_current_key_card_results, strip_entry_application_order, strip_icon_ids_to_clear,
         strip_is_active, strip_reset_ids, telemetry_starred_id, is_stable_metric_label,
         updater_endpoint_strings, CachedSnap, FailState,
@@ -3401,6 +3475,7 @@ mod tests {
         let mut current = Snapshot::error("sub2api@wallet", "Panel · Key 1", "HTTP 401".into());
         assert!(restore_last_success_after_error(&mut current, &previous, 1_000));
         assert!(current.stale);
+        assert!(current.attempt_failed);
         assert_eq!(current.warning.as_deref(), Some("HTTP 401"));
         assert_eq!(current.metrics[0].used_percent, Some(25.0));
     }
@@ -3511,6 +3586,7 @@ mod tests {
         ));
         assert_eq!(current.status, "ok");
         assert!(!current.stale);
+        assert!(current.attempt_failed);
         assert_eq!(current.warning, None);
         assert_eq!(current.metrics[0].used_percent, Some(25.0));
     }
@@ -3532,8 +3608,23 @@ mod tests {
         ));
         assert_eq!(current.status, "ok");
         assert!(current.stale);
+        assert!(current.attempt_failed);
         assert_eq!(current.warning.as_deref(), Some("timeout"));
         assert_eq!(current.metrics[0].used_percent, Some(25.0));
+    }
+
+    #[test]
+    fn old_cache_without_fetched_at_publishes_the_cache_clock() {
+        let raw = r#"{"codex":{"at":1800000000000,"snap":{"id":"codex","name":"Codex","plan":null,"status":"ok","error":null,"metrics":[],"stale":false,"warning":null}}}"#;
+        let map: std::collections::HashMap<String, CachedSnap> =
+            serde_json::from_str(raw).unwrap();
+        let entry = &map["codex"];
+        assert!(entry.snap.fetched_at.is_none());
+        let mut s = entry.snap.clone();
+        hydrate_fetch_time(&mut s, entry.at);
+        let json = crate::httpapi::provider_json(&s, "2026-09-05T00:00:00Z");
+        assert_eq!(json["fetchedAt"], "2027-01-15T08:00:00Z");
+        assert_eq!(json["status"], "ok");
     }
 
     #[test]
