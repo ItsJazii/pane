@@ -178,7 +178,11 @@ Ground rules that apply to every provider:
 - **Reads:** pasted key (Settings → **Z.ai / GLM**), `ZAI_API_KEY` /
   `GLM_API_KEY`, or the Z.ai CLI's key file. A GLM Coding Plan key from
   `open.bigmodel.cn` works here too — no CLI login needed.
-- **Calls:** `api.z.ai` quota + subscription endpoints.
+- **Calls:** `api.z.ai` then `open.bigmodel.cn` quota + subscription
+  endpoints. Success on either site wins. A 401, 5xx, or unreachable
+  first site falls through; if every site fails, a 429 is preferred
+  over a later 5xx/parse or sibling 401 so cooldown still sees the
+  rate limit.
 - **Shows:** Session/Weekly, monthly Web Searches quota, plan.
 
 ## Antigravity
