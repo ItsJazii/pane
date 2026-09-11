@@ -122,6 +122,7 @@ fn config_with_defaults(mut cfg: Value) -> Value {
     obj.entry("layout").or_insert(Value::Null);
     obj.entry("appearance").or_insert(json!("dark"));
     obj.entry("density").or_insert(json!("compact"));
+    obj.entry("minimal").or_insert(json!(false));
     obj.entry("glassEffects").or_insert(json!(true));
     obj.entry("shortcut").or_insert(json!(""));
     obj.entry("proxy")
@@ -176,6 +177,7 @@ const CONFIG_KEYS: &[&str] = &[
     "layout",
     "appearance",
     "density",
+    "minimal",
     "glassEffects",
     "shortcut",
     "proxy",

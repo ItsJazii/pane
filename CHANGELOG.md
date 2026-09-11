@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Minimal view: one starred meter per card.** A Settings toggle (and
+  a sidebar button) hides plan chips, extra rows, quick-links, and
+  share. The percentage, reset countdown, Outdated chip, and drag
+  grip stay. Total Spend is unchanged (closes #212).
+
 ## 0.4.50 — 2026-09-11
 
 ### Changed

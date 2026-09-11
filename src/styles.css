@@ -68,6 +68,27 @@
   margin-bottom: 2px;
 }
 
+/* Minimal view: one meter per card, tighter than compact. */
+:root[data-minimal="true"] .provider {
+  padding: 2px 2px 0;
+}
+:root[data-minimal="true"] .card-panel {
+  padding: 2px 12px 4px;
+}
+:root[data-minimal="true"] .metric {
+  margin: 2px 0;
+}
+:root[data-minimal="true"] .provider-head {
+  margin-bottom: 0;
+}
+:root[data-minimal="true"] .plan,
+:root[data-minimal="true"] .quick-links,
+:root[data-minimal="true"] .share-btn,
+:root[data-minimal="true"] .card-caret,
+:root[data-minimal="true"] .on-demand {
+  display: none;
+}
+
 html,
 body {
   margin: 0;
@@ -218,7 +239,8 @@ body {
 #refresh,
 #settings-btn,
 #customize-btn,
-#theme-btn {
+#theme-btn,
+#minimal-btn {
   background: none;
   border: none;
   color: var(--muted-foreground);
@@ -234,6 +256,8 @@ body {
 #customize-btn:hover,
 #customize-btn.active,
 #theme-btn:hover,
+#minimal-btn:hover,
+#minimal-btn.active,
 body.refreshing #refresh {
   background: var(--accent);
   color: var(--foreground);
