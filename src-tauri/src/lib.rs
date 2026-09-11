@@ -2031,7 +2031,10 @@ async fn fetch_usage(
         }
     }
     let opencode_identity_now = providers::opencode::default_identity();
-    let opencode_swapped_mid_refresh = opencode_identity_at_start != opencode_identity_now;
+    let opencode_swapped_mid_refresh = matches!(
+        (&opencode_identity_at_start, &opencode_identity_now),
+        (Some(old), Some(current)) if old != current
+    );
     if opencode_swapped_mid_refresh {
         for s in &mut all {
             if s.id == "opencode" {
