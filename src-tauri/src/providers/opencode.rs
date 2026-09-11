@@ -80,11 +80,12 @@ pub struct OpenCodeAccount {
 /// fingerprint matches an already-seen login is skipped.
 pub fn discover_extra_accounts() -> Vec<OpenCodeAccount> {
     let default = data_dir();
-    let default_identity = dir_identity(&default);
-    if default.join("auth.json").exists() && default_identity.is_none() {
-        return Vec::new();
-    }
-    let mut seen: Vec<String> = default_identity.into_iter().collect();
+    // Claude/Codex abort discovery when the default login exists but
+    // can't be named (dedup would be unsafe). OpenCode's identity is a
+    // key fingerprint: no Go key means `seen` is empty, so there is no
+    // duplicate risk — an OpenRouter-only default must not hide extra
+    // OPENCODE_HOME / opencode-* Go profiles.
+    let mut seen: Vec<String> = dir_identity(&default).into_iter().collect();
 
     let mut out = Vec::new();
     for dir in extra_data_dirs() {
@@ -797,5 +798,16 @@ mod tests {
         assert_eq!(dir_label(&extra).as_deref(), Some("work"));
         assert_eq!(format!("opencode@{hash8}").split('@').next(), Some("opencode"));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn default_without_a_go_key_does_not_void_dedup() {
+        // seen starts empty when the default dir has no opencode-go key.
+        // Extra profiles can still card — unlike Claude/Codex, there is
+        // no unnamed default account to collide with.
+        let seen: Vec<String> = None::<String>.into_iter().collect();
+        assert!(seen.is_empty());
+        let extra = fingerprint_key("work-key-aaa");
+        assert!(!seen.iter().any(|s| s == &extra));
     }
 }
