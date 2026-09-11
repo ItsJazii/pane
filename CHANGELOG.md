@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added
+- **OpenCode extra profiles each get their own card.** `OPENCODE_HOME`
+  and `~\.local\share\opencode-*` are discovered like Claude/Codex
+  extra logins. Swapping `auth.json` no longer restores the previous
+  account's numbers — a fingerprint of the current key (never the key
+  itself) stamps the snapshot cache (closes #218).
+
 ### Fixed
 - **The local HTTP API no longer stamps restored snapshots as fresh.**
   `fetchedAt` is the last successful fetch, and every provider now

@@ -1685,6 +1685,11 @@ async fn fetch_usage(
             .unwrap_or_default()
     });
 
+    // Bind the default OpenCode fingerprint to this refresh so a swap of
+    // auth.json while the request is in flight cannot cache the old key's
+    // numbers under the new identity.
+    let opencode_identity_at_start = providers::opencode::default_identity();
+
     // Each provider future is boxed onto the heap and spawned as its own
     // task. A single tokio::join! over 28 inlined futures builds one huge
     // combined state machine on the calling thread's stack — at 28 providers
@@ -1908,6 +1913,17 @@ async fn fetch_usage(
             )),
         ));
     }
+    for acct in providers::opencode::discover_extra_accounts() {
+        let (id, name, dir, fp) = (acct.id, acct.name, acct.dir, acct.fingerprint);
+        futs.push((
+            id.clone(),
+            Box::pin(guarded(
+                id.clone(),
+                name.clone(),
+                providers::opencode::snapshot_at(dir, id, name, Some(fp)),
+            )),
+        ));
+    }
     // Plain API-key providers ride the same generation scheme as managed
     // key cards: set_api_key bumps a provider's generation when its stored
     // credential actually changes, so a request the old key started can be
@@ -2029,6 +2045,22 @@ async fn fetch_usage(
             failures.remove(&id);
         }
     }
+    let opencode_identity_now = providers::opencode::default_identity();
+    let opencode_swapped_mid_refresh = matches!(
+        (&opencode_identity_at_start, &opencode_identity_now),
+        (Some(old), Some(current)) if old != current
+    );
+    if opencode_swapped_mid_refresh {
+        for s in &mut all {
+            if s.id == "opencode" {
+                *s = providers::Snapshot::error(
+                    "opencode",
+                    "OpenCode",
+                    "OpenCode login changed during refresh.".into(),
+                );
+            }
+        }
+    }
 
     for s in &all {
         let log_family = family_of(&s.id);
@@ -2068,6 +2100,7 @@ async fn fetch_usage(
             let current = json!({
                 "claude": providers::claude::default_identity(),
                 "codex": providers::codex::default_identity(),
+                "opencode": providers::opencode::default_identity(),
             });
             let stored: Value = std::fs::read_to_string(&stamp_file)
                 .ok()
@@ -2076,7 +2109,7 @@ async fn fetch_usage(
             let mut map = cache.lock().unwrap();
             let mut removed = false;
             let mut to_store = serde_json::Map::new();
-            for fam in ["claude", "codex"] {
+            for fam in ["claude", "codex", "opencode"] {
                 let cur = current.get(fam).cloned().unwrap_or(Value::Null);
                 let old = stored.get(fam).cloned().unwrap_or(Value::Null);
                 // Only a KNOWN stored identity differing from a KNOWN
@@ -2085,6 +2118,23 @@ async fn fetch_usage(
                 // unreadable identity file must not dump the last-good
                 // cache — that's the safety net, not a swap.
                 if !old.is_null() && !cur.is_null() && old != cur && map.remove(fam).is_some() {
+                    removed = true;
+                } else if fam == "opencode"
+                    && opencode_swapped_mid_refresh
+                    && map.remove(fam).is_some()
+                {
+                    // Mid-refresh A→B with two known fingerprints: drop
+                    // the last-good so error restore cannot paint A as B.
+                    removed = true;
+                } else if fam == "opencode"
+                    && old.is_null()
+                    && !cur.is_null()
+                    && map.remove(fam).is_some()
+                {
+                    // First stamp after upgrade: the cached snapshot
+                    // predates identity tracking and may belong to a
+                    // previous login. Drop it rather than pin it to the
+                    // current key.
                     removed = true;
                 }
                 // And a transient null never OVERWRITES a known identity:
@@ -2354,6 +2404,7 @@ fn cached_usage() -> Vec<providers::Snapshot> {
     let swapped: Vec<&str> = [
         ("claude", providers::claude::default_identity()),
         ("codex", providers::codex::default_identity()),
+        ("opencode", providers::opencode::default_identity()),
     ]
     .into_iter()
     .filter(|(fam, current)| {
