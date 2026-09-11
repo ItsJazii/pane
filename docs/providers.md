@@ -104,9 +104,12 @@ Ground rules that apply to every provider:
 
 - **Reads:** the Go key from
   `%USERPROFILE%\.local\share\opencode\auth.json`;
+  extra profiles from `OPENCODE_HOME`, `~\.local\share\opencode-*`,
+  and the same scan roots as Claude/Codex (one card per login).
   `%USERPROFILE%\.local\share\opencode\opencode.db` (read live,
   read-only) for spend — message costs your own OpenCode history already
-  contains.
+  contains. Swapping `auth.json` drops the old account's cached
+  snapshot (fingerprint of the current key, never the key itself).
 - **Calls:** `opencode.ai/zen/go/v1/usage` (the official account-wide
   usage API, shipped in anomalyco/opencode#16513) — Session / Weekly /
   Monthly percentages and resets counted on OpenCode's servers, the

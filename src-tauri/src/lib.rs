@@ -1899,6 +1899,17 @@ async fn fetch_usage(
             )),
         ));
     }
+    for acct in providers::opencode::discover_extra_accounts() {
+        let (id, name, dir) = (acct.id, acct.name, acct.dir);
+        futs.push((
+            id.clone(),
+            Box::pin(guarded(
+                id.clone(),
+                name.clone(),
+                providers::opencode::snapshot_at(dir, id, name),
+            )),
+        ));
+    }
     // Plain API-key providers ride the same generation scheme as managed
     // key cards: set_api_key bumps a provider's generation when its stored
     // credential actually changes, so a request the old key started can be
@@ -2053,6 +2064,7 @@ async fn fetch_usage(
             let current = json!({
                 "claude": providers::claude::default_identity(),
                 "codex": providers::codex::default_identity(),
+                "opencode": providers::opencode::default_identity(),
             });
             let stored: Value = std::fs::read_to_string(&stamp_file)
                 .ok()
@@ -2061,7 +2073,7 @@ async fn fetch_usage(
             let mut map = cache.lock().unwrap();
             let mut removed = false;
             let mut to_store = serde_json::Map::new();
-            for fam in ["claude", "codex"] {
+            for fam in ["claude", "codex", "opencode"] {
                 let cur = current.get(fam).cloned().unwrap_or(Value::Null);
                 let old = stored.get(fam).cloned().unwrap_or(Value::Null);
                 // Only a KNOWN stored identity differing from a KNOWN
@@ -2332,6 +2344,7 @@ fn cached_usage() -> Vec<providers::Snapshot> {
     let swapped: Vec<&str> = [
         ("claude", providers::claude::default_identity()),
         ("codex", providers::codex::default_identity()),
+        ("opencode", providers::opencode::default_identity()),
     ]
     .into_iter()
     .filter(|(fam, current)| {

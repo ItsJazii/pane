@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 const ID: &str = "opencode";
 const NAME: &str = "OpenCode";
+const MAX_AUTH_BYTES: u64 = 64 * 1024;
 
 // Primary source: the official account-wide usage API that shipped in
 // anomalyco/opencode#16513 (2026-08-11) — GET /zen/go/v1/usage with the Go
@@ -33,19 +34,132 @@ pub fn data_dir() -> PathBuf {
 /// Reads an entry like {"opencode-go": {"type": "api", "key": "..."}} from
 /// OpenCode's auth.json. Also used by the OpenRouter provider.
 pub fn auth_entry_key(entry: &str) -> Option<String> {
-    let raw = std::fs::read_to_string(data_dir().join("auth.json")).ok()?;
+    auth_entry_key_in(&data_dir(), entry)
+}
+
+fn auth_entry_key_in(dir: &Path, entry: &str) -> Option<String> {
+    let raw = super::read_small_text(&dir.join("auth.json"), MAX_AUTH_BYTES, "auth.json").ok()?;
     let doc: Value = serde_json::from_str(&raw).ok()?;
     doc.get(entry)?
         .get("key")
         .and_then(Value::as_str)
+        .filter(|k| !k.is_empty())
         .map(str::to_string)
+}
+
+/// Stable fingerprint of a credential — never the key itself. Written
+/// next to the snapshot cache so swapping auth.json drops the old
+/// account's last-good numbers instead of painting them under `opencode`.
+fn fingerprint_key(key: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in key.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn dir_identity(dir: &Path) -> Option<String> {
+    auth_entry_key_in(dir, "opencode-go").map(|k| fingerprint_key(&k))
+}
+
+/// The default login's account identity, for the snapshot-cache stamp.
+pub fn default_identity() -> Option<String> {
+    dir_identity(&data_dir())
+}
+
+pub struct OpenCodeAccount {
+    pub id: String,
+    pub name: String,
+    pub dir: PathBuf,
+}
+
+/// Extra OpenCode profiles beyond `~/.local/share/opencode`: OPENCODE_HOME,
+/// `~/.local/share/opencode-*`, and the same scan roots Claude/Codex use.
+/// A dir that can't name its account never becomes a card; a dir whose
+/// fingerprint matches an already-seen login is skipped.
+pub fn discover_extra_accounts() -> Vec<OpenCodeAccount> {
+    let default = data_dir();
+    let default_identity = dir_identity(&default);
+    if default.join("auth.json").exists() && default_identity.is_none() {
+        return Vec::new();
+    }
+    let mut seen: Vec<String> = default_identity.into_iter().collect();
+
+    let mut out = Vec::new();
+    for dir in extra_data_dirs() {
+        if same_dir(&dir, &default) {
+            continue;
+        }
+        let Some(fp) = dir_identity(&dir) else { continue };
+        if !scoped_id_charset(&fp) {
+            continue;
+        }
+        if seen.iter().any(|s| s == &fp) {
+            continue;
+        }
+        seen.push(fp.clone());
+        let hash8: String = fp.chars().take(8).collect();
+        let name = match dir_label(&dir) {
+            Some(l) => format!("OpenCode — {l}"),
+            None => format!("OpenCode @{hash8}"),
+        };
+        out.push(OpenCodeAccount {
+            id: format!("opencode@{hash8}"),
+            name,
+            dir,
+        });
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+fn extra_data_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(home) = std::env::var("OPENCODE_HOME") {
+        let home = home.trim();
+        if !home.is_empty() {
+            dirs.push(PathBuf::from(home));
+        }
+    }
+    if let Some(share) = dirs::home_dir().map(|h| h.join(".local").join("share")) {
+        if let Ok(entries) = std::fs::read_dir(share) {
+            for e in entries.flatten() {
+                let name = e.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with("opencode-") && e.path().is_dir() {
+                    dirs.push(e.path());
+                }
+            }
+        }
+    }
+    dirs.extend(super::account_scan_roots());
+    dirs
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(aa), Ok(bb)) => aa == bb,
+        _ => a == b,
+    }
+}
+
+fn dir_label(dir: &Path) -> Option<String> {
+    let name = dir.file_name()?.to_string_lossy();
+    name.strip_prefix("opencode-")
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+fn scoped_id_charset(raw: &str) -> bool {
+    !raw.is_empty() && raw.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 /// Query the live OpenCode ledger read-only. Copying db+WAL into
 /// `%APPDATA%\Pane\tmp` used the same pattern that grew Devin's temp
 /// journal to tens of GB — never clone a vendor database onto C:.
-fn with_live_db<T>(f: impl FnOnce(&Path) -> Result<T, String>) -> Result<T, String> {
-    let db_path = data_dir().join("opencode.db");
+fn with_live_db<T>(dir: &Path, f: impl FnOnce(&Path) -> Result<T, String>) -> Result<T, String> {
+    let db_path = dir.join("opencode.db");
     if !db_path.exists() {
         return Err("opencode.db not found — has OpenCode been used on this PC?".into());
     }
@@ -53,25 +167,29 @@ fn with_live_db<T>(f: impl FnOnce(&Path) -> Result<T, String>) -> Result<T, Stri
 }
 
 pub async fn snapshot() -> Snapshot {
-    match fetch().await {
+    snapshot_at(data_dir(), ID.to_string(), NAME.to_string()).await
+}
+
+pub async fn snapshot_at(dir: PathBuf, id: String, name: String) -> Snapshot {
+    match fetch(&dir, &id, &name).await {
         Ok(s) => s,
-        Err(e) => Snapshot::error(ID, NAME, e),
+        Err(e) => Snapshot::error(&id, &name, e),
     }
 }
 
-async fn fetch() -> Result<Snapshot, String> {
-    let auth_path = data_dir().join("auth.json");
+async fn fetch(dir: &Path, id: &str, name: &str) -> Result<Snapshot, String> {
+    let auth_path = dir.join("auth.json");
     if !auth_path.exists() {
         return Ok(Snapshot::no_credentials(
-            ID,
-            NAME,
+            id,
+            name,
             "OpenCode sign-in not found. Run `opencode` and log in.",
         ));
     }
-    let Some(key) = auth_entry_key("opencode-go") else {
+    let Some(key) = auth_entry_key_in(dir, "opencode-go") else {
         return Ok(Snapshot::no_credentials(
-            ID,
-            NAME,
+            id,
+            name,
             "No OpenCode Go subscription found in auth.json.",
         ));
     };
@@ -85,7 +203,7 @@ async fn fetch() -> Result<Snapshot, String> {
     match fetch_official(&key).await {
         Ok(metrics) => {
             FALLBACK_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
-            Ok(Snapshot::ok(ID, NAME, Some("Go".into()), metrics))
+            Ok(Snapshot::ok(id, name, Some("Go".into()), metrics))
         }
         Err(e) => {
             // Log the TRANSITION into fallback, not every refresh — an
@@ -98,7 +216,7 @@ async fn fetch() -> Result<Snapshot, String> {
             // history), the card must carry both causes — surfacing only
             // "opencode.db not found" would send someone troubleshooting
             // an offline/revoked-key card after the wrong problem.
-            let mut snap = local_windows_snapshot()
+            let mut snap = local_windows_snapshot(dir, id, name)
                 .map_err(|db| format!("usage API failed ({e}); local fallback: {db}"))?;
             snap.plan = Some("Go — this PC only".into());
             Ok(snap)
@@ -197,8 +315,8 @@ fn month_period_ending(resets_ms: i64) -> i64 {
 
 /// Fallback: the pre-API local computation from opencode.db — this PC's
 /// rows only, so shared subscriptions under-count here.
-fn local_windows_snapshot() -> Result<Snapshot, String> {
-    let w = with_live_db(|db| {
+fn local_windows_snapshot(dir: &Path, id: &str, name: &str) -> Result<Snapshot, String> {
+    let w = with_live_db(dir, |db| {
         let (msgs, capped) = read_messages(db)?;
         let rows: Vec<(f64, f64)> = msgs
             .into_iter()
@@ -231,7 +349,7 @@ fn local_windows_snapshot() -> Result<Snapshot, String> {
         )
         .with_reset(Some(w.monthly_resets_at), Some(w.monthly_period_ms)),
     ];
-    Ok(Snapshot::ok(ID, NAME, Some("Go".into()), metrics))
+    Ok(Snapshot::ok(id, name, Some("Go".into()), metrics))
 }
 
 struct GoWindows {
@@ -369,18 +487,29 @@ fn utc_date(year: i32, month: u32, day: u32, h: u32, m: u32, s: u32, ms: u32) ->
 /// Total Spend. The provider id lets the spend engine split gateway
 /// providers (AihubMix) into their own slice.
 pub fn collect_cost_events() -> Vec<(f64, f64, f64, String, String)> {
-    with_live_db(|db| {
-        Ok(read_messages(db)?
-            .0
-            .into_iter()
-            // Free models record cost 0 with real token counts — the
-            // tokens are usage facts and count at their true $0 price.
-            // Rows with neither cost nor tokens (aborted turns) drop.
-            .filter(|r| r.cost > 0.0 || r.tokens > 0.0)
-            .map(|r| (r.ts, r.cost, r.tokens, r.model, r.provider))
-            .collect())
-    })
-    .unwrap_or_default()
+    let mut dirs = vec![data_dir()];
+    for acct in discover_extra_accounts() {
+        if !dirs.iter().any(|d| same_dir(d, &acct.dir)) {
+            dirs.push(acct.dir);
+        }
+    }
+    let mut out = Vec::new();
+    for dir in dirs {
+        let rows: Vec<(f64, f64, f64, String, String)> = with_live_db(&dir, |db| {
+            Ok(read_messages(db)?
+                .0
+                .into_iter()
+                // Free models record cost 0 with real token counts — the
+                // tokens are usage facts and count at their true $0 price.
+                // Rows with neither cost nor tokens (aborted turns) drop.
+                .filter(|r| r.cost > 0.0 || r.tokens > 0.0)
+                .map(|r| (r.ts, r.cost, r.tokens, r.model, r.provider))
+                .collect())
+        })
+        .unwrap_or_default();
+        out.extend(rows);
+    }
+    out
 }
 
 pub struct MessageRow {
@@ -633,5 +762,40 @@ mod tests {
         let rows = [(ms("2026-01-31T09:00:00Z"), 1.0)];
         let w = go_windows(&rows, None, now);
         assert_eq!(w.monthly_resets_at, ms("2026-02-28T09:00:00Z") as i64);
+    }
+
+    #[test]
+    fn credential_fingerprint_is_stable_and_never_the_key() {
+        let key = "oc-secret-key-please-do-not-store";
+        let a = fingerprint_key(key);
+        let b = fingerprint_key(key);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 16);
+        assert!(scoped_id_charset(&a));
+        assert!(!a.contains(key));
+        assert_ne!(fingerprint_key(key), fingerprint_key("other-account"));
+    }
+
+    #[test]
+    fn extra_profile_dir_becomes_its_own_card() {
+        let root = std::env::temp_dir().join(format!(
+            "pane-opencode-disc-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let extra = root.join("opencode-work");
+        std::fs::create_dir_all(&extra).unwrap();
+        std::fs::write(
+            extra.join("auth.json"),
+            r#"{"opencode-go":{"type":"api","key":"work-key-aaa"}}"#,
+        )
+        .unwrap();
+        let fp = dir_identity(&extra).expect("fingerprint");
+        let hash8: String = fp.chars().take(8).collect();
+        assert_eq!(dir_label(&extra).as_deref(), Some("work"));
+        assert_eq!(format!("opencode@{hash8}").split('@').next(), Some("opencode"));
+        std::fs::remove_dir_all(&root).ok();
     }
 }

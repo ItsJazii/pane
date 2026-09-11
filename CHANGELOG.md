@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **OpenCode extra profiles each get their own card.** `OPENCODE_HOME`
+  and `~\.local\share\opencode-*` are discovered like Claude/Codex
+  extra logins. Swapping `auth.json` no longer restores the previous
+  account's numbers — a fingerprint of the current key (never the key
+  itself) stamps the snapshot cache (closes #218).
+
 ## 0.4.50 — 2026-09-11
 
 ### Changed
