@@ -37,6 +37,7 @@ const en: Dict = {
   "sidebar.theme": "Light / dark mode",
   "sidebar.themeToDark": "Switch to dark mode",
   "sidebar.themeToLight": "Switch to light mode",
+  "sidebar.minimal": "Minimal view",
   "sidebar.refresh": "Refresh now",
   "sidebar.customize": "Customize",
   "sidebar.settings": "Settings",
@@ -98,6 +99,9 @@ const en: Dict = {
   "settings.appearLight": "Light",
   "settings.appearDark": "Dark",
   "settings.compact": "Compact layout",
+  "settings.minimal": "Minimal view",
+  "settings.minimalTip":
+    "One starred (or first) meter per card — hide plan chips, extra rows, links, and share",
   "settings.glass": "Liquid glass effects",
   "settings.glassTip":
     "Turn off on slower PCs — replaces the glass refraction with a simple solid look",
@@ -411,6 +415,7 @@ const zh: Dict = {
   "sidebar.theme": "浅色 / 深色模式",
   "sidebar.themeToDark": "切换到深色模式",
   "sidebar.themeToLight": "切换到浅色模式",
+  "sidebar.minimal": "精简视图",
   "sidebar.refresh": "立即刷新",
   "sidebar.customize": "自定义",
   "sidebar.settings": "设置",
@@ -472,6 +477,8 @@ const zh: Dict = {
   "settings.appearLight": "浅色",
   "settings.appearDark": "深色",
   "settings.compact": "紧凑布局",
+  "settings.minimal": "精简视图",
+  "settings.minimalTip": "每张卡片只留加星（或第一行）用量，隐藏套餐、其余行、快捷链接和分享",
   "settings.glass": "液态玻璃效果",
   "settings.glassTip": "较慢的电脑可以关掉 — 会改成简单的纯色背景",
   "settings.reduceAnim": "减少动画",
@@ -748,6 +755,7 @@ const ru: Dict = {
   "sidebar.theme": "Светлая / тёмная тема",
   "sidebar.themeToDark": "Переключить на тёмную тему",
   "sidebar.themeToLight": "Переключить на светлую тему",
+  "sidebar.minimal": "Минимальный вид",
   "sidebar.refresh": "Обновить сейчас",
   "sidebar.customize": "Настройка",
   "sidebar.settings": "Настройки",
@@ -802,6 +810,9 @@ const ru: Dict = {
   "settings.appearLight": "Светлая",
   "settings.appearDark": "Тёмная",
   "settings.compact": "Компактный вид",
+  "settings.minimal": "Минимальный вид",
+  "settings.minimalTip":
+    "Одна отмеченная (или первая) строка на карточке — без тарифа, лишних строк, ссылок и кнопки «поделиться»",
   "settings.glass": "Эффект жидкого стекла",
   "settings.glassTip":
     "На слабых ПК лучше выключить — вместо стекла будет простой фон",

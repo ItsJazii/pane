@@ -8,6 +8,10 @@
   extra logins. Swapping `auth.json` no longer restores the previous
   account's numbers — a fingerprint of the current key (never the key
   itself) stamps the snapshot cache (closes #218).
+- **Minimal view: one starred meter per card.** A Settings toggle (and
+  a sidebar button) hides plan chips, extra rows, quick-links, and
+  share. The percentage, reset countdown, Outdated chip, and drag
+  grip stay. Total Spend is unchanged (closes #212).
 
 ### Fixed
 - **The local HTTP API no longer stamps restored snapshots as fresh.**

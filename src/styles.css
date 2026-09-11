@@ -68,6 +68,27 @@
   margin-bottom: 2px;
 }
 
+/* Minimal view: one meter per ordinary card. Total Spend and Welcome
+   keep their own chrome (including share / dismiss). */
+:root[data-minimal="true"] .provider:not(.total-spend):not(.welcome-card) {
+  padding: 2px 2px 0;
+}
+:root[data-minimal="true"] .provider:not(.total-spend):not(.welcome-card) .card-panel {
+  padding: 2px 12px 4px;
+}
+:root[data-minimal="true"] .provider:not(.total-spend):not(.welcome-card) .metric {
+  margin: 2px 0;
+}
+:root[data-minimal="true"] .provider:not(.total-spend):not(.welcome-card) .provider-head {
+  margin-bottom: 0;
+}
+:root[data-minimal="true"] .provider:not(.total-spend):not(.welcome-card) .plan,
+:root[data-minimal="true"] .provider:not(.total-spend):not(.welcome-card) .quick-links,
+:root[data-minimal="true"] .provider:not(.total-spend):not(.welcome-card) .card-caret,
+:root[data-minimal="true"] .provider:not(.total-spend):not(.welcome-card) .on-demand {
+  display: none;
+}
+
 html,
 body {
   margin: 0;
@@ -218,7 +239,8 @@ body {
 #refresh,
 #settings-btn,
 #customize-btn,
-#theme-btn {
+#theme-btn,
+#minimal-btn {
   background: none;
   border: none;
   color: var(--muted-foreground);
@@ -234,6 +256,8 @@ body {
 #customize-btn:hover,
 #customize-btn.active,
 #theme-btn:hover,
+#minimal-btn:hover,
+#minimal-btn.active,
 body.refreshing #refresh {
   background: var(--accent);
   color: var(--foreground);

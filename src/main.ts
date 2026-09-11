@@ -201,6 +201,7 @@ interface Config {
   layout: Layout | null;
   appearance: "system" | "light" | "dark";
   density: "regular" | "compact";
+  minimal: boolean;
   glassEffects: boolean;
   shortcut: string;
   proxy: { enabled: boolean; url: string };
@@ -230,6 +231,7 @@ const FRONTEND_CONFIG_KEYS = [
   "layout",
   "appearance",
   "density",
+  "minimal",
   "glassEffects",
   "shortcut",
   "proxy",
@@ -414,6 +416,7 @@ let config: Config = {
   layout: null,
   appearance: "system",
   density: "regular",
+  minimal: false,
   glassEffects: true,
   shortcut: "",
   proxy: { enabled: false, url: "" },
@@ -1193,6 +1196,35 @@ function isCardDisabled(id: string, disabled: string[] = config.disabled): boole
   return (fam === "onenewapi" || fam === "sub2api") && disabled.includes(fam);
 }
 
+/// True when this layout key can actually paint a row right now.
+function canRenderMinimal(s: Snapshot, spend: ProviderSpend | undefined, key: string): boolean {
+  if (key === TREND_KEY) return Boolean(spend?.trend.some((v) => v > 0));
+  if (SPEND_KEYS.some(([label]) => label === key)) return Boolean(spend);
+  return s.metrics.some((m) => m.label === key);
+}
+
+/// The one row a card keeps in minimal view: a visible starred meter,
+/// else the first visible progress meter, else the status word.
+function minimalItemKey(s: Snapshot): string | null {
+  const L =
+    providerFamily(s.id) === "sub2api"
+      ? sub2ApiLiveLayout(s.metrics, providerLayout(s.id))
+      : providerLayout(s.id);
+  const spend = lastSpend.find((sp) => sp.id === s.id);
+  const visible = L.metricOrder.filter(
+    (k) => !L.hidden.includes(k) && canRenderMinimal(s, spend, k),
+  );
+  const starred = L.starred.find((k) => visible.includes(k));
+  if (starred) return starred;
+  const progress = visible.find((k) =>
+    s.metrics.some((m) => m.label === k && m.kind === "progress"),
+  );
+  if (progress) return progress;
+  // Balance / credits / Used / spend rows have no progress meter.
+  // Show that first visible value instead of collapsing the card to "ok".
+  return visible[0] ?? null;
+}
+
 function renderCard(s: Snapshot): string {
   const plan = s.plan ? `<span class="plan">${escapeHtml(providerFamily(s.id) === "sub2api" ? displayMetricDetail(s.plan) : s.plan)}</span>` : "";
   const icon = PROVIDER_ICONS[s.id] ?? PROVIDER_ICONS[providerFamily(s.id)] ?? "";
@@ -1203,17 +1235,24 @@ function renderCard(s: Snapshot): string {
   if (s.status === "ok") {
     const L = providerFamily(s.id) === "sub2api" ? sub2ApiLiveLayout(s.metrics, providerLayout(s.id)) : providerLayout(s.id);
     const spend = lastSpend.find((sp) => sp.id === s.id);
-    const visible = L.metricOrder.filter((k) => !L.hidden.includes(k));
-    const always = visible.filter((k) => !L.onDemand.includes(k));
-    const onDemand = visible.filter((k) => L.onDemand.includes(k));
+    if (config.minimal) {
+      const key = minimalItemKey(s);
+      body = key
+        ? renderItem(s, spend, key)
+        : `<p class="placeholder">${escapeHtml(s.status)}</p>`;
+    } else {
+      const visible = L.metricOrder.filter((k) => !L.hidden.includes(k));
+      const always = visible.filter((k) => !L.onDemand.includes(k));
+      const onDemand = visible.filter((k) => L.onDemand.includes(k));
 
-    body = always.map((k) => renderItem(s, spend, k)).join("");
-    const onDemandHtml = onDemand.map((k) => renderItem(s, spend, k)).join("");
-    if (onDemandHtml.trim()) {
-      const anim = L.expanded && animateExpandId === s.id ? " anim" : "";
-      caret = `
+      body = always.map((k) => renderItem(s, spend, k)).join("");
+      const onDemandHtml = onDemand.map((k) => renderItem(s, spend, k)).join("");
+      if (onDemandHtml.trim()) {
+        const anim = L.expanded && animateExpandId === s.id ? " anim" : "";
+        caret = `
         <button class="card-caret" data-caret="${escapeHtml(s.id)}" title="${L.expanded ? t("card.showLess") : t("card.showMore")}">${L.expanded ? "⌃" : "⌄"}</button>
         ${L.expanded ? `<div class="on-demand${anim}">${onDemandHtml}</div>` : ""}`;
+      }
     }
   } else {
     body = `<p class="placeholder">${escapeHtml(s.error ?? t("card.notConnected"))}</p>`;
@@ -1233,17 +1272,18 @@ function renderCard(s: Snapshot): string {
     .filter((l) => l.label !== "API" || s.metrics.some((m) => m.label === "API"))
     .map((l) => `<button class="quick-link" data-link="${escapeHtml(l.url)}">${escapeHtml(displayLinkLabel(l.label))}</button>`)
     .join("<span class='quick-sep'>·</span>");
-  const linksRow = links ? `<div class="quick-links">${links}</div>` : "";
+  const linksRow = config.minimal || !links ? "" : `<div class="quick-links">${links}</div>`;
   const share =
-    s.status === "ok"
+    !config.minimal && s.status === "ok"
       ? `<button class="share-btn" data-share="${escapeHtml(s.id)}" title="${escapeHtml(t("card.share"))}">⧉</button>`
       : "";
+  const planChip = config.minimal ? "" : plan;
   return `
     <article class="provider${muted}" data-provider="${escapeHtml(s.id)}">
       <div class="provider-head">
         <span class="drag-grip" title="${escapeHtml(t("card.drag"))}">⠿</span>
         <span class="provider-name">${escapeHtml(s.name)}</span>
-        ${plan}
+        ${planChip}
         ${stale}
         <span class="spacer"></span>
         ${share}
@@ -1976,7 +2016,8 @@ async function shareCard(id: string): Promise<void> {
     const svgMarkup =
       `<svg xmlns="http://www.w3.org/2000/svg" width="${W2 * S}" height="${H2 * S}" ` +
       `viewBox="0 0 ${W2} ${H2}" data-theme="${root.dataset.theme ?? ""}" ` +
-      `data-density="${root.dataset.density ?? ""}">` +
+      `data-density="${root.dataset.density ?? ""}" ` +
+      `data-minimal="${root.dataset.minimal ?? "false"}">` +
       `<foreignObject width="${W2}" height="${H2}">` +
       `<div xmlns="http://www.w3.org/1999/xhtml" id="snap-root">` +
       // CDATA so CSS containing XML-special characters (`<`, `&` — e.g. in
@@ -2233,6 +2274,10 @@ function applyAppearance(): void {
     config.appearance === "system" ? (systemLight.matches ? "light" : "dark") : config.appearance;
   document.documentElement.dataset.theme = mode;
   document.documentElement.dataset.density = config.density;
+  document.documentElement.dataset.minimal = config.minimal ? "true" : "false";
+  document.querySelector("#minimal-btn")?.classList.toggle("active", config.minimal);
+  const minimal = document.querySelector<HTMLInputElement>("#minimal");
+  if (minimal) minimal.checked = config.minimal === true;
   const btn = document.querySelector<HTMLElement>("#theme-btn");
   if (btn) {
     btn.textContent = mode === "light" ? "☾" : "☀";
@@ -4124,6 +4169,15 @@ async function initSettings(): Promise<void> {
     void patchConfig({ density: density.checked ? "compact" : "regular" }).then(applyAppearance);
   });
 
+  const minimal = document.querySelector<HTMLInputElement>("#minimal")!;
+  minimal.checked = config.minimal === true;
+  minimal.addEventListener("change", () => {
+    void patchConfig({ minimal: minimal.checked }).then(() => {
+      applyAppearance();
+      renderAll();
+    });
+  });
+
   const glass = document.querySelector<HTMLInputElement>("#glass")!;
   glass.checked = config.glassEffects !== false;
   glass.addEventListener("change", () => {
@@ -4220,6 +4274,7 @@ async function resetAllSettings(): Promise<void> {
     layout: null,
     appearance: "dark",
     density: "compact",
+    minimal: false,
     glassEffects: true,
     shortcut: "",
     proxy: { enabled: false, url: "" },
@@ -4265,6 +4320,7 @@ function syncSettingsControls(): void {
   setCheck("#show-total-spend", config.showTotalSpend);
   setSelect("#appearance", config.appearance);
   setCheck("#density", config.density === "compact");
+  setCheck("#minimal", config.minimal === true);
   setCheck("#glass", config.glassEffects !== false);
   setCheck("#reduce-anim", config.reduceAnimations === true);
   setNum("#shortcut", config.shortcut);
@@ -4296,6 +4352,12 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
   document.querySelector("#theme-btn")!.addEventListener("click", toggleTheme);
+  document.querySelector("#minimal-btn")!.addEventListener("click", () => {
+    void patchConfig({ minimal: !config.minimal }).then(() => {
+      applyAppearance();
+      renderAll();
+    });
+  });
   setupTrailFisheye();
   setupTooltips();
   // No lens init here: applyGlass() (via initSettings, after the saved
