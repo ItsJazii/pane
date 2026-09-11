@@ -2456,14 +2456,24 @@ async fn fetch_spend() -> Vec<spend::ProviderSpend> {
         .get("disabled")
         .and_then(Value::as_array)
         .is_some_and(|a| a.iter().any(|v| v.as_str() == Some("cursor")));
-    let cursor_csv = if cursor_disabled {
-        None
-    } else {
-        providers::cursor::fetch_usage_csv().await
+    // CSV is a network call. Don't make the local log walk sit behind it —
+    // Codex/Claude appends are the slow part, and they don't need Cursor.
+    let csv_task = async {
+        if cursor_disabled {
+            None
+        } else {
+            providers::cursor::fetch_usage_csv().await
+        }
     };
-    let result = tauri::async_runtime::spawn_blocking(move || spend::collect(cursor_csv))
-        .await
-        .unwrap_or_default();
+    let scan_task = tauri::async_runtime::spawn_blocking(|| spend::collect(None));
+    let (cursor_csv, local) = tokio::join!(csv_task, scan_task);
+    let mut result = local.unwrap_or_default();
+    if let Some(csv) = cursor_csv {
+        let cursor = spend::cursor_from_csv(&csv);
+        if spend::provider_spend_has_data(&cursor) {
+            result.push(cursor);
+        }
+    }
     eprintln!(
         "[pane] spend: {} providers in {:?}",
         result.len(),

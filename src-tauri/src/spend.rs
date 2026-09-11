@@ -12,7 +12,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
@@ -58,6 +58,10 @@ impl ProviderSpend {
     fn has_data(&self) -> bool {
         self.last30.cost > 0.004 || self.last30.tokens > 0.0 || self.unpriced > 0
     }
+}
+
+pub fn provider_spend_has_data(sp: &ProviderSpend) -> bool {
+    sp.has_data()
 }
 
 /// (local calendar day, model) → (cost, tokens). Day = days since CE.
@@ -627,7 +631,28 @@ fn recent_jsonl_files(root: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// A later write that only appended bytes. Session logs are JSONL; a
+/// rewrite (shrink or same-size mtime bump) must full-parse.
+fn cached_prefix<'a>(
+    map: &'a mut HashMap<PathBuf, FileEntry>,
+    path: &Path,
+    size: u64,
+    gen: u64,
+) -> Option<(&'a FileData, &'a [PriceProbe], u64)> {
+    let entry = map.get(path)?;
+    if size <= entry.size {
+        return None;
+    }
+    if entry.gen == gen || probes_still_vouch(&entry.probes, &entry.data) {
+        Some((&entry.data, &entry.probes, entry.size))
+    } else {
+        None
+    }
+}
+
 /// Parses one file into per-day totals, via the cache when unchanged.
+/// Growing logs (Codex/Claude append a line per turn) only read the new
+/// tail — a 200 MB session that gained 4 KB used to re-read the whole file.
 fn file_days(path: &Path, parse: &mut dyn FnMut(&str, &mut FileData)) -> FileData {
     let Ok(meta) = fs::metadata(path) else { return FileData::default() };
     if meta.len() > MAX_LOG_FILE_BYTES {
@@ -662,8 +687,24 @@ fn file_days(path: &Path, parse: &mut dyn FnMut(&str, &mut FileData)) -> FileDat
         }
     }
 
-    let mut data = FileData::default();
-    PROBES.with(|p| *p.borrow_mut() = Some(Vec::new()));
+    let resume = cache()
+        .lock()
+        .ok()
+        .and_then(|mut map| {
+            cached_prefix(&mut map, path, size, gen)
+                .map(|(data, probes, from)| (data.clone(), probes.to_vec(), from))
+        });
+
+    let mut data = resume
+        .as_ref()
+        .map(|(d, _, _)| d.clone())
+        .unwrap_or_default();
+    let start_probes = resume
+        .as_ref()
+        .map(|(_, p, _)| p.clone())
+        .unwrap_or_default();
+    let from = resume.as_ref().map(|(_, _, from)| *from).unwrap_or(0);
+    PROBES.with(|p| *p.borrow_mut() = Some(start_probes));
     let file = match fs::File::open(path) {
         Ok(f) => f,
         Err(_) => {
@@ -678,51 +719,18 @@ fn file_days(path: &Path, parse: &mut dyn FnMut(&str, &mut FileData)) -> FileDat
         }
     };
     let mut reader = BufReader::new(file);
-    let mut read_ok = true;
-    loop {
-        // One physical line, storing at most MAX_LINE_BYTES (+1 byte to
-        // detect overflow) — a hostile log must not make a single line
-        // allocate without bound.
-        let mut buf: Vec<u8> = Vec::new();
-        let read = reader
-            .by_ref()
-            .take(MAX_LINE_BYTES as u64 + 1)
-            .read_until(b'\n', &mut buf);
-        match read {
-            Ok(0) => break, // EOF
-            Ok(_) if buf.len() > MAX_LINE_BYTES && !buf.ends_with(b"\n") => {
-                // Overlong line: discard the rest of it without storing.
-                if skip_line_rest(&mut reader).is_err() {
-                    read_ok = false;
-                    break;
-                }
-            }
-            Ok(_) => {
-                // Same terminator handling as BufRead::lines().
-                if buf.ends_with(b"\n") {
-                    buf.pop();
-                    if buf.ends_with(b"\r") {
-                        buf.pop();
-                    }
-                }
-                match String::from_utf8(buf) {
-                    Ok(line) => parse(&line, &mut data),
-                    Err(_) => {
-                        // lines() treated invalid UTF-8 as a read error;
-                        // keep the file out of the cache the same way.
-                        read_ok = false;
-                        break;
-                    }
-                }
-            }
-            Err(_) => {
-                read_ok = false;
-                break;
-            }
-        }
+    if from > 0 && reader.seek(SeekFrom::Start(from)).is_err() {
+        PROBES.with(|p| {
+            p.borrow_mut().take();
+        });
+        return file_days_full(path, parse, mtime, size, gen);
     }
+    let read_ok = parse_jsonl_reader(&mut reader, parse, &mut data);
     let probes = PROBES.with(|p| p.borrow_mut().take()).unwrap_or_default();
     if !read_ok {
+        if from > 0 {
+            return file_days_full(path, parse, mtime, size, gen);
+        }
         return data;
     }
 
@@ -734,6 +742,81 @@ fn file_days(path: &Path, parse: &mut dyn FnMut(&str, &mut FileData)) -> FileDat
     }
     CACHE_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
     data
+}
+
+fn file_days_full(
+    path: &Path,
+    parse: &mut dyn FnMut(&str, &mut FileData),
+    mtime: SystemTime,
+    size: u64,
+    gen: u64,
+) -> FileData {
+    let mut data = FileData::default();
+    PROBES.with(|p| *p.borrow_mut() = Some(Vec::new()));
+    let Ok(file) = fs::File::open(path) else {
+        PROBES.with(|p| {
+            p.borrow_mut().take();
+        });
+        return FileData::default();
+    };
+    let mut reader = BufReader::new(file);
+    let read_ok = parse_jsonl_reader(&mut reader, parse, &mut data);
+    let probes = PROBES.with(|p| p.borrow_mut().take()).unwrap_or_default();
+    if !read_ok {
+        return data;
+    }
+    if let Ok(mut map) = cache().lock() {
+        map.insert(
+            path.to_path_buf(),
+            FileEntry { mtime, size, gen, probes, data: data.clone() },
+        );
+    }
+    CACHE_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
+    data
+}
+
+fn parse_jsonl_reader(
+    reader: &mut impl BufRead,
+    parse: &mut dyn FnMut(&str, &mut FileData),
+    data: &mut FileData,
+) -> bool {
+    loop {
+        // One physical line, storing at most MAX_LINE_BYTES (+1 byte to
+        // detect overflow) — a hostile log must not make a single line
+        // allocate without bound.
+        let mut buf: Vec<u8> = Vec::new();
+        let read = reader
+            .by_ref()
+            .take(MAX_LINE_BYTES as u64 + 1)
+            .read_until(b'\n', &mut buf);
+        match read {
+            Ok(0) => return true, // EOF
+            Ok(_) if buf.len() > MAX_LINE_BYTES && !buf.ends_with(b"\n") => {
+                // Overlong line: discard the rest of it without storing.
+                if skip_line_rest(reader).is_err() {
+                    return false;
+                }
+            }
+            Ok(_) => {
+                // Same terminator handling as BufRead::lines().
+                if buf.ends_with(b"\n") {
+                    buf.pop();
+                    if buf.ends_with(b"\r") {
+                        buf.pop();
+                    }
+                }
+                match String::from_utf8(buf) {
+                    Ok(line) => parse(&line, data),
+                    Err(_) => {
+                        // lines() treated invalid UTF-8 as a read error;
+                        // keep the file out of the cache the same way.
+                        return false;
+                    }
+                }
+            }
+            Err(_) => return false,
+        }
+    }
 }
 
 /// Consume through the next '\n' (or EOF) using only the reader's own
@@ -2311,6 +2394,13 @@ fn split_csv_row(line: &str) -> Vec<String> {
     out
 }
 
+fn spend_step<T>(name: &str, f: impl FnOnce() -> T) -> T {
+    let started = std::time::Instant::now();
+    let out = f();
+    eprintln!("[pane] spend: {name} {:?}", started.elapsed());
+    out
+}
+
 pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
     providers::sweep_temp_sqlite_copies();
     pricing::ensure_fresh();
@@ -2319,46 +2409,65 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
         t.clear();
     }
     let (pi_claude, pi_codex) = pi();
-    let (claude_sp, mut minimax_extra, mut qwen_via_claude, mut kimi_routed) =
-        claude(pi_claude);
-    // Extra Claude accounts: own spend cards, with their MiniMax/qwen/Kimi-
-    // routed rows folded into the same destinations as the default account's.
-    let (extra_claude_spends, mm2, qw2, km2) = claude_extra_accounts();
-    merge_data(&mut minimax_extra, mm2);
-    merge_data(&mut qwen_via_claude, qw2);
-    merge_data(&mut kimi_routed, km2);
-    // Hermes rows going to an existing slice merge into it (MiniMax via the
-    // extra-data path); the rest become their own spend entries.
-    let mut hermes_rest = Vec::new();
-    for (id, name, data) in hermes() {
-        if id == "minimax" {
-            merge_data(&mut minimax_extra, data);
-        } else {
-            hermes_rest.push(build_spend(id, name, data));
+    // Claude / Codex / OpenCode / Devin used to run one after another on
+    // this machine that is minutes of IO. They touch different trees.
+    let mut list = std::thread::scope(|s| {
+        let claude_t = s.spawn(|| {
+            spend_step("claude", || {
+                let (sp, mut mm, mut qw, mut km) = claude(pi_claude);
+                let (extras, mm2, qw2, km2) = claude_extra_accounts();
+                merge_data(&mut mm, mm2);
+                merge_data(&mut qw, qw2);
+                merge_data(&mut km, km2);
+                (sp, extras, mm, qw, km)
+            })
+        });
+        let codex_t = s.spawn(|| {
+            spend_step("codex", || {
+                let (sp, mut km) = codex(pi_codex);
+                let (extras, km2) = codex_extra_accounts();
+                merge_data(&mut km, km2);
+                (sp, extras, km)
+            })
+        });
+        let oc_t = s.spawn(|| spend_step("opencode", opencode_accounts));
+        let hermes_t = s.spawn(|| spend_step("hermes", hermes));
+        let grok_t = s.spawn(|| spend_step("grok", grok));
+        let devin_t = s.spawn(|| spend_step("devin", devin));
+        let qwen_t = s.spawn(|| spend_step("qwen", qwen));
+
+        let (claude_sp, extra_claude_spends, mut minimax_extra, qwen_via_claude, mut kimi_routed) =
+            claude_t.join().expect("claude spend");
+        let (codex_sp, extra_codex_spends, kimi_via_codex) = codex_t.join().expect("codex spend");
+        merge_data(&mut kimi_routed, kimi_via_codex);
+        let (opencode_sp, extra_opencode_spends, mut aihubmix_data) =
+            oc_t.join().expect("opencode spend");
+        merge_data(&mut aihubmix_data, qwen_via_claude);
+        let mut hermes_rest = Vec::new();
+        for (id, name, data) in hermes_t.join().expect("hermes spend") {
+            if id == "minimax" {
+                merge_data(&mut minimax_extra, data);
+            } else {
+                hermes_rest.push(build_spend(id, name, data));
+            }
         }
-    }
-    let (opencode_sp, extra_opencode_spends, mut aihubmix_data) = opencode_accounts();
-    merge_data(&mut aihubmix_data, qwen_via_claude);
-    let aihubmix_sp = build_spend("aihubmix", "AihubMix", aihubmix_data);
-    let (codex_sp, kimi_via_codex) = codex(pi_codex);
-    merge_data(&mut kimi_routed, kimi_via_codex);
-    let (extra_codex_spends, kimi_via_extra_codex) = codex_extra_accounts();
-    merge_data(&mut kimi_routed, kimi_via_extra_codex);
-    let mut list = vec![
-        claude_sp,
-        codex_sp,
-        grok(),
-        opencode_sp,
-        aihubmix_sp,
-        devin(),
-        minimax(minimax_extra),
-        kimi(kimi_routed),
-        qwen(),
-    ];
-    list.extend(extra_claude_spends);
-    list.extend(extra_codex_spends);
-    list.extend(extra_opencode_spends);
-    list.extend(hermes_rest);
+        let mut list = vec![
+            claude_sp,
+            codex_sp,
+            grok_t.join().expect("grok spend"),
+            opencode_sp,
+            build_spend("aihubmix", "AihubMix", aihubmix_data),
+            devin_t.join().expect("devin spend"),
+            minimax(minimax_extra),
+            kimi(kimi_routed),
+            qwen_t.join().expect("qwen spend"),
+        ];
+        list.extend(extra_claude_spends);
+        list.extend(extra_codex_spends);
+        list.extend(extra_opencode_spends);
+        list.extend(hermes_rest);
+        list
+    });
     if let Some(csv) = cursor_csv {
         list.push(cursor_from_csv(&csv));
     }
@@ -2589,6 +2698,39 @@ mod tests {
         let cached = cache().lock().unwrap().contains_key(&dir);
         let _ = fs::remove_dir_all(&dir);
         assert!(!cached, "unreadable path must not become a cache entry");
+    }
+
+    #[test]
+    fn file_days_reads_only_the_appended_tail() {
+        let dir = std::env::temp_dir().join(format!("pane-jsonl-tail-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("grow.jsonl");
+        let line = |tokens: f64| {
+            json!({
+                "type": "usage.record",
+                "model": "kimi-code/k3",
+                "usage": {"inputOther": tokens, "output": 0.0},
+                "usageScope": "turn",
+                "time": 1_784_208_630_652i64
+            })
+            .to_string()
+        };
+        fs::write(&path, format!("{}\n", line(1_000.0))).unwrap();
+        let first = file_days(&path, &mut |line, data| kimi_line(line, data));
+        assert!((tokens_sum(&first) - 1_000.0).abs() < 0.001);
+
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        use std::io::Write;
+        write!(f, "{}\n", line(4_000.0)).unwrap();
+        drop(f);
+
+        let second = file_days(&path, &mut |line, data| kimi_line(line, data));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            (tokens_sum(&second) - 5_000.0).abs() < 0.001,
+            "appended line must add to the cached prefix, got {}",
+            tokens_sum(&second)
+        );
     }
 
     // ---- Input bounds: oversize lines, huge files, hostile model names ---

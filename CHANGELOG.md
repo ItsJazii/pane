@@ -14,6 +14,13 @@
   grip stay. Total Spend is unchanged (closes #212).
 
 ### Fixed
+- **Spend scan no longer re-reads whole session logs (or the whole
+  OpenCode ledger) on every refresh.** Growing JSONL files only parse
+  the new tail, OpenCode spend queries the last 31 days (integer clock
+  first — not a JSON walk of the whole table) and caches the live db
+  stamp, Claude/Codex/OpenCode/Devin run in parallel, and Cursor's CSV
+  export no longer blocks the local walk. The popover used to sit on
+  "Scanning session logs…" for minutes on a busy Codex/OpenCode machine.
 - **The local HTTP API no longer stamps restored snapshots as fresh.**
   `fetchedAt` is the last successful fetch, and every provider now
   reports `status` / `stale`. A failed refresh during the 3-minute

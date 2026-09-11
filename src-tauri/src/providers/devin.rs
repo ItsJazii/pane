@@ -364,10 +364,12 @@ const MAX_MESSAGE_ROWS: usize = 2_000_000;
 
 fn read_usage_events(db: &std::path::Path) -> Result<Vec<UsageEvent>, String> {
     let conn = super::open_readonly_sqlite(db)?;
+    let cutoff_s = chrono::Utc::now().timestamp() - 31 * 86_400;
     let mut stmt = conn
         .prepare(&format!(
             "SELECT m.session_id, m.chat_message, m.created_at, s.model
              FROM message_nodes m JOIN sessions s ON s.id = m.session_id
+             WHERE m.created_at >= {cutoff_s}
              ORDER BY m.created_at DESC
              LIMIT {MAX_MESSAGE_ROWS}"
         ))

@@ -230,7 +230,11 @@ fn extra_data_dirs() -> Vec<PathBuf> {
             }
         }
     }
-    dirs.extend(super::account_scan_roots());
+    for root in super::account_scan_roots() {
+        if root.join("opencode.db").is_file() || root.join("auth.json").is_file() {
+            dirs.push(root);
+        }
+    }
     dirs
 }
 
@@ -603,18 +607,91 @@ pub fn collect_cost_events() -> Vec<(f64, f64, f64, String, String)> {
 }
 
 pub fn collect_cost_events_in(dir: &Path) -> Vec<(f64, f64, f64, String, String)> {
-    with_live_db(dir, |db| {
-        Ok(read_messages(db)?
-            .0
-            .into_iter()
-            // Free models record cost 0 with real token counts — the
-            // tokens are usage facts and count at their true $0 price.
-            // Rows with neither cost nor tokens (aborted turns) drop.
-            .filter(|r| r.cost > 0.0 || r.tokens > 0.0)
-            .map(|r| (r.ts, r.cost, r.tokens, r.model, r.provider))
-            .collect())
-    })
-    .unwrap_or_default()
+    use std::sync::Mutex;
+    use std::time::SystemTime;
+    type Stamp = (SystemTime, u64);
+    type Row = (f64, f64, f64, String, String);
+    static CACHE: Mutex<Vec<(PathBuf, Stamp, Stamp, Vec<Row>)>> = Mutex::new(Vec::new());
+
+    let db_path = dir.join("opencode.db");
+    if !db_path.exists() {
+        return Vec::new();
+    }
+    let db_stamp = std::fs::metadata(&db_path)
+        .map(|m| (m.modified().unwrap_or(SystemTime::UNIX_EPOCH), m.len()))
+        .unwrap_or((SystemTime::UNIX_EPOCH, 0));
+    let wal = db_path.with_extension("db-wal");
+    let wal_stamp = std::fs::metadata(&wal)
+        .map(|m| (m.modified().unwrap_or(SystemTime::UNIX_EPOCH), m.len()))
+        .unwrap_or((SystemTime::UNIX_EPOCH, 0));
+
+    if let Ok(cache) = CACHE.lock() {
+        if let Some((_, d, w, rows)) = cache.iter().find(|(p, _, _, _)| p == &db_path) {
+            if *d == db_stamp && *w == wal_stamp {
+                return rows.clone();
+            }
+        }
+    }
+
+    let rows = with_live_db(dir, |db| Ok(read_recent_cost_events(db)?)).unwrap_or_default();
+    if let Ok(mut cache) = CACHE.lock() {
+        if let Some(slot) = cache.iter_mut().find(|(p, _, _, _)| p == &db_path) {
+            *slot = (db_path, db_stamp, wal_stamp, rows.clone());
+        } else {
+            cache.push((db_path, db_stamp, wal_stamp, rows.clone()));
+        }
+    }
+    rows
+}
+
+/// Spend only needs ~31 days. The quota card still uses `read_messages`
+/// for the monthly Go cycle; this path must not pull that whole ledger.
+fn read_recent_cost_events(db: &Path) -> Result<Vec<(f64, f64, f64, String, String)>, String> {
+    let conn = super::open_readonly_sqlite(db)?;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let cutoff_ms = now_ms - 31 * 86_400 * 1_000;
+    // json_extract in WHERE made SQLite parse every blob in the table.
+    // Filter on the integer clock first; role/cost stay in Rust.
+    let max_ts: i64 = conn
+        .query_row("SELECT COALESCE(MAX(time_created), 0) FROM message", [], |row| row.get(0))
+        .unwrap_or(0);
+    let cutoff = if max_ts > 1_000_000_000_000 { cutoff_ms } else { cutoff_ms / 1000 };
+    let mut stmt = conn
+        .prepare(
+            "SELECT COALESCE(json_extract(data, '$.role'), ''),
+                    COALESCE(json_extract(data, '$.providerID'), 'unknown'),
+                    COALESCE(json_extract(data, '$.modelID'), 'unknown'),
+                    COALESCE(json_extract(data, '$.cost'), 0),
+                    COALESCE(json_extract(data, '$.time.completed'),
+                             json_extract(data, '$.time.created'),
+                             time_created),
+                    COALESCE(json_extract(data, '$.tokens.input'), 0)
+                        + COALESCE(json_extract(data, '$.tokens.output'), 0)
+                        + COALESCE(json_extract(data, '$.tokens.reasoning'), 0)
+             FROM message
+             WHERE time_created >= ?1
+             LIMIT ?2",
+        )
+        .map_err(|e| format!("query recent messages: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params![cutoff, super::MAX_LEDGER_ROWS as i64], |row| {
+            Ok((
+                row.get::<_, String>(0).unwrap_or_default(),
+                row.get::<_, String>(1).unwrap_or_else(|_| "unknown".into()),
+                row.get::<_, String>(2).unwrap_or_else(|_| "unknown".into()),
+                row.get::<_, f64>(3).unwrap_or(0.0),
+                row.get::<_, f64>(4).unwrap_or(0.0),
+                row.get::<_, f64>(5).unwrap_or(0.0),
+            ))
+        })
+        .map_err(|e| format!("read recent messages: {e}"))?;
+    Ok(rows
+        .flatten()
+        .filter(|(role, _, _, cost, _, tokens)| {
+            role == "assistant" && (*cost > 0.0 || *tokens > 0.0)
+        })
+        .map(|(_, provider, model, cost, ts, tokens)| (ts, cost, tokens, model, provider))
+        .collect())
 }
 
 pub struct MessageRow {
