@@ -22,10 +22,14 @@
   export no longer blocks the local walk. The popover used to sit on
   "Scanning session logs…" for minutes on a busy Codex/OpenCode machine.
   Tail scans warm parser state from the last 1 MB of the cached prefix
-  (Codex cumulative totals, Claude/Grok/Pi), cache only complete JSONL
-  lines, and full-parse when a larger rewrite fails a 64+32-byte prefix
-  check. A failed OpenCode read keeps the last good rows instead of
-  caching empty. Cursor-only unknown models still flag the catalog.
+  only for stateful logs (Codex/Claude/Grok/Pi) — Kimi/Qwen skip that
+  extra read. Cache only complete JSONL lines; a legacy mid-line offset
+  backs up at most 64 KB instead of discarding the persist file.
+  Full-parse when a larger rewrite fails a 64+32-byte prefix check
+  (one file open). OpenCode takes the newest ledger rows via `rowid`
+  (no filesort). Overlapping spend collects wait rather than clobber
+  `touched`. A failed OpenCode read keeps the last good rows instead
+  of caching empty. Cursor-only unknown models still flag the catalog.
 - **The local HTTP API no longer stamps restored snapshots as fresh.**
   `fetchedAt` is the last successful fetch, and every provider now
   reports `status` / `stale`. A failed refresh during the 3-minute

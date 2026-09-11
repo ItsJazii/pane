@@ -355,8 +355,8 @@ fn load_persisted_cache() {
                     gen,
                     probes: e.probes,
                     data,
-                    prefix_head: e.prefix_head,
-                    prefix_tail: e.prefix_tail,
+                    prefix_head: clip_fingerprint(e.prefix_head, PREFIX_HEAD),
+                    prefix_tail: clip_fingerprint(e.prefix_tail, PREFIX_TAIL),
                 },
             );
         }
@@ -687,48 +687,54 @@ fn cached_prefix(
     Some((entry.data.clone(), entry.probes.clone(), entry.size))
 }
 
-fn read_prefix_slice(path: &Path, start: u64, n: usize) -> Vec<u8> {
-    if n == 0 {
-        return Vec::new();
+/// Hostile/corrupt persist blobs must not sit in RAM. Oversized marks
+/// are dropped so the next scan still tails (speed) instead of holding
+/// the payload or forcing a full re-read.
+fn clip_fingerprint(bytes: Vec<u8>, cap: usize) -> Vec<u8> {
+    if bytes.len() <= cap {
+        bytes
+    } else {
+        Vec::new()
+    }
+}
+
+/// One open, two tiny reads. Four opens on a grown log would add up
+/// across hundreds of Codex files.
+fn read_prefix_marks(path: &Path, end: u64) -> (Vec<u8>, Vec<u8>) {
+    if end == 0 {
+        return (Vec::new(), Vec::new());
     }
     let Ok(mut f) = fs::File::open(path) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
-    if f.seek(SeekFrom::Start(start)).is_err() {
-        return Vec::new();
+    let head_n = PREFIX_HEAD.min(end as usize);
+    let mut head = vec![0u8; head_n];
+    if f.read_exact(&mut head).is_err() {
+        return (Vec::new(), Vec::new());
     }
-    let mut buf = vec![0u8; n];
-    if f.read_exact(&mut buf).is_err() {
-        return Vec::new();
+    let tail_n = PREFIX_TAIL.min(end as usize);
+    if f.seek(SeekFrom::Start(end - tail_n as u64)).is_err() {
+        return (Vec::new(), Vec::new());
     }
-    buf
-}
-
-fn read_prefix_head(path: &Path, end: u64) -> Vec<u8> {
-    if end == 0 {
-        return Vec::new();
+    let mut tail = vec![0u8; tail_n];
+    if f.read_exact(&mut tail).is_err() {
+        return (Vec::new(), Vec::new());
     }
-    read_prefix_slice(path, 0, PREFIX_HEAD.min(end as usize))
-}
-
-fn read_prefix_tail(path: &Path, end: u64) -> Vec<u8> {
-    if end == 0 {
-        return Vec::new();
-    }
-    let n = PREFIX_TAIL.min(end as usize);
-    read_prefix_slice(path, end - n as u64, n)
+    (head, tail)
 }
 
 fn prefix_still_matches(path: &Path, end: u64, head: &[u8], tail: &[u8]) -> bool {
     // Older cache: both empty — still tail so a busy machine does not
-    // regress to a full re-read.
+    // regress to a full re-read. Unreadable marks also tail: the later
+    // File::open will fail the same way, and a full re-read would be worse.
     if head.is_empty() && tail.is_empty() {
         return true;
     }
-    if !head.is_empty() && read_prefix_head(path, end) != head {
+    let (got_head, got_tail) = read_prefix_marks(path, end);
+    if !head.is_empty() && got_head != head {
         return false;
     }
-    if !tail.is_empty() && read_prefix_tail(path, end) != tail {
+    if !tail.is_empty() && got_tail != tail {
         return false;
     }
     true
@@ -742,8 +748,7 @@ fn remember_file(
     probes: Vec<PriceProbe>,
     data: FileData,
 ) {
-    let prefix_head = read_prefix_head(path, cached_size);
-    let prefix_tail = read_prefix_tail(path, cached_size);
+    let (prefix_head, prefix_tail) = read_prefix_marks(path, cached_size);
     if let Ok(mut map) = cache().lock() {
         map.insert(
             path.to_path_buf(),
@@ -762,9 +767,24 @@ fn remember_file(
 }
 
 /// Parses one file into per-day totals, via the cache when unchanged.
-/// Growing logs (Codex/Claude append a line per turn) only read the new
-/// tail — a 200 MB session that gained 4 KB used to re-read the whole file.
+/// Growing logs only read the new tail. Stateless parsers (Kimi/Qwen)
+/// skip the 1 MB warmup — that I/O is only for Codex/Claude/Grok/Pi.
 fn file_days(path: &Path, parse: &mut dyn FnMut(&str, &mut FileData)) -> FileData {
+    file_days_inner(path, parse, false)
+}
+
+/// Same as `file_days`, but replays the last 1 MB of the cached prefix
+/// into a discard `FileData` so the caller's closure keeps Codex totals,
+/// Claude mids, Grok pid→model, and Pi seen ids.
+fn file_days_stateful(path: &Path, parse: &mut dyn FnMut(&str, &mut FileData)) -> FileData {
+    file_days_inner(path, parse, true)
+}
+
+fn file_days_inner(
+    path: &Path,
+    parse: &mut dyn FnMut(&str, &mut FileData),
+    warm: bool,
+) -> FileData {
     let Ok(meta) = fs::metadata(path) else { return FileData::default() };
     if meta.len() > MAX_LOG_FILE_BYTES {
         // Also gated in recent_jsonl_files; this catches direct-path
@@ -811,7 +831,7 @@ fn file_days(path: &Path, parse: &mut dyn FnMut(&str, &mut FileData)) -> FileDat
         .as_ref()
         .map(|(_, p, _)| p.clone())
         .unwrap_or_default();
-    let from = resume.as_ref().map(|(_, _, from)| *from).unwrap_or(0);
+    let mut from = resume.as_ref().map(|(_, _, from)| *from).unwrap_or(0);
     PROBES.with(|p| *p.borrow_mut() = Some(start_probes));
     let file = match fs::File::open(path) {
         Ok(f) => f,
@@ -827,7 +847,14 @@ fn file_days(path: &Path, parse: &mut dyn FnMut(&str, &mut FileData)) -> FileDat
         }
     };
     let mut reader = BufReader::new(file);
+    // Legacy v4 entries cached the raw EOF, which can sit inside a
+    // half-written line. Back up to the previous newline (64 KB) instead
+    // of discarding the whole persist file. Already-aligned offsets
+    // cost one byte on this open handle.
     if from > 0 {
+        from = align_to_line_start(&mut reader, from);
+    }
+    if from > 0 && warm {
         // Replay a bounded window of the cached prefix into a discard
         // FileData so the caller's closure (Codex totals, Claude mids,
         // Grok pid→model, Pi seen ids) is warm before the real tail.
@@ -848,6 +875,11 @@ fn file_days(path: &Path, parse: &mut dyn FnMut(&str, &mut FileData)) -> FileDat
                 return file_days_full(path, parse, mtime, size, gen);
             }
         }
+    } else if from > 0 && reader.seek(SeekFrom::Start(from)).is_err() {
+        PROBES.with(|p| {
+            p.borrow_mut().take();
+        });
+        return file_days_full(path, parse, mtime, size, gen);
     }
     let (read_ok, last_complete) = parse_jsonl_reader(&mut reader, parse, &mut data, from, None);
     let probes = PROBES.with(|p| p.borrow_mut().take()).unwrap_or_default();
@@ -885,6 +917,35 @@ fn file_days_full(
     }
     remember_file(path, mtime, last_complete, gen, probes, data.clone());
     data
+}
+
+/// If `from` is mid-line, walk back at most 64 KB to the previous
+/// newline. Already-aligned offsets cost one byte. No newline in that
+/// window keeps `from` so we do not re-parse cached complete lines.
+fn align_to_line_start(reader: &mut BufReader<fs::File>, from: u64) -> u64 {
+    if from == 0 {
+        return 0;
+    }
+    if reader.seek(SeekFrom::Start(from - 1)).is_ok() {
+        let mut b = [0u8; 1];
+        if reader.read_exact(&mut b).is_ok() && b[0] == b'\n' {
+            return from;
+        }
+    }
+    const ALIGN_BACK: u64 = 64 * 1024;
+    let start = from.saturating_sub(ALIGN_BACK);
+    if reader.seek(SeekFrom::Start(start)).is_err() {
+        return from;
+    }
+    let mut buf = vec![0u8; (from - start) as usize];
+    let n = match reader.read(&mut buf) {
+        Ok(n) => n,
+        Err(_) => return from,
+    };
+    match buf[..n].iter().rposition(|&c| c == b'\n') {
+        Some(i) => start + i as u64 + 1,
+        None => from,
+    }
 }
 
 /// Seek to the 1 MB warmup window just before `from` and skip a
@@ -1336,10 +1397,10 @@ fn claude(extra: FileData) -> (ProviderSpend, FileData, FileData, FileData) {
     let mut all = FileData::default();
     for file in files {
         let mut state = ClaudeFileState::default();
-        let data = file_days(&file, &mut |line, data| claude_line(&mut state, line, data));
+        let data = file_days_stateful(&file, &mut |line, data| claude_line(&mut state, line, data));
         merge_data(&mut all, data);
     }
-    // Usage from other scanners that belongs on this card (pi sessions
+    // Usage from other scanners that belongs on this card (pi sessions)
     // driving a Claude account) joins before the splits below, so it gets
     // the same model-based routing as natively-logged rows.
     merge_data(&mut all, extra);
@@ -1371,7 +1432,7 @@ fn claude_extra_accounts() -> (Vec<ProviderSpend>, FileData, FileData, FileData)
         let mut all = FileData::default();
         for file in files {
             let mut state = ClaudeFileState::default();
-            let data = file_days(&file, &mut |line, data| claude_line(&mut state, line, data));
+            let data = file_days_stateful(&file, &mut |line, data| claude_line(&mut state, line, data));
             merge_data(&mut all, data);
         }
         merge_data(&mut minimax_extra, split_models(&mut all, "MiniMax"));
@@ -1889,7 +1950,7 @@ fn codex_scan(home: &Path) -> FileData {
     let mut all = FileData::default();
     for file in codex_session_files(home) {
         let mut state = CodexFileState::default();
-        let data = file_days(&file, &mut |line, data| codex_line(&mut state, line, data));
+        let data = file_days_stateful(&file, &mut |line, data| codex_line(&mut state, line, data));
         merge_data(&mut all, data);
     }
     all
@@ -2055,7 +2116,7 @@ fn pi() -> (FileData, FileData) {
     let mut all = FileData::default();
     for file in files {
         let mut seen = HashSet::new();
-        let data = file_days(&file, &mut |line, data| pi_line(&mut seen, line, data));
+        let data = file_days_stateful(&file, &mut |line, data| pi_line(&mut seen, line, data));
         merge_data(&mut all, data);
     }
     let claude = take_tagged(&mut all, "claude");
@@ -2076,7 +2137,7 @@ fn grok() -> ProviderSpend {
     let mut all = FileData::default();
     if path.exists() {
         let mut model_by_pid: HashMap<i64, String> = HashMap::new();
-        let data = file_days(&path, &mut |line, data| {
+        let data = file_days_stateful(&path, &mut |line, data| {
             if !line.contains("inference_done") && !line.contains("model") {
                 return;
             }
@@ -2558,7 +2619,16 @@ fn spend_step<T>(name: &str, f: impl FnOnce() -> T) -> T {
     out
 }
 
+fn collect_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
+    // Two overlapping collects share `touched` and rewrite spend_cache
+    // from that set. Serialize so a second refresh waits — one scan
+    // stays the same speed.
+    let _busy = collect_lock().lock().unwrap_or_else(|e| e.into_inner());
     providers::sweep_temp_sqlite_copies();
     pricing::ensure_fresh();
     load_persisted_cache();
@@ -2839,6 +2909,12 @@ mod tests {
     }
 
     #[test]
+    fn oversized_prefix_fingerprint_is_dropped() {
+        assert!(clip_fingerprint(vec![1; PREFIX_HEAD + 1], PREFIX_HEAD).is_empty());
+        assert_eq!(clip_fingerprint(vec![1, 2, 3], PREFIX_HEAD), vec![1, 2, 3]);
+    }
+
+    #[test]
     fn empty_probes_do_not_vouch_for_an_empty_parse() {
         // Failed-open artifact: no events, no questions — must re-parse.
         assert!(!probes_still_vouch(&[], &FileData::default()));
@@ -2907,7 +2983,7 @@ mod tests {
         ];
         fs::write(&path, format!("{}\n{}\n", head[0], head[1])).unwrap();
         let mut st = CodexFileState::default();
-        let first = file_days(&path, &mut |line, data| codex_line(&mut st, line, data));
+        let first = file_days_stateful(&path, &mut |line, data| codex_line(&mut st, line, data));
         assert_eq!(tokens_sum(&first), 1_100.0);
 
         let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
@@ -2923,7 +2999,7 @@ mod tests {
         // Production creates a fresh closure state per scan — warmup must
         // refill prev_totals so the cumulative snapshot is a delta.
         let mut st = CodexFileState::default();
-        let second = file_days(&path, &mut |line, data| codex_line(&mut st, line, data));
+        let second = file_days_stateful(&path, &mut |line, data| codex_line(&mut st, line, data));
         let _ = fs::remove_dir_all(&dir);
         assert_eq!(
             tokens_sum(&second),
@@ -2965,6 +3041,51 @@ mod tests {
         assert!(
             (tokens_sum(&second) - 5_000.0).abs() < 0.001,
             "completed line must be parsed on the next scan, got {}",
+            tokens_sum(&second)
+        );
+    }
+
+    #[test]
+    fn file_days_aligns_a_legacy_midline_offset() {
+        let dir = std::env::temp_dir().join(format!("pane-jsonl-legacy-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("legacy.jsonl");
+        let line = |tokens: f64| {
+            json!({
+                "type": "usage.record",
+                "model": "kimi-code/k3",
+                "usage": {"inputOther": tokens, "output": 0.0},
+                "usageScope": "turn",
+                "time": 1_784_208_630_652i64
+            })
+            .to_string()
+        };
+        let first_line = line(1_000.0);
+        let second_line = line(4_000.0);
+        fs::write(&path, format!("{first_line}\n{}", &second_line[..12])).unwrap();
+        let first = file_days(&path, &mut |line, data| kimi_line(line, data));
+        assert!((tokens_sum(&first) - 1_000.0).abs() < 0.001);
+
+        // Old v4 cache stored the raw EOF (mid-line) and had no fingerprint.
+        let incomplete_len = fs::metadata(&path).unwrap().len();
+        if let Ok(mut map) = cache().lock() {
+            if let Some(e) = map.get_mut(&path) {
+                e.size = incomplete_len;
+                e.prefix_head.clear();
+                e.prefix_tail.clear();
+            }
+        }
+
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        use std::io::Write;
+        write!(f, "{}\n", &second_line[12..]).unwrap();
+        drop(f);
+
+        let second = file_days(&path, &mut |line, data| kimi_line(line, data));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            (tokens_sum(&second) - 5_000.0).abs() < 0.001,
+            "legacy mid-line offset must back up to the previous newline, got {}",
             tokens_sum(&second)
         );
     }

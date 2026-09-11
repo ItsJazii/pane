@@ -665,6 +665,9 @@ fn read_recent_cost_events(db: &Path) -> Result<Vec<(f64, f64, f64, String, Stri
     let cutoff_ms = now_ms - 31 * 86_400 * 1_000;
     // json_extract in WHERE made SQLite parse every blob in the table.
     // Filter on the integer clock first; role/cost stay in Rust.
+    // Newest-first via rowid (clustered) — `ORDER BY time_created DESC`
+    // would filesort the 31-day match before LIMIT on a machine with a
+    // 176 MB ledger. Messages are inserted in clock order.
     let max_ts: i64 = conn
         .query_row("SELECT COALESCE(MAX(time_created), 0) FROM message", [], |row| row.get(0))
         .unwrap_or(0);
@@ -683,6 +686,7 @@ fn read_recent_cost_events(db: &Path) -> Result<Vec<(f64, f64, f64, String, Stri
                         + COALESCE(json_extract(data, '$.tokens.reasoning'), 0)
              FROM message
              WHERE time_created >= ?1
+             ORDER BY rowid DESC
              LIMIT ?2",
         )
         .map_err(|e| format!("query recent messages: {e}"))?;
