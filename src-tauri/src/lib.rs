@@ -1649,11 +1649,20 @@ fn restore_last_success_after_error(
     }
     let warning = current.error.clone();
     *current = previous.clone();
+    current.attempt_failed = true;
     if sub2api || age_ms > STALE_GRACE_MS {
         current.stale = true;
         current.warning = warning;
     }
     true
+}
+
+/// Old `last_snapshots.json` entries have no `fetched_at` on the snap
+/// itself. The cache clock (`CachedSnap.at`) is the last success time.
+fn hydrate_fetch_time(s: &mut providers::Snapshot, at: i64) {
+    if s.fetched_at.is_none() {
+        s.fetched_at = Some(at);
+    }
 }
 
 /// Called by the UI. Refreshes every enabled provider at the same time and
@@ -2007,7 +2016,13 @@ async fn fetch_usage(
         .collect();
     let mut all = Vec::with_capacity(handles.len());
     for h in handles {
-        if let Ok(snap) = h.await {
+        if let Ok(mut snap) = h.await {
+            // Stamp each provider as it lands — not once after the
+            // slowest sibling finishes — so fetchedAt is that card's
+            // last success, not the batch join clock.
+            if snap.status == "ok" && snap.fetched_at.is_none() {
+                snap.fetched_at = Some(now_ms() as i64);
+            }
             all.push(snap);
         }
     }
@@ -2168,6 +2183,7 @@ async fn fetch_usage(
                             restore_kimi_wallet_rows(s, &previous.snap);
                             if s.metrics.len() > n {
                                 skip_cache = true;
+                                s.attempt_failed = true;
                                 if age > STALE_GRACE_MS {
                                     s.stale = true;
                                 }
@@ -2176,10 +2192,13 @@ async fn fetch_usage(
                     }
                 }
                 if s.status == "ok" && !skip_cache {
+                    let at = s.fetched_at.unwrap_or(now_ms);
+                    s.fetched_at = Some(at);
+                    s.attempt_failed = false;
                     map.insert(
                         s.id.clone(),
                         CachedSnap {
-                            at: now_ms,
+                            at,
                             snap: s.clone(),
                         },
                     );
@@ -2187,7 +2206,10 @@ async fn fetch_usage(
                 } else if s.status == "error" {
                     if let Some(previous) = map.get(&s.id) {
                         let age = now_ms - previous.at;
-                        restore_last_success_after_error(s, &previous.snap, age);
+                        let previous_at = previous.at;
+                        if restore_last_success_after_error(s, &previous.snap, age) {
+                            hydrate_fetch_time(s, previous_at);
+                        }
                     }
                 }
             }
@@ -2400,6 +2422,7 @@ fn cached_usage() -> Vec<providers::Snapshot> {
         .map(|(_, c)| {
             let mut s = c.snap;
             s.stale = true;
+            hydrate_fetch_time(&mut s, c.at);
             s
         })
         .collect();
@@ -3260,7 +3283,7 @@ mod tests {
         purge_onenewapi_cards_with, purge_key_cards_from_config,
         rename_cached_snapshot, rename_cached_snapshot_in, rename_cached_snapshots_in,
         restore_kimi_wallet_rows,
-        restore_last_success_after_error,
+        hydrate_fetch_time, restore_last_success_after_error,
         retain_current_key_card_results, strip_entry_application_order, strip_icon_ids_to_clear,
         strip_is_active, strip_reset_ids, telemetry_starred_id, is_stable_metric_label,
         updater_endpoint_strings, CachedSnap, FailState,
@@ -3442,6 +3465,7 @@ mod tests {
         let mut current = Snapshot::error("sub2api@wallet", "Panel · Key 1", "HTTP 401".into());
         assert!(restore_last_success_after_error(&mut current, &previous, 1_000));
         assert!(current.stale);
+        assert!(current.attempt_failed);
         assert_eq!(current.warning.as_deref(), Some("HTTP 401"));
         assert_eq!(current.metrics[0].used_percent, Some(25.0));
     }
@@ -3552,6 +3576,7 @@ mod tests {
         ));
         assert_eq!(current.status, "ok");
         assert!(!current.stale);
+        assert!(current.attempt_failed);
         assert_eq!(current.warning, None);
         assert_eq!(current.metrics[0].used_percent, Some(25.0));
     }
@@ -3573,8 +3598,23 @@ mod tests {
         ));
         assert_eq!(current.status, "ok");
         assert!(current.stale);
+        assert!(current.attempt_failed);
         assert_eq!(current.warning.as_deref(), Some("timeout"));
         assert_eq!(current.metrics[0].used_percent, Some(25.0));
+    }
+
+    #[test]
+    fn old_cache_without_fetched_at_publishes_the_cache_clock() {
+        let raw = r#"{"codex":{"at":1800000000000,"snap":{"id":"codex","name":"Codex","plan":null,"status":"ok","error":null,"metrics":[],"stale":false,"warning":null}}}"#;
+        let map: std::collections::HashMap<String, CachedSnap> =
+            serde_json::from_str(raw).unwrap();
+        let entry = &map["codex"];
+        assert!(entry.snap.fetched_at.is_none());
+        let mut s = entry.snap.clone();
+        hydrate_fetch_time(&mut s, entry.at);
+        let json = crate::httpapi::provider_json(&s, "2026-09-05T00:00:00Z");
+        assert_eq!(json["fetchedAt"], "2027-01-15T08:00:00Z");
+        assert_eq!(json["status"], "ok");
     }
 
     #[test]

@@ -76,7 +76,12 @@ impl Metric {
 
 /// Everything one provider reports back after a refresh. `stale` marks a
 /// snapshot that is actually the last good fetch, shown because the newest
-/// attempt failed transiently (`warning` carries that error).
+/// attempt failed transiently (`warning` carries that error). `fetched_at`
+/// is when this data was last successfully fetched (epoch ms) — it rides
+/// along so a restored snapshot can't pose as a fresh success downstream
+/// (local HTTP API). `None` means unknown (old caches, before first
+/// success). `attempt_failed` is set on every restore so the API can
+/// report staleness during the UI's 3-minute grace window.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Snapshot {
     pub id: String,
@@ -87,6 +92,10 @@ pub struct Snapshot {
     pub metrics: Vec<Metric>,
     pub stale: bool,
     pub warning: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetched_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub attempt_failed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dashboard_url: Option<String>,
 }
@@ -102,6 +111,8 @@ impl Snapshot {
             metrics,
             stale: false,
             warning: None,
+            fetched_at: None,
+            attempt_failed: false,
             dashboard_url: None,
         }
     }
@@ -116,6 +127,8 @@ impl Snapshot {
             metrics: vec![],
             stale: false,
             warning: None,
+            fetched_at: None,
+            attempt_failed: false,
             dashboard_url: None,
         }
     }
@@ -130,6 +143,8 @@ impl Snapshot {
             metrics: vec![],
             stale: false,
             warning: None,
+            fetched_at: None,
+            attempt_failed: false,
             dashboard_url: None,
         }
     }

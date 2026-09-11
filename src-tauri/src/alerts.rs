@@ -93,9 +93,17 @@ pub fn evaluate(snapshots: &[Snapshot], cfg: &Value) -> Vec<Alert> {
     let Ok(mut map) = states().lock() else { return alerts };
 
     for snapshot in snapshots.iter().filter(|s| s.status == "ok") {
+        // Restored snapshots past the UI grace window are last-good, not
+        // live. Skipping them means stale data can neither fire a new
+        // worsening alert nor reset the armed state the live data left.
+        // The 3-minute grace (`stale` still false, `attempt_failed` true)
+        // still alerts — same as today.
+        if snapshot.stale {
+            continue;
+        }
         if snapshot.id.starts_with("sub2api@") {
             let disabled = cfg.get("disabled").and_then(Value::as_array);
-            if snapshot.stale || disabled.is_some_and(|ids| ids.iter().any(|id| {
+            if disabled.is_some_and(|ids| ids.iter().any(|id| {
                 id.as_str().is_some_and(|id| id == "sub2api" || id == snapshot.id)
             })) {
                 continue;
@@ -256,6 +264,31 @@ mod tests {
             vec![crate::providers::Metric::text("Balance", "$-20.00".into())]);
         assert!(evaluate(&[wallet], &cfg).is_empty());
         for id in ids { forget_snapshot(id); }
+    }
+
+    #[test]
+    fn stale_snapshots_of_any_provider_never_fire_or_re_arm_alerts() {
+        let id = "codex";
+        let cfg = serde_json::json!({"notifyAlmostOut": true, "locale": "en"});
+        let make = |used, stale| {
+            let mut s = Snapshot::ok(
+                id,
+                "Codex",
+                None,
+                vec![crate::providers::Metric::progress("Weekly", used, None)],
+            );
+            s.stale = stale;
+            s
+        };
+        forget_snapshot(id);
+        assert!(evaluate(&[make(50.0, false)], &cfg).is_empty());
+        assert!(evaluate(&[make(95.0, true)], &cfg).is_empty());
+        assert_eq!(evaluate(&[make(95.0, false)], &cfg).len(), 1);
+        assert!(evaluate(&[make(50.0, true)], &cfg).is_empty());
+        assert!(evaluate(&[make(95.0, false)], &cfg).is_empty());
+        assert!(evaluate(&[make(50.0, false)], &cfg).is_empty());
+        assert_eq!(evaluate(&[make(95.0, false)], &cfg).len(), 1);
+        forget_snapshot(id);
     }
 
     #[test]
