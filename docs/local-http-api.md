@@ -3,13 +3,22 @@
 Pane serves your usage as JSON so your own scripts, widgets, and overlays
 can read it.
 
+Every entry exposes `status` (`ok` | `no_credentials` | `error`) and
+`stale` so failed refreshes cannot make historical data look current:
+`stale: true` means the numbers are the last good fetch shown because the
+newest attempt failed. `fetchedAt` is when the data was **last
+successfully fetched** — for a stale entry that is the original success
+time, not the moment it was re-served; for `error`/`no_credentials`
+entries it is the attempt time, and `status` tells you it wasn't a
+success.
+
 Sub2API cards use `GET /v1/usage/sub2api@<key-id>` and are also included
 in the collection. Each key stays independent even if its wallet or
 subscription values match another key. These entries additionally expose
-`status`, `stale`, `error`, and `warning` so failed refreshes cannot make
-historical data look current. Progress entries retain display amounts in
-`value`/`subtitle` as well as the percentage. Other providers keep their
-existing wire format.
+`error` and `warning` (their error strings are whitelisted, sanitized
+text) and their progress entries retain display amounts in `value`/
+`subtitle` as well as the percentage. Other providers keep their existing
+wire format.
 
 This reads Pane's published snapshots and never initiates a remote usage
 request. Disabled or deleted keys return 404 and disappear from the
@@ -31,6 +40,8 @@ Wire format (compatible with the macOS OpenUsage API):
   "providerId": "claude",
   "displayName": "Claude",
   "plan": "Max",
+  "status": "ok",
+  "stale": false,
   "fetchedAt": "2026-07-08T01:30:00Z",
   "lines": [{
     "type": "progress",

@@ -90,14 +90,26 @@ pub fn evaluate(snapshots: &[Snapshot], cfg: &Value) -> Vec<Alert> {
     }
 
     let mut alerts = Vec::new();
-    let Ok(mut map) = states().lock() else { return alerts };
+    let Ok(mut map) = states().lock() else {
+        return alerts;
+    };
 
     for snapshot in snapshots.iter().filter(|s| s.status == "ok") {
+        // Restored snapshots are the last good fetch, not a live reading.
+        // Skipping them entirely means stale data can neither fire a new
+        // worsening alert nor reset the armed state the live data left —
+        // the next live reading is judged against the last live one.
+        if snapshot.stale {
+            continue;
+        }
         if snapshot.id.starts_with("sub2api@") {
             let disabled = cfg.get("disabled").and_then(Value::as_array);
-            if snapshot.stale || disabled.is_some_and(|ids| ids.iter().any(|id| {
-                id.as_str().is_some_and(|id| id == "sub2api" || id == snapshot.id)
-            })) {
+            if disabled.is_some_and(|ids| {
+                ids.iter().any(|id| {
+                    id.as_str()
+                        .is_some_and(|id| id == "sub2api" || id == snapshot.id)
+                })
+            }) {
                 continue;
             }
         }
@@ -110,7 +122,9 @@ pub fn evaluate(snapshots: &[Snapshot], cfg: &Value) -> Vec<Alert> {
             {
                 continue;
             }
-            let Some(used) = metric.used_percent else { continue };
+            let Some(used) = metric.used_percent else {
+                continue;
+            };
             if !used.is_finite() || used < 0.0 {
                 continue;
             }
@@ -157,9 +171,9 @@ pub fn evaluate(snapshots: &[Snapshot], cfg: &Value) -> Vec<Alert> {
                         body: match loc {
                             "zh" => format!("{name} 按当前速度重置时大约只剩 {spare:.0}%。"),
                             "ru" => format!("{name} к сбросу останется примерно {spare:.0}%."),
-                            _ => format!(
-                                "{name} is on pace to finish with only ~{spare:.0}% spare."
-                            ),
+                            _ => {
+                                format!("{name} is on pace to finish with only ~{spare:.0}% spare.")
+                            }
                         },
                     });
                 }
@@ -221,8 +235,18 @@ mod tests {
     fn sub2api_alerts_ignore_stale_disabled_and_nonfinite_observations() {
         let id = "sub2api@alert-eligibility";
         let cfg = serde_json::json!({"notifyAlmostOut": true, "locale": "en"});
-        let make = |used| Snapshot::ok(id, "Site · Key", None,
-            vec![crate::providers::Metric::progress("Total quota", used, None)]);
+        let make = |used| {
+            Snapshot::ok(
+                id,
+                "Site · Key",
+                None,
+                vec![crate::providers::Metric::progress(
+                    "Total quota",
+                    used,
+                    None,
+                )],
+            )
+        };
         forget_snapshot(id);
         assert!(evaluate(&[make(50.0)], &cfg).is_empty());
         let mut stale = make(95.0);
@@ -242,20 +266,71 @@ mod tests {
     fn sub2api_thresholds_are_independent_for_equal_keys_and_each_allowance() {
         let ids = ["sub2api@alert-a", "sub2api@alert-b"];
         let cfg = serde_json::json!({"notifyAlmostOut": true, "locale": "en"});
-        let make = |id: &str, used| Snapshot::ok(id, id, None, vec![
-            crate::providers::Metric::progress("5h", used, None),
-            crate::providers::Metric::progress("1d", used, None),
-        ]);
-        for id in ids { forget_snapshot(id); }
+        let make = |id: &str, used| {
+            Snapshot::ok(
+                id,
+                id,
+                None,
+                vec![
+                    crate::providers::Metric::progress("5h", used, None),
+                    crate::providers::Metric::progress("1d", used, None),
+                ],
+            )
+        };
+        for id in ids {
+            forget_snapshot(id);
+        }
         assert!(evaluate(&[make(ids[0], 40.0), make(ids[1], 40.0)], &cfg).is_empty());
         let alerts = evaluate(&[make(ids[0], 95.0), make(ids[1], 95.0)], &cfg);
         assert_eq!(alerts.len(), 4);
-        assert_eq!(alerts.iter().filter(|alert| alert.body.contains(ids[0])).count(), 2);
+        assert_eq!(
+            alerts
+                .iter()
+                .filter(|alert| alert.body.contains(ids[0]))
+                .count(),
+            2
+        );
         assert!(evaluate(&[make(ids[0], 95.0), make(ids[1], 95.0)], &cfg).is_empty());
-        let wallet = Snapshot::ok(ids[0], "Wallet", None,
-            vec![crate::providers::Metric::text("Balance", "$-20.00".into())]);
+        let wallet = Snapshot::ok(
+            ids[0],
+            "Wallet",
+            None,
+            vec![crate::providers::Metric::text("Balance", "$-20.00".into())],
+        );
         assert!(evaluate(&[wallet], &cfg).is_empty());
-        for id in ids { forget_snapshot(id); }
+        for id in ids {
+            forget_snapshot(id);
+        }
+    }
+
+    #[test]
+    fn stale_snapshots_of_any_provider_never_fire_or_re_arm_alerts() {
+        let id = "codex";
+        let cfg = serde_json::json!({"notifyAlmostOut": true, "locale": "en"});
+        let make = |used, stale| {
+            let mut s = Snapshot::ok(
+                id,
+                "Codex",
+                None,
+                vec![crate::providers::Metric::progress("Weekly", used, None)],
+            );
+            s.stale = stale;
+            s
+        };
+        forget_snapshot(id);
+        // Live baseline, then a stale reading must not fire…
+        assert!(evaluate(&[make(50.0, false)], &cfg).is_empty());
+        assert!(evaluate(&[make(95.0, true)], &cfg).is_empty());
+        // …and a live worsening after it still fires exactly once.
+        assert_eq!(evaluate(&[make(95.0, false)], &cfg).len(), 1);
+        // A stale "recovery" must not re-arm the alert state, so the
+        // still-bad live reading does not fire again.
+        assert!(evaluate(&[make(50.0, true)], &cfg).is_empty());
+        assert!(evaluate(&[make(95.0, false)], &cfg).is_empty());
+        // Genuine live recovery re-arms, and the next drop alerts again.
+        assert!(evaluate(&[make(50.0, false)], &cfg).is_empty());
+        assert_eq!(evaluate(&[make(95.0, false)], &cfg).len(), 1);
+        forget_snapshot(id);
     }
 
     #[test]

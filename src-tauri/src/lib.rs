@@ -3859,6 +3859,23 @@ mod tests {
     }
 
     #[test]
+    fn old_format_cache_without_fetched_at_still_loads() {
+        let raw = json!({
+            "kimi": {
+                "at": 123,
+                "snap": {"id": "kimi", "name": "Kimi Code", "plan": null, "status": "ok",
+                         "error": null, "metrics": [], "stale": false, "warning": null}
+            }
+        });
+        let map: HashMap<String, CachedSnap> = serde_json::from_value(raw).unwrap();
+        assert_eq!(map["kimi"].at, 123);
+        assert_eq!(
+            map["kimi"].snap.fetched_at, None,
+            "pre-upgrade caches deserialize with an unknown fetch time, never a fake one"
+        );
+    }
+
+    #[test]
     fn onenewapi_snapshot_cache_write_failure_is_reported() {
         let root =
             std::env::temp_dir().join(format!("pane-onenewapi-cache-fail-{}", std::process::id()));

@@ -30,9 +30,17 @@ pub(crate) fn publish_restored_sub2api(snapshots: &[Snapshot]) {
     let fetched_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     if let Ok(mut published) = latest().lock() {
         if let Some(values) = published.as_array_mut() {
-            values.retain(|value| !value["providerId"].as_str().is_some_and(|id| id.starts_with("sub2api@")));
-            values.extend(snapshots.iter().filter(|snapshot| snapshot.id.starts_with("sub2api@"))
-                .map(|snapshot| provider_json(snapshot, &fetched_at)));
+            values.retain(|value| {
+                !value["providerId"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("sub2api@"))
+            });
+            values.extend(
+                snapshots
+                    .iter()
+                    .filter(|snapshot| snapshot.id.starts_with("sub2api@"))
+                    .map(|snapshot| provider_json(snapshot, &fetched_at)),
+            );
         }
     }
 }
@@ -99,16 +107,28 @@ pub(crate) fn provider_json(s: &Snapshot, fetched_at: &str) -> Value {
             }
         })
         .collect();
+    // fetchedAt is when the data was last successfully fetched — for a
+    // snapshot restored after a failed refresh that is the ORIGINAL
+    // success time, not this publish. The fallback (fresh successes,
+    // error states) is the attempt time, which the status field
+    // disambiguates from a success.
+    let fetched_at = s
+        .fetched_at
+        .map(iso8601)
+        .unwrap_or_else(|| fetched_at.to_string());
     let mut output = json!({
         "providerId": s.id,
         "displayName": s.name,
         "plan": s.plan,
         "lines": lines,
         "fetchedAt": fetched_at,
+        // Freshness for every provider — only display facts. Diagnostic
+        // text stays Sub2API-only: its errors are whitelisted strings,
+        // other families may embed remote error text that must not leak.
+        "status": s.status,
+        "stale": s.stale,
     });
     if s.id.starts_with("sub2api@") {
-        output["status"] = json!(s.status);
-        output["stale"] = json!(s.stale);
         output["error"] = json!(s.error);
         output["warning"] = json!(s.warning);
     }
@@ -211,8 +231,12 @@ mod tests {
 
     #[test]
     fn sub2api_public_projection_preserves_stale_and_display_amounts_only() {
-        let mut snap = Snapshot::ok("sub2api@http-state", "Site · Key", None,
-            vec![Metric::progress("5h", 25.0, Some("$5.00 / $20.00".into()))]);
+        let mut snap = Snapshot::ok(
+            "sub2api@http-state",
+            "Site · Key",
+            None,
+            vec![Metric::progress("5h", 25.0, Some("$5.00 / $20.00".into()))],
+        );
         snap.dashboard_url = Some("https://private.example.com".into());
         snap.stale = true;
         snap.warning = Some("HTTP 401".into());
@@ -224,7 +248,48 @@ mod tests {
         assert!(!output.to_string().contains("private.example.com"));
         let error = Snapshot::error("sub2api@http-state", "Site · Key", "HTTP 403".into());
         assert_eq!(provider_json(&error, "now")["error"], "HTTP 403");
-        assert!(provider_json(&onenewapi_snap(), "now").get("status").is_none());
+        // status/stale are universal freshness fields now; diagnostic
+        // error/warning text stays Sub2API-only (its errors are
+        // whitelisted strings, other families may embed remote text).
+        let onenewapi = provider_json(&onenewapi_snap(), "now");
+        assert_eq!(onenewapi["status"], "ok");
+        assert_eq!(onenewapi["stale"], false);
+        assert!(onenewapi.get("error").is_none());
+        assert!(onenewapi.get("warning").is_none());
+    }
+
+    #[test]
+    fn restored_snapshot_keeps_its_original_fetch_time() {
+        // A snapshot restored after a failed refresh must not pose as
+        // freshly fetched: fetchedAt is its own last-success time.
+        let mut snap = Snapshot::ok(
+            "codex",
+            "Codex",
+            None,
+            vec![Metric::progress("Weekly", 25.0, None)],
+        );
+        snap.stale = true;
+        snap.fetched_at = Some(1_800_000_000_000); // 2027-01-15T08:00:00Z
+        let output = provider_json(&snap, "2026-09-05T00:00:00Z");
+        assert_eq!(output["fetchedAt"], "2027-01-15T08:00:00Z");
+        assert_eq!(output["stale"], true);
+
+        // Fresh successes and error states have no last-success time:
+        // they fall back to the attempt time, and status says which.
+        let fresh = provider_json(
+            &Snapshot::ok("codex", "Codex", None, vec![]),
+            "2026-09-05T00:00:00Z",
+        );
+        assert_eq!(fresh["fetchedAt"], "2026-09-05T00:00:00Z");
+        assert_eq!(fresh["status"], "ok");
+        let failed = Snapshot::error("codex", "Codex", "timeout".into());
+        let failed = provider_json(&failed, "2026-09-05T00:00:00Z");
+        assert_eq!(failed["fetchedAt"], "2026-09-05T00:00:00Z");
+        assert_eq!(failed["status"], "error");
+        assert!(
+            failed.get("error").is_none(),
+            "remote error text must not leak for non-Sub2API"
+        );
     }
 
     fn onenewapi_snap() -> Snapshot {
@@ -293,29 +358,61 @@ mod tests {
     #[test]
     fn sub2api_routes_follow_publish_rename_disable_and_context_removal() {
         let _guard = route_test_lock();
-        let make = |id: &str| Snapshot::ok(id, "Site · Key", None,
-            vec![Metric::text("Balance", "$5.00".into())]);
+        let make = |id: &str| {
+            Snapshot::ok(
+                id,
+                "Site · Key",
+                None,
+                vec![Metric::text("Balance", "$5.00".into())],
+            )
+        };
         publish(&[make("sub2api@http-a"), make("sub2api@http-b")]);
         let (status, body) = route(&tiny_http::Method::Get, "/v1/usage");
         assert_eq!(status, 200);
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap().as_array().unwrap().len(), 2);
-        super::rename_snapshots(&std::collections::HashMap::from([
-            ("sub2api@http-a".into(), "Renamed · Key".into())]));
-        assert!(route(&tiny_http::Method::Get, "/v1/usage/sub2api@http-a").1.contains("Renamed · Key"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        super::rename_snapshots(&std::collections::HashMap::from([(
+            "sub2api@http-a".into(),
+            "Renamed · Key".into(),
+        )]));
+        assert!(route(&tiny_http::Method::Get, "/v1/usage/sub2api@http-a")
+            .1
+            .contains("Renamed · Key"));
         super::forget_snapshots(&["sub2api@http-a".into()]);
-        assert_eq!(route(&tiny_http::Method::Get, "/v1/usage/sub2api@http-a").0, 404);
-        assert_eq!(route(&tiny_http::Method::Get, "/v1/usage/sub2api@http-b").0, 200);
+        assert_eq!(
+            route(&tiny_http::Method::Get, "/v1/usage/sub2api@http-a").0,
+            404
+        );
+        assert_eq!(
+            route(&tiny_http::Method::Get, "/v1/usage/sub2api@http-b").0,
+            200
+        );
         super::forget_disabled_snapshots(&["sub2api".into()]);
-        assert_eq!(route(&tiny_http::Method::Get, "/v1/usage/sub2api@http-b").0, 404);
+        assert_eq!(
+            route(&tiny_http::Method::Get, "/v1/usage/sub2api@http-b").0,
+            404
+        );
         assert_eq!(route(&tiny_http::Method::Get, "/v1/usage").1, "[]");
         let mut restored = make("sub2api@http-restored");
         restored.stale = true;
         super::publish_restored_sub2api(&[restored]);
         let (status, body) = route(&tiny_http::Method::Get, "/v1/usage/sub2api@http-restored");
         assert_eq!(status, 200);
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["stale"], true);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["stale"],
+            true
+        );
         super::publish_restored_sub2api(&[]);
-        assert_eq!(route(&tiny_http::Method::Get, "/v1/usage/sub2api@http-restored").0, 404);
+        assert_eq!(
+            route(&tiny_http::Method::Get, "/v1/usage/sub2api@http-restored").0,
+            404
+        );
     }
 
     #[test]
