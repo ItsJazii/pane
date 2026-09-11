@@ -332,7 +332,7 @@ pub fn collect_usage_events() -> Vec<UsageEvent> {
     if let Ok(cache) = CACHE.lock() {
         if let Some((d, w, events)) = cache.as_ref() {
             if *d == db_stamp && *w == wal_stamp {
-                return events.clone();
+                return events_in_spend_window(events);
             }
         }
     }
@@ -351,9 +351,14 @@ pub fn collect_usage_events() -> Vec<UsageEvent> {
         Err(_) => CACHE
             .lock()
             .ok()
-            .and_then(|c| c.as_ref().map(|(_, _, e)| e.clone()))
+            .and_then(|c| c.as_ref().map(|(_, _, e)| events_in_spend_window(e)))
             .unwrap_or_default(),
     }
+}
+
+fn events_in_spend_window(events: &[UsageEvent]) -> Vec<UsageEvent> {
+    let cutoff_ms = chrono::Utc::now().timestamp_millis() - 32 * 86_400 * 1_000;
+    events.iter().filter(|e| e.ts_ms >= cutoff_ms).cloned().collect()
 }
 
 /// sessions.db keeps one row per message per branch and can be GBs; cap
@@ -364,10 +369,15 @@ const MAX_MESSAGE_ROWS: usize = 2_000_000;
 
 fn read_usage_events(db: &std::path::Path) -> Result<Vec<UsageEvent>, String> {
     let conn = super::open_readonly_sqlite(db)?;
+    // Node created_at is the index clock; attribution prefers metadata
+    // created_at. One extra day of slack covers a straddle without
+    // scanning the whole GB-sized sessions.db.
+    let cutoff_s = chrono::Utc::now().timestamp() - 32 * 86_400;
     let mut stmt = conn
         .prepare(&format!(
             "SELECT m.session_id, m.chat_message, m.created_at, s.model
              FROM message_nodes m JOIN sessions s ON s.id = m.session_id
+             WHERE m.created_at >= {cutoff_s}
              ORDER BY m.created_at DESC
              LIMIT {MAX_MESSAGE_ROWS}"
         ))

@@ -12,7 +12,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
@@ -58,6 +58,10 @@ impl ProviderSpend {
     fn has_data(&self) -> bool {
         self.last30.cost > 0.004 || self.last30.tokens > 0.0 || self.unpriced > 0
     }
+}
+
+pub fn provider_spend_has_data(sp: &ProviderSpend) -> bool {
+    sp.has_data()
 }
 
 /// (local calendar day, model) → (cost, tokens). Day = days since CE.
@@ -130,6 +134,22 @@ struct FileEntry {
     gen: u64,
     probes: Vec<PriceProbe>,
     data: FileData,
+    /// First / last bytes of the cached prefix — a larger rewrite that
+    /// is not an append fails this check and full-parses. Empty means
+    /// an older cache entry; those still tail so a busy machine does
+    /// not regress. The tail alone is often a stable JSON suffix.
+    prefix_head: Vec<u8>,
+    prefix_tail: Vec<u8>,
+    /// Compact Grok pid→model checkpoint. Restored before a tail parse
+    /// so a model-change older than the 1 MB warmup still attributes.
+    grok_models: HashMap<i64, String>,
+    /// Compact Codex totals/model/gate. Same idea — no 200 MB re-read.
+    codex: Option<CodexFileState>,
+    /// Claude `{mid}:{rid}` / sidechain checkpoints. A replay older
+    /// than the 1 MB warmup still dedups.
+    claude: Option<ClaudeFileState>,
+    /// Pi message-id checkpoint. Same replay problem as Claude.
+    pi_seen: HashSet<String>,
 }
 
 /// One pricing question a file's parse asked, together with the answer it
@@ -282,6 +302,18 @@ struct PersistEntry {
     /// they can only load through the exact-stamp fast path.
     #[serde(default)]
     probes: Vec<PriceProbe>,
+    #[serde(default)]
+    prefix_head: Vec<u8>,
+    #[serde(default)]
+    prefix_tail: Vec<u8>,
+    #[serde(default)]
+    grok_models: Vec<(i64, String)>,
+    #[serde(default)]
+    codex: Option<CodexFileState>,
+    #[serde(default)]
+    claude: Option<ClaudeFileState>,
+    #[serde(default)]
+    pi_seen: Vec<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -333,7 +365,22 @@ fn load_persisted_cache() {
             }
             let mtime = SystemTime::UNIX_EPOCH
                 + std::time::Duration::new(e.mtime_secs, e.mtime_nanos);
-            map.insert(e.path, FileEntry { mtime, size: e.size, gen, probes: e.probes, data });
+            map.insert(
+                e.path,
+                FileEntry {
+                    mtime,
+                    size: e.size,
+                    gen,
+                    probes: e.probes,
+                    data,
+                    prefix_head: clip_fingerprint(e.prefix_head, PREFIX_HEAD),
+                    prefix_tail: clip_fingerprint(e.prefix_tail, PREFIX_TAIL),
+                    grok_models: clip_grok_models(e.grok_models.into_iter().collect()),
+                    codex: e.codex,
+                    claude: clip_claude_ckpt(e.claude),
+                    pi_seen: clip_pi_seen(e.pi_seen.into_iter().collect()),
+                },
+            );
         }
     });
 }
@@ -371,6 +418,12 @@ fn save_persisted_cache() {
                     .collect(),
                 unpriced: e.data.unpriced.iter().map(|(m, c)| (m.clone(), *c)).collect(),
                 probes: e.probes.clone(),
+                prefix_head: e.prefix_head.clone(),
+                prefix_tail: e.prefix_tail.clone(),
+                grok_models: e.grok_models.iter().map(|(k, v)| (*k, v.clone())).collect(),
+                codex: e.codex.clone(),
+                claude: e.claude.clone(),
+                pi_seen: e.pi_seen.iter().cloned().collect(),
             }
         })
         .collect();
@@ -514,6 +567,16 @@ const MAX_LOG_FILE_BYTES: u64 = 512 * 1024 * 1024;
 /// remainder read-and-discarded, never kept. Legit Claude/Codex lines
 /// reach ~1 MB, so 4 MiB loses nothing real.
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
+/// First / last bytes of a cached prefix — a larger rewrite that is
+/// not an append fails this check. Empty (older cache) still tails.
+/// The tail alone is often a stable JSON suffix (`"usageScope":…`);
+/// 64 bytes at the start usually includes the timestamp.
+const PREFIX_HEAD: usize = 64;
+const PREFIX_TAIL: usize = 32;
+/// Re-parse this much of the cached prefix into a discard `FileData`
+/// so Codex/Claude/Grok/Pi closures keep their per-file state. 1 MB
+/// is tiny next to a 200 MB session.
+const TAIL_WARMUP: u64 = 1024 * 1024;
 
 /// Report a log skipped for exceeding MAX_LOG_FILE_BYTES.
 fn oversized_log(path: &Path, size: u64) {
@@ -627,8 +690,268 @@ fn recent_jsonl_files(root: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// A later write that only appended bytes. Session logs are JSONL; a
+/// rewrite (shrink or same-size mtime bump) must full-parse. A larger
+/// rewrite that keeps growing past the cached size is caught by the
+/// prefix fingerprint — empty fingerprints (older cache) still tail.
+fn cached_prefix(
+    map: &HashMap<PathBuf, FileEntry>,
+    path: &Path,
+    size: u64,
+    gen: u64,
+) -> Option<(FileData, Vec<PriceProbe>, u64)> {
+    let entry = map.get(path)?;
+    if size <= entry.size {
+        return None;
+    }
+    if !(entry.gen == gen || probes_still_vouch(&entry.probes, &entry.data)) {
+        return None;
+    }
+    if !prefix_still_matches(path, entry.size, &entry.prefix_head, &entry.prefix_tail) {
+        return None;
+    }
+    Some((entry.data.clone(), entry.probes.clone(), entry.size))
+}
+
+/// Hostile/corrupt persist blobs must not sit in RAM. Oversized marks
+/// are dropped so the next scan still tails (speed) instead of holding
+/// the payload or forcing a full re-read.
+const MAX_GROK_PIDS: usize = 256;
+
+fn clip_grok_models(map: HashMap<i64, String>) -> HashMap<i64, String> {
+    if map.len() <= MAX_GROK_PIDS {
+        map
+    } else {
+        HashMap::new()
+    }
+}
+
+/// Hostile/corrupt persist blobs must not sit in RAM. A 20 MB Claude
+/// session is hundreds of ids, not tens of thousands — over the cap
+/// we drop the checkpoint so the next tail warms 1 MB instead.
+const MAX_DEDUP_IDS: usize = 8192;
+
+fn clip_claude_ckpt(st: Option<ClaudeFileState>) -> Option<ClaudeFileState> {
+    let st = st?;
+    if st.seen.len() > MAX_DEDUP_IDS || st.seen_mids.len() > MAX_DEDUP_IDS {
+        None
+    } else {
+        Some(st)
+    }
+}
+
+fn clip_pi_seen(seen: HashSet<String>) -> HashSet<String> {
+    if seen.len() <= MAX_DEDUP_IDS {
+        seen
+    } else {
+        HashSet::new()
+    }
+}
+
+fn cache_unchanged(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+    let size = meta.len();
+    let gen = pricing::generation();
+    cache()
+        .lock()
+        .ok()
+        .and_then(|map| {
+            map.get(path).map(|e| {
+                e.mtime == mtime
+                    && e.size == size
+                    && (e.gen == gen || probes_still_vouch(&e.probes, &e.data))
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn will_resume_tail(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    let gen = pricing::generation();
+    cache()
+        .lock()
+        .ok()
+        .and_then(|map| cached_prefix(&map, path, meta.len(), gen))
+        .is_some()
+}
+
+fn load_grok_models(path: &Path) -> HashMap<i64, String> {
+    cache()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(path).map(|e| e.grok_models.clone()))
+        .unwrap_or_default()
+}
+
+fn store_grok_models(path: &Path, models: HashMap<i64, String>) {
+    if let Ok(mut map) = cache().lock() {
+        if let Some(e) = map.get_mut(path) {
+            e.grok_models = clip_grok_models(models);
+        }
+    }
+}
+
+fn load_codex_ckpt(path: &Path) -> Option<CodexFileState> {
+    cache()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(path).and_then(|e| e.codex.clone()))
+}
+
+fn store_codex_ckpt(path: &Path, st: CodexFileState) {
+    if let Ok(mut map) = cache().lock() {
+        if let Some(e) = map.get_mut(path) {
+            e.codex = Some(st);
+        }
+    }
+}
+
+fn load_claude_ckpt(path: &Path) -> Option<ClaudeFileState> {
+    cache()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(path).and_then(|e| e.claude.clone()))
+}
+
+fn store_claude_ckpt(path: &Path, st: ClaudeFileState) {
+    if let Ok(mut map) = cache().lock() {
+        if let Some(e) = map.get_mut(path) {
+            e.claude = clip_claude_ckpt(Some(st));
+        }
+    }
+}
+
+fn load_pi_seen(path: &Path) -> HashSet<String> {
+    cache()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(path).map(|e| e.pi_seen.clone()))
+        .unwrap_or_default()
+}
+
+fn store_pi_seen(path: &Path, seen: HashSet<String>) {
+    if let Ok(mut map) = cache().lock() {
+        if let Some(e) = map.get_mut(path) {
+            e.pi_seen = clip_pi_seen(seen);
+        }
+    }
+}
+
+fn clip_fingerprint(bytes: Vec<u8>, cap: usize) -> Vec<u8> {
+    if bytes.len() <= cap {
+        bytes
+    } else {
+        Vec::new()
+    }
+}
+
+/// One open, two tiny reads. Four opens on a grown log would add up
+/// across hundreds of Codex files.
+fn read_prefix_marks(path: &Path, end: u64) -> (Vec<u8>, Vec<u8>) {
+    if end == 0 {
+        return (Vec::new(), Vec::new());
+    }
+    let Ok(mut f) = fs::File::open(path) else {
+        return (Vec::new(), Vec::new());
+    };
+    let head_n = PREFIX_HEAD.min(end as usize);
+    let mut head = vec![0u8; head_n];
+    if f.read_exact(&mut head).is_err() {
+        return (Vec::new(), Vec::new());
+    }
+    let tail_n = PREFIX_TAIL.min(end as usize);
+    if f.seek(SeekFrom::Start(end - tail_n as u64)).is_err() {
+        return (Vec::new(), Vec::new());
+    }
+    let mut tail = vec![0u8; tail_n];
+    if f.read_exact(&mut tail).is_err() {
+        return (Vec::new(), Vec::new());
+    }
+    (head, tail)
+}
+
+fn prefix_still_matches(path: &Path, end: u64, head: &[u8], tail: &[u8]) -> bool {
+    // Older cache: both empty — still tail so a busy machine does not
+    // regress to a full re-read. Unreadable marks also tail: the later
+    // File::open will fail the same way, and a full re-read would be worse.
+    if head.is_empty() && tail.is_empty() {
+        return true;
+    }
+    let (got_head, got_tail) = read_prefix_marks(path, end);
+    if !head.is_empty() && got_head != head {
+        return false;
+    }
+    if !tail.is_empty() && got_tail != tail {
+        return false;
+    }
+    true
+}
+
+fn remember_file(
+    path: &Path,
+    mtime: SystemTime,
+    cached_size: u64,
+    gen: u64,
+    probes: Vec<PriceProbe>,
+    data: FileData,
+) {
+    let (prefix_head, prefix_tail) = read_prefix_marks(path, cached_size);
+    if let Ok(mut map) = cache().lock() {
+        let (grok_models, codex, claude, pi_seen) = map
+            .get(path)
+            .map(|e| {
+                (
+                    e.grok_models.clone(),
+                    e.codex.clone(),
+                    e.claude.clone(),
+                    e.pi_seen.clone(),
+                )
+            })
+            .unwrap_or_default();
+        map.insert(
+            path.to_path_buf(),
+            FileEntry {
+                mtime,
+                size: cached_size,
+                gen,
+                probes,
+                data,
+                prefix_head,
+                prefix_tail,
+                grok_models,
+                codex,
+                claude,
+                pi_seen,
+            },
+        );
+    }
+    CACHE_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Parses one file into per-day totals, via the cache when unchanged.
+/// Growing logs only read the new tail. Stateless parsers (Kimi/Qwen)
+/// skip the 1 MB warmup — that I/O is only for Codex/Claude/Grok/Pi.
 fn file_days(path: &Path, parse: &mut dyn FnMut(&str, &mut FileData)) -> FileData {
+    file_days_inner(path, parse, false)
+}
+
+/// Same as `file_days`, but replays the last 1 MB of the cached prefix
+/// into a discard `FileData` so the caller's closure keeps Codex totals,
+/// Claude mids, Grok pid→model, and Pi seen ids.
+fn file_days_stateful(path: &Path, parse: &mut dyn FnMut(&str, &mut FileData)) -> FileData {
+    file_days_inner(path, parse, true)
+}
+
+fn file_days_inner(
+    path: &Path,
+    parse: &mut dyn FnMut(&str, &mut FileData),
+    warm: bool,
+) -> FileData {
     let Ok(meta) = fs::metadata(path) else { return FileData::default() };
     if meta.len() > MAX_LOG_FILE_BYTES {
         // Also gated in recent_jsonl_files; this catches direct-path
@@ -662,8 +985,21 @@ fn file_days(path: &Path, parse: &mut dyn FnMut(&str, &mut FileData)) -> FileDat
         }
     }
 
-    let mut data = FileData::default();
-    PROBES.with(|p| *p.borrow_mut() = Some(Vec::new()));
+    let resume = cache()
+        .lock()
+        .ok()
+        .and_then(|map| cached_prefix(&map, path, size, gen));
+
+    let mut data = resume
+        .as_ref()
+        .map(|(d, _, _)| d.clone())
+        .unwrap_or_default();
+    let start_probes = resume
+        .as_ref()
+        .map(|(_, p, _)| p.clone())
+        .unwrap_or_default();
+    let mut from = resume.as_ref().map(|(_, _, from)| *from).unwrap_or(0);
+    PROBES.with(|p| *p.borrow_mut() = Some(start_probes));
     let file = match fs::File::open(path) {
         Ok(f) => f,
         Err(_) => {
@@ -678,8 +1014,166 @@ fn file_days(path: &Path, parse: &mut dyn FnMut(&str, &mut FileData)) -> FileDat
         }
     };
     let mut reader = BufReader::new(file);
-    let mut read_ok = true;
+    // Legacy v4 entries cached the raw EOF, which can sit inside a
+    // half-written line. Back up to the previous newline (64 KB) instead
+    // of discarding the whole persist file. Already-aligned offsets
+    // cost one byte on this open handle.
+    if from > 0 {
+        from = align_to_line_start(&mut reader, from);
+    }
+    if from > 0 && warm {
+        // Replay a bounded window of the cached prefix into a discard
+        // FileData so the caller's closure (Codex totals, Claude mids,
+        // Grok pid→model, Pi seen ids) is warm before the real tail.
+        // A failed warmup mutates that closure — do not full-rescan
+        // with it or prefix events look like duplicates and vanish.
+        match seek_warmup(&mut reader, from) {
+            Some(warm_pos) if warm_pos < from => {
+                let mut discard = FileData::default();
+                let (warm_ok, _) =
+                    parse_jsonl_reader(&mut reader, parse, &mut discard, warm_pos, Some(from));
+                if !warm_ok || reader.seek(SeekFrom::Start(from)).is_err() {
+                    if reader.seek(SeekFrom::Start(from)).is_err() {
+                        PROBES.with(|p| {
+                            p.borrow_mut().take();
+                        });
+                        return data;
+                    }
+                }
+            }
+            Some(_) => {}
+            None => {
+                if reader.seek(SeekFrom::Start(from)).is_err() {
+                    PROBES.with(|p| {
+                        p.borrow_mut().take();
+                    });
+                    return data;
+                }
+            }
+        }
+    } else if from > 0 && reader.seek(SeekFrom::Start(from)).is_err() {
+        // No warmup ran, but the closure may still hold a restored
+        // checkpoint (Codex/Grok/Claude/Pi). Keep the prefix.
+        PROBES.with(|p| {
+            p.borrow_mut().take();
+        });
+        return data;
+    }
+    let (read_ok, last_complete) = parse_jsonl_reader(&mut reader, parse, &mut data, from, None);
+    let probes = PROBES.with(|p| p.borrow_mut().take()).unwrap_or_default();
+    if !read_ok {
+        // Prefix `data` is already correct. A full retry would reuse
+        // warmed/restored parser state and drop those events.
+        return data;
+    }
+
+    remember_file(path, mtime, last_complete, gen, probes, data.clone());
+    data
+}
+
+#[allow(dead_code)]
+fn file_days_full(
+    path: &Path,
+    parse: &mut dyn FnMut(&str, &mut FileData),
+    mtime: SystemTime,
+    _size: u64,
+    gen: u64,
+) -> FileData {
+    let mut data = FileData::default();
+    PROBES.with(|p| *p.borrow_mut() = Some(Vec::new()));
+    let Ok(file) = fs::File::open(path) else {
+        PROBES.with(|p| {
+            p.borrow_mut().take();
+        });
+        return FileData::default();
+    };
+    let mut reader = BufReader::new(file);
+    let (read_ok, last_complete) = parse_jsonl_reader(&mut reader, parse, &mut data, 0, None);
+    let probes = PROBES.with(|p| p.borrow_mut().take()).unwrap_or_default();
+    if !read_ok {
+        return data;
+    }
+    remember_file(path, mtime, last_complete, gen, probes, data.clone());
+    data
+}
+
+/// If `from` is mid-line, walk back at most 64 KB to the previous
+/// newline. Already-aligned offsets cost one byte. A cache that ended
+/// on a complete no-newline JSON value stays put when growth starts
+/// with `\n` — backing up would re-parse that record and double it.
+/// No newline in the window keeps `from` so we do not re-parse cached
+/// complete lines.
+fn align_to_line_start(reader: &mut BufReader<fs::File>, from: u64) -> u64 {
+    if from == 0 {
+        return 0;
+    }
+    if reader.seek(SeekFrom::Start(from - 1)).is_ok() {
+        let mut b = [0u8; 1];
+        if reader.read_exact(&mut b).is_ok() && b[0] == b'\n' {
+            return from;
+        }
+    }
+    // Cached through a complete record that had no trailing newline.
+    // The next scan's new bytes start here; a leading `\n` is a new
+    // line, not a resume inside the old object.
+    if reader.seek(SeekFrom::Start(from)).is_ok() {
+        let mut b = [0u8; 1];
+        if reader.read_exact(&mut b).is_ok() && b[0] == b'\n' {
+            return from;
+        }
+    }
+    const ALIGN_BACK: u64 = 64 * 1024;
+    let start = from.saturating_sub(ALIGN_BACK);
+    if reader.seek(SeekFrom::Start(start)).is_err() {
+        return from;
+    }
+    let mut buf = vec![0u8; (from - start) as usize];
+    let n = match reader.read(&mut buf) {
+        Ok(n) => n,
+        Err(_) => return from,
+    };
+    match buf[..n].iter().rposition(|&c| c == b'\n') {
+        Some(i) => start + i as u64 + 1,
+        None => from,
+    }
+}
+
+/// Seek to the 1 MB warmup window just before `from` and skip a
+/// partial first line. Returns the byte position the next parse starts
+/// at, or `from` if a giant line overshot the cached boundary.
+fn seek_warmup(reader: &mut BufReader<fs::File>, from: u64) -> Option<u64> {
+    let warm_at = from.saturating_sub(TAIL_WARMUP);
+    reader.seek(SeekFrom::Start(warm_at)).ok()?;
+    if warm_at == 0 {
+        return Some(0);
+    }
+    let (skipped, _) = skip_line_rest(reader).ok()?;
+    let pos = warm_at + skipped;
+    if pos > from {
+        reader.seek(SeekFrom::Start(from)).ok()?;
+        return Some(from);
+    }
+    Some(pos)
+}
+
+/// Returns `(ok, last_complete_pos)`. `last_complete_pos` is the offset
+/// after the last record we consumed. A finished last line, or a
+/// leftover that is already valid JSON (closed file, no trailing
+/// newline), advances the cache. A partial write does not.
+fn parse_jsonl_reader(
+    reader: &mut impl BufRead,
+    parse: &mut dyn FnMut(&str, &mut FileData),
+    data: &mut FileData,
+    mut pos: u64,
+    stop_before: Option<u64>,
+) -> (bool, u64) {
+    let mut last_complete = pos;
     loop {
+        if let Some(limit) = stop_before {
+            if pos >= limit {
+                return (true, last_complete.min(limit));
+            }
+        }
         // One physical line, storing at most MAX_LINE_BYTES (+1 byte to
         // detect overflow) — a hostile log must not make a single line
         // allocate without bound.
@@ -689,69 +1183,80 @@ fn file_days(path: &Path, parse: &mut dyn FnMut(&str, &mut FileData)) -> FileDat
             .take(MAX_LINE_BYTES as u64 + 1)
             .read_until(b'\n', &mut buf);
         match read {
-            Ok(0) => break, // EOF
-            Ok(_) if buf.len() > MAX_LINE_BYTES && !buf.ends_with(b"\n") => {
+            Ok(0) => return (true, last_complete),
+            Ok(n) if buf.len() > MAX_LINE_BYTES && !buf.ends_with(b"\n") => {
+                pos += n as u64;
                 // Overlong line: discard the rest of it without storing.
-                if skip_line_rest(&mut reader).is_err() {
-                    read_ok = false;
-                    break;
+                match skip_line_rest(reader) {
+                    Ok((skipped, found_nl)) => {
+                        pos += skipped;
+                        if found_nl {
+                            last_complete = pos;
+                        }
+                    }
+                    Err(_) => return (false, last_complete),
                 }
             }
-            Ok(_) => {
-                // Same terminator handling as BufRead::lines().
-                if buf.ends_with(b"\n") {
+            Ok(n) => {
+                pos += n as u64;
+                let had_nl = buf.ends_with(b"\n");
+                if had_nl {
                     buf.pop();
                     if buf.ends_with(b"\r") {
                         buf.pop();
                     }
+                } else {
+                    // No newline. A closed log may still end on a
+                    // complete JSON value — count it and cache through
+                    // EOF. A partial write fails serde and stays
+                    // uncached so the next scan retries.
+                    match String::from_utf8(buf) {
+                        Ok(line)
+                            if !line.is_empty()
+                                && serde_json::from_str::<Value>(&line).is_ok() =>
+                        {
+                            parse(&line, data);
+                            return (true, pos);
+                        }
+                        Ok(_) => return (true, last_complete),
+                        Err(_) => return (true, last_complete),
+                    }
                 }
                 match String::from_utf8(buf) {
-                    Ok(line) => parse(&line, &mut data),
+                    Ok(line) => {
+                        parse(&line, data);
+                        last_complete = pos;
+                    }
                     Err(_) => {
                         // lines() treated invalid UTF-8 as a read error;
                         // keep the file out of the cache the same way.
-                        read_ok = false;
-                        break;
+                        return (false, last_complete);
                     }
                 }
             }
-            Err(_) => {
-                read_ok = false;
-                break;
-            }
+            Err(_) => return (false, last_complete),
         }
     }
-    let probes = PROBES.with(|p| p.borrow_mut().take()).unwrap_or_default();
-    if !read_ok {
-        return data;
-    }
-
-    if let Ok(mut map) = cache().lock() {
-        map.insert(
-            path.to_path_buf(),
-            FileEntry { mtime, size, gen, probes, data: data.clone() },
-        );
-    }
-    CACHE_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
-    data
 }
 
 /// Consume through the next '\n' (or EOF) using only the reader's own
-/// buffer — the unread tail of an overlong line.
-fn skip_line_rest(reader: &mut impl BufRead) -> std::io::Result<()> {
+/// buffer. Returns `(bytes_skipped, found_newline)`.
+fn skip_line_rest(reader: &mut impl BufRead) -> std::io::Result<(u64, bool)> {
+    let mut n = 0u64;
     loop {
         let buf = reader.fill_buf()?;
         if buf.is_empty() {
-            return Ok(());
+            return Ok((n, false));
         }
         match buf.iter().position(|&b| b == b'\n') {
             Some(i) => {
                 reader.consume(i + 1);
-                return Ok(());
+                return Ok((n + i as u64 + 1, true));
             }
             None => {
-                let n = buf.len();
-                reader.consume(n);
+                let k = buf.len();
+                reader.consume(k);
+                n += k as u64;
             }
         }
     }
@@ -910,8 +1415,9 @@ fn claude_cost(model: &str, t: &ClaudeTokens, ts: DateTime<Utc>) -> Option<f64> 
     Some(cost_for(model, &price, &u, 200_000.0, ts) * mult)
 }
 
-/// Per-file dedup state for the Claude scanner.
-#[derive(Default)]
+/// Per-file dedup state for the Claude scanner. Persisted so a tail
+/// can drop a replay whose original sits older than the 1 MB warmup.
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 struct ClaudeFileState {
     /// (message id, request id) pairs already counted.
     seen: HashSet<String>,
@@ -1095,11 +1601,9 @@ fn claude(extra: FileData) -> (ProviderSpend, FileData, FileData, FileData) {
     recent_jsonl_files(&root, &mut files);
     let mut all = FileData::default();
     for file in files {
-        let mut state = ClaudeFileState::default();
-        let data = file_days(&file, &mut |line, data| claude_line(&mut state, line, data));
-        merge_data(&mut all, data);
+        merge_data(&mut all, claude_file(&file));
     }
-    // Usage from other scanners that belongs on this card (pi sessions
+    // Usage from other scanners that belongs on this card (pi sessions)
     // driving a Claude account) joins before the splits below, so it gets
     // the same model-based routing as natively-logged rows.
     merge_data(&mut all, extra);
@@ -1130,9 +1634,7 @@ fn claude_extra_accounts() -> (Vec<ProviderSpend>, FileData, FileData, FileData)
         recent_jsonl_files(&root, &mut files);
         let mut all = FileData::default();
         for file in files {
-            let mut state = ClaudeFileState::default();
-            let data = file_days(&file, &mut |line, data| claude_line(&mut state, line, data));
-            merge_data(&mut all, data);
+            merge_data(&mut all, claude_file(&file));
         }
         merge_data(&mut minimax_extra, split_models(&mut all, "MiniMax"));
         merge_data(&mut qwen_extra, split_models(&mut all, "qwen"));
@@ -1140,6 +1642,27 @@ fn claude_extra_accounts() -> (Vec<ProviderSpend>, FileData, FileData, FileData)
         spends.push(build_spend(acct.id, acct.name, all));
     }
     (spends, minimax_extra, qwen_extra, kimi_extra)
+}
+
+/// One Claude session file. A restored checkpoint skips the 1 MB
+/// warmup; an older cache without one still warms. Exact hits must
+/// not `store_*` a Default and wipe a good checkpoint.
+fn claude_file(file: &Path) -> FileData {
+    if cache_unchanged(file) {
+        return file_days(file, &mut |_, _| {});
+    }
+    let tail = will_resume_tail(file);
+    let ckpt = if tail { load_claude_ckpt(file) } else { None };
+    let mut state = ckpt.clone().unwrap_or_default();
+    let data = if tail && ckpt.as_ref().is_some_and(|s| !s.seen.is_empty()) {
+        file_days(file, &mut |line, data| claude_line(&mut state, line, data))
+    } else if tail {
+        file_days_stateful(file, &mut |line, data| claude_line(&mut state, line, data))
+    } else {
+        file_days(file, &mut |line, data| claude_line(&mut state, line, data))
+    };
+    store_claude_ckpt(file, state);
+    data
 }
 
 /// MiniMax spend: the Agent CLI's local token_usage store (its own cost_usd
@@ -1261,7 +1784,7 @@ fn hermes() -> Vec<(&'static str, &'static str, FileData)> {
 
 /// One `token_count` usage object, tolerating the older field spellings
 /// (`prompt_tokens`, `cache_read_input_tokens`, …) the Mac scanner accepts.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 struct CodexRaw {
     input: f64,
     cached: f64,
@@ -1325,6 +1848,7 @@ fn codex_child_meta(payload: &Value) -> bool {
 
 /// How a child session's replayed parent history is gated until its first
 /// live turn.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 enum CodexReplayGate {
     /// Clear when `task_started.started_at` is at/after the child's creation
     /// epoch (replayed task_started lines carry the parent's older one).
@@ -1336,7 +1860,7 @@ enum CodexReplayGate {
 }
 
 /// Per-file parse state for one Codex rollout.
-#[derive(Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 struct CodexFileState {
     model: String,
     saw_meta: bool,
@@ -1648,8 +2172,21 @@ fn codex_session_files(home: &Path) -> Vec<PathBuf> {
 fn codex_scan(home: &Path) -> FileData {
     let mut all = FileData::default();
     for file in codex_session_files(home) {
-        let mut state = CodexFileState::default();
-        let data = file_days(&file, &mut |line, data| codex_line(&mut state, line, data));
+        if cache_unchanged(&file) {
+            merge_data(&mut all, file_days(&file, &mut |_, _| {}));
+            continue;
+        }
+        let tail = will_resume_tail(&file);
+        let ckpt = if tail { load_codex_ckpt(&file) } else { None };
+        let mut state = ckpt.clone().unwrap_or_default();
+        let data = if tail && ckpt.is_some() {
+            file_days(&file, &mut |line, data| codex_line(&mut state, line, data))
+        } else if tail {
+            file_days_stateful(&file, &mut |line, data| codex_line(&mut state, line, data))
+        } else {
+            file_days(&file, &mut |line, data| codex_line(&mut state, line, data))
+        };
+        store_codex_ckpt(&file, state);
         merge_data(&mut all, data);
     }
     all
@@ -1814,8 +2351,20 @@ fn pi() -> (FileData, FileData) {
     recent_jsonl_files(&root, &mut files);
     let mut all = FileData::default();
     for file in files {
-        let mut seen = HashSet::new();
-        let data = file_days(&file, &mut |line, data| pi_line(&mut seen, line, data));
+        if cache_unchanged(&file) {
+            merge_data(&mut all, file_days(&file, &mut |_, _| {}));
+            continue;
+        }
+        let tail = will_resume_tail(&file);
+        let mut seen = if tail { load_pi_seen(&file) } else { HashSet::new() };
+        let data = if tail && !seen.is_empty() {
+            file_days(&file, &mut |line, data| pi_line(&mut seen, line, data))
+        } else if tail {
+            file_days_stateful(&file, &mut |line, data| pi_line(&mut seen, line, data))
+        } else {
+            file_days(&file, &mut |line, data| pi_line(&mut seen, line, data))
+        };
+        store_pi_seen(&file, seen);
         merge_data(&mut all, data);
     }
     let claude = take_tagged(&mut all, "claude");
@@ -1835,8 +2384,26 @@ fn grok() -> ProviderSpend {
     let path = root.join("logs").join("unified.jsonl");
     let mut all = FileData::default();
     if path.exists() {
-        let mut model_by_pid: HashMap<i64, String> = HashMap::new();
-        let data = file_days(&path, &mut |line, data| {
+        if cache_unchanged(&path) {
+            merge_data(&mut all, file_days(&path, &mut |_, _| {}));
+        } else {
+        let tail = will_resume_tail(&path);
+        let mut model_by_pid = if tail { load_grok_models(&path) } else { HashMap::new() };
+        let data = if tail && !model_by_pid.is_empty() {
+            file_days(&path, &mut |line, data| grok_line(&mut model_by_pid, line, data))
+        } else if tail {
+            file_days_stateful(&path, &mut |line, data| grok_line(&mut model_by_pid, line, data))
+        } else {
+            file_days(&path, &mut |line, data| grok_line(&mut model_by_pid, line, data))
+        };
+        store_grok_models(&path, model_by_pid);
+        merge_data(&mut all, data);
+        }
+    }
+    build_spend("grok", "Grok", all)
+}
+
+fn grok_line(model_by_pid: &mut HashMap<i64, String>, line: &str, data: &mut FileData) {
             if !line.contains("inference_done") && !line.contains("model") {
                 return;
             }
@@ -1903,10 +2470,6 @@ fn grok() -> ProviderSpend {
                 cache_write_1h: 0.0,
             };
             add_event(data, ts, &model, cost_for(&model, &p, &u, 200_000.0, ts), tokens);
-        });
-        merge_data(&mut all, data);
-    }
-    build_spend("grok", "Grok", all)
 }
 
 /// OpenCode stores real per-message costs in its database — no pricing
@@ -2311,7 +2874,34 @@ fn split_csv_row(line: &str) -> Vec<String> {
     out
 }
 
+fn spend_step<T>(name: &str, f: impl FnOnce() -> T) -> T {
+    let started = std::time::Instant::now();
+    let out = f();
+    eprintln!("[pane] spend: {name} {:?}", started.elapsed());
+    out
+}
+
+fn take_join<T>(
+    handle: std::thread::ScopedJoinHandle<'_, T>,
+    name: &str,
+    fallback: T,
+) -> T {
+    handle.join().unwrap_or_else(|_| {
+        eprintln!("[pane] spend: {name} panicked — keeping the other providers");
+        fallback
+    })
+}
+
+fn collect_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
+    // Two overlapping collects share `touched` and rewrite spend_cache
+    // from that set. Serialize so a second refresh waits — one scan
+    // stays the same speed.
+    let _busy = collect_lock().lock().unwrap_or_else(|e| e.into_inner());
     providers::sweep_temp_sqlite_copies();
     pricing::ensure_fresh();
     load_persisted_cache();
@@ -2319,46 +2909,78 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
         t.clear();
     }
     let (pi_claude, pi_codex) = pi();
-    let (claude_sp, mut minimax_extra, mut qwen_via_claude, mut kimi_routed) =
-        claude(pi_claude);
-    // Extra Claude accounts: own spend cards, with their MiniMax/qwen/Kimi-
-    // routed rows folded into the same destinations as the default account's.
-    let (extra_claude_spends, mm2, qw2, km2) = claude_extra_accounts();
-    merge_data(&mut minimax_extra, mm2);
-    merge_data(&mut qwen_via_claude, qw2);
-    merge_data(&mut kimi_routed, km2);
-    // Hermes rows going to an existing slice merge into it (MiniMax via the
-    // extra-data path); the rest become their own spend entries.
-    let mut hermes_rest = Vec::new();
-    for (id, name, data) in hermes() {
-        if id == "minimax" {
-            merge_data(&mut minimax_extra, data);
-        } else {
-            hermes_rest.push(build_spend(id, name, data));
+    // Claude / Codex / OpenCode / Devin used to run one after another on
+    // this machine that is minutes of IO. They touch different trees.
+    let mut list = std::thread::scope(|s| {
+        let claude_t = s.spawn(|| {
+            spend_step("claude", || {
+                let (sp, mut mm, mut qw, mut km) = claude(pi_claude);
+                let (extras, mm2, qw2, km2) = claude_extra_accounts();
+                merge_data(&mut mm, mm2);
+                merge_data(&mut qw, qw2);
+                merge_data(&mut km, km2);
+                (sp, extras, mm, qw, km)
+            })
+        });
+        let codex_t = s.spawn(|| {
+            spend_step("codex", || {
+                let (sp, mut km) = codex(pi_codex);
+                let (extras, km2) = codex_extra_accounts();
+                merge_data(&mut km, km2);
+                (sp, extras, km)
+            })
+        });
+        let oc_t = s.spawn(|| spend_step("opencode", opencode_accounts));
+        let hermes_t = s.spawn(|| spend_step("hermes", hermes));
+        let grok_t = s.spawn(|| spend_step("grok", grok));
+        let devin_t = s.spawn(|| spend_step("devin", devin));
+        let qwen_t = s.spawn(|| spend_step("qwen", qwen));
+
+        let (claude_sp, extra_claude_spends, mut minimax_extra, qwen_via_claude, mut kimi_routed) =
+            take_join(claude_t, "claude", (
+                build_spend("claude", "Claude", FileData::default()),
+                Vec::new(),
+                FileData::default(),
+                FileData::default(),
+                FileData::default(),
+            ));
+        let (codex_sp, extra_codex_spends, kimi_via_codex) = take_join(
+            codex_t,
+            "codex",
+            (build_spend("codex", "Codex", FileData::default()), Vec::new(), FileData::default()),
+        );
+        merge_data(&mut kimi_routed, kimi_via_codex);
+        let (opencode_sp, extra_opencode_spends, mut aihubmix_data) = take_join(
+            oc_t,
+            "opencode",
+            (build_spend("opencode", "OpenCode", FileData::default()), Vec::new(), FileData::default()),
+        );
+        merge_data(&mut aihubmix_data, qwen_via_claude);
+        let mut hermes_rest = Vec::new();
+        for (id, name, data) in take_join(hermes_t, "hermes", Vec::new()) {
+            if id == "minimax" {
+                merge_data(&mut minimax_extra, data);
+            } else {
+                hermes_rest.push(build_spend(id, name, data));
+            }
         }
-    }
-    let (opencode_sp, extra_opencode_spends, mut aihubmix_data) = opencode_accounts();
-    merge_data(&mut aihubmix_data, qwen_via_claude);
-    let aihubmix_sp = build_spend("aihubmix", "AihubMix", aihubmix_data);
-    let (codex_sp, kimi_via_codex) = codex(pi_codex);
-    merge_data(&mut kimi_routed, kimi_via_codex);
-    let (extra_codex_spends, kimi_via_extra_codex) = codex_extra_accounts();
-    merge_data(&mut kimi_routed, kimi_via_extra_codex);
-    let mut list = vec![
-        claude_sp,
-        codex_sp,
-        grok(),
-        opencode_sp,
-        aihubmix_sp,
-        devin(),
-        minimax(minimax_extra),
-        kimi(kimi_routed),
-        qwen(),
-    ];
-    list.extend(extra_claude_spends);
-    list.extend(extra_codex_spends);
-    list.extend(extra_opencode_spends);
-    list.extend(hermes_rest);
+        let mut list = vec![
+            claude_sp,
+            codex_sp,
+            take_join(grok_t, "grok", build_spend("grok", "Grok", FileData::default())),
+            opencode_sp,
+            build_spend("aihubmix", "AihubMix", aihubmix_data),
+            take_join(devin_t, "devin", build_spend("devin", "Devin", FileData::default())),
+            minimax(minimax_extra),
+            kimi(kimi_routed),
+            take_join(qwen_t, "qwen", build_spend("qwen", "Qwen Code", FileData::default())),
+        ];
+        list.extend(extra_claude_spends);
+        list.extend(extra_codex_spends);
+        list.extend(extra_opencode_spends);
+        list.extend(hermes_rest);
+        list
+    });
     if let Some(csv) = cursor_csv {
         list.push(cursor_from_csv(&csv));
     }
@@ -2461,6 +3083,15 @@ mod tests {
                     PriceProbe::Lookup { key: "mystery-model".into(), price: None },
                     PriceProbe::FastMult { key: "claude-fable-5".into(), mult: 2.0 },
                 ],
+                prefix_head: b"head".to_vec(),
+                prefix_tail: b"abcd".to_vec(),
+                grok_models: vec![(42, "grok-4".into())],
+                codex: None,
+                claude: Some(ClaudeFileState {
+                    seen: ["msg_1:req_1".into()].into_iter().collect(),
+                    seen_mids: [("msg_1".into(), false)].into_iter().collect(),
+                }),
+                pi_seen: vec!["pi-msg-1".into()],
             }],
         };
         let json = serde_json::to_string(&doc).unwrap();
@@ -2474,6 +3105,15 @@ mod tests {
         assert_eq!(a.days, b.days);
         assert_eq!(a.unpriced, b.unpriced);
         assert_eq!(a.probes, b.probes);
+        assert_eq!(a.prefix_head, b.prefix_head);
+        assert_eq!(a.prefix_tail, b.prefix_tail);
+        assert_eq!(a.grok_models, b.grok_models);
+        assert_eq!(a.codex.is_none(), b.codex.is_none());
+        assert_eq!(
+            a.claude.as_ref().map(|s| s.seen.len()),
+            b.claude.as_ref().map(|s| s.seen.len())
+        );
+        assert_eq!(a.pi_seen, b.pi_seen);
     }
 
     /// A v2 cache (no probes/corrections fields) must not load as v3 —
@@ -2546,7 +3186,7 @@ mod tests {
             "usage": {"inputOther": 1000.0, "output": 1000.0},
             "usageScope": "turn", "time": 1784208630652i64})
         .to_string();
-        fs::write(&path, line).unwrap();
+        fs::write(&path, format!("{line}\n")).unwrap();
 
         let data = file_days(&path, &mut |line, data| kimi_line(line, data));
         assert!(!data.days.is_empty());
@@ -2569,6 +3209,12 @@ mod tests {
     }
 
     #[test]
+    fn oversized_prefix_fingerprint_is_dropped() {
+        assert!(clip_fingerprint(vec![1; PREFIX_HEAD + 1], PREFIX_HEAD).is_empty());
+        assert_eq!(clip_fingerprint(vec![1, 2, 3], PREFIX_HEAD), vec![1, 2, 3]);
+    }
+
+    #[test]
     fn empty_probes_do_not_vouch_for_an_empty_parse() {
         // Failed-open artifact: no events, no questions — must re-parse.
         assert!(!probes_still_vouch(&[], &FileData::default()));
@@ -2576,6 +3222,36 @@ mod tests {
         let mut data = FileData::default();
         data.days.insert((1, "k3".into()), (1.0, 1000.0));
         assert!(probes_still_vouch(&[], &data));
+    }
+
+    #[test]
+    fn cache_unchanged_rejects_stale_prices() {
+        let dir = std::env::temp_dir().join(format!("pane-cache-gen-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("session.jsonl");
+        let line = json!({
+            "type": "usage.record",
+            "model": "kimi-code/k3",
+            "usage": {"inputOther": 1000.0, "output": 0.0},
+            "usageScope": "turn",
+            "time": 1_784_208_630_652i64
+        })
+        .to_string();
+        fs::write(&path, format!("{line}\n")).unwrap();
+        let _ = file_days(&path, &mut |line, data| kimi_line(line, data));
+        assert!(cache_unchanged(&path), "fresh parse must look unchanged");
+
+        if let Ok(mut map) = cache().lock() {
+            if let Some(e) = map.get_mut(&path) {
+                e.gen = e.gen.saturating_add(1);
+                e.probes = vec![PriceProbe::Overflow];
+            }
+        }
+        assert!(
+            !cache_unchanged(&path),
+            "stale generation with dead probes must not take the empty-parser path"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2589,6 +3265,339 @@ mod tests {
         let cached = cache().lock().unwrap().contains_key(&dir);
         let _ = fs::remove_dir_all(&dir);
         assert!(!cached, "unreadable path must not become a cache entry");
+    }
+
+    #[test]
+    fn file_days_reads_only_the_appended_tail() {
+        let dir = std::env::temp_dir().join(format!("pane-jsonl-tail-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("grow.jsonl");
+        let line = |tokens: f64| {
+            json!({
+                "type": "usage.record",
+                "model": "kimi-code/k3",
+                "usage": {"inputOther": tokens, "output": 0.0},
+                "usageScope": "turn",
+                "time": 1_784_208_630_652i64
+            })
+            .to_string()
+        };
+        fs::write(&path, format!("{}\n", line(1_000.0))).unwrap();
+        let first = file_days(&path, &mut |line, data| kimi_line(line, data));
+        assert!((tokens_sum(&first) - 1_000.0).abs() < 0.001);
+
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        use std::io::Write;
+        write!(f, "{}\n", line(4_000.0)).unwrap();
+        drop(f);
+
+        let second = file_days(&path, &mut |line, data| kimi_line(line, data));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            (tokens_sum(&second) - 5_000.0).abs() < 0.001,
+            "appended line must add to the cached prefix, got {}",
+            tokens_sum(&second)
+        );
+    }
+
+    #[test]
+    fn file_days_warms_codex_state_on_the_tail() {
+        let dir = std::env::temp_dir().join(format!("pane-codex-warm-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("rollout.jsonl");
+        let head = vec![
+            json!({"timestamp": "2026-09-10T10:00:00Z", "type": "turn_context",
+                   "payload": {"model": "gpt-5.6-terra"}})
+            .to_string(),
+            token_count_line("2026-09-10T10:00:01Z", Some((1_000.0, 100.0)), (1_000.0, 100.0)),
+        ];
+        fs::write(&path, format!("{}\n{}\n", head[0], head[1])).unwrap();
+        let mut st = CodexFileState::default();
+        let first = file_days_stateful(&path, &mut |line, data| codex_line(&mut st, line, data));
+        assert_eq!(tokens_sum(&first), 1_100.0);
+
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        use std::io::Write;
+        writeln!(
+            f,
+            "{}",
+            token_count_line("2026-09-10T10:00:09Z", None, (1_500.0, 150.0))
+        )
+        .unwrap();
+        drop(f);
+
+        // Production creates a fresh closure state per scan — warmup must
+        // refill prev_totals so the cumulative snapshot is a delta.
+        let mut st = CodexFileState::default();
+        let second = file_days_stateful(&path, &mut |line, data| codex_line(&mut st, line, data));
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(
+            tokens_sum(&second),
+            1_650.0,
+            "tail without warmup would add the full 1650 snapshot (2750)"
+        );
+    }
+
+    #[test]
+    fn file_days_does_not_skip_a_completed_partial_line() {
+        let dir = std::env::temp_dir().join(format!("pane-jsonl-partial-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("partial.jsonl");
+        let line = |tokens: f64| {
+            json!({
+                "type": "usage.record",
+                "model": "kimi-code/k3",
+                "usage": {"inputOther": tokens, "output": 0.0},
+                "usageScope": "turn",
+                "time": 1_784_208_630_652i64
+            })
+            .to_string()
+        };
+        let first_line = line(1_000.0);
+        let second_line = line(4_000.0);
+        fs::write(&path, format!("{first_line}\n{}", &second_line[..12])).unwrap();
+        let first = file_days(&path, &mut |line, data| kimi_line(line, data));
+        assert!((tokens_sum(&first) - 1_000.0).abs() < 0.001);
+        let cached_size = cache().lock().unwrap().get(&path).map(|e| e.size).unwrap_or(0);
+        assert_eq!(cached_size, first_line.len() as u64 + 1);
+
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        use std::io::Write;
+        write!(f, "{}\n", &second_line[12..]).unwrap();
+        drop(f);
+
+        let second = file_days(&path, &mut |line, data| kimi_line(line, data));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            (tokens_sum(&second) - 5_000.0).abs() < 0.001,
+            "completed line must be parsed on the next scan, got {}",
+            tokens_sum(&second)
+        );
+    }
+
+    #[test]
+    fn file_days_counts_a_final_record_without_newline() {
+        let dir = std::env::temp_dir().join(format!("pane-jsonl-final-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("final.jsonl");
+        let line = |tokens: f64| {
+            json!({
+                "type": "usage.record",
+                "model": "kimi-code/k3",
+                "usage": {"inputOther": tokens, "output": 0.0},
+                "usageScope": "turn",
+                "time": 1_784_208_630_652i64
+            })
+            .to_string()
+        };
+        let first_line = line(1_000.0);
+        let second_line = line(4_000.0);
+        let third_line = line(2_000.0);
+        // Two records, last one without a newline — align must not
+        // walk back over the preceding `\n` when the file later grows.
+        fs::write(&path, format!("{first_line}\n{second_line}")).unwrap();
+        let first = file_days(&path, &mut |line, data| kimi_line(line, data));
+        assert!(
+            (tokens_sum(&first) - 5_000.0).abs() < 0.001,
+            "closed file without a trailing newline must still count, got {}",
+            tokens_sum(&first)
+        );
+        let cached_size = cache().lock().unwrap().get(&path).map(|e| e.size).unwrap_or(0);
+        assert_eq!(cached_size, first_line.len() as u64 + 1 + second_line.len() as u64);
+
+        let again = file_days(&path, &mut |line, data| kimi_line(line, data));
+        assert!(
+            (tokens_sum(&again) - 5_000.0).abs() < 0.001,
+            "unchanged closed file must not double-count, got {}",
+            tokens_sum(&again)
+        );
+
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        use std::io::Write;
+        write!(f, "\n{third_line}\n").unwrap();
+        drop(f);
+        let second = file_days(&path, &mut |line, data| kimi_line(line, data));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            (tokens_sum(&second) - 7_000.0).abs() < 0.001,
+            "append after a no-newline finale must not re-count the last record, got {}",
+            tokens_sum(&second)
+        );
+    }
+
+    #[test]
+    fn claude_checkpoint_drops_a_replay_older_than_warmup() {
+        let dir = std::env::temp_dir().join(format!("pane-claude-ckpt-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("session.jsonl");
+        let line = |mid: &str, rid: &str, tokens: f64| {
+            json!({
+                "type": "assistant",
+                "timestamp": "2026-07-10T10:00:00Z",
+                "requestId": rid,
+                "message": {
+                    "id": mid,
+                    "model": "claude-haiku-4-5",
+                    "usage": {"input_tokens": tokens, "output_tokens": 0.0}
+                }
+            })
+            .to_string()
+        };
+        fs::write(&path, format!("{}\n", line("msg_1", "req_1", 100.0))).unwrap();
+        let first = claude_file(&path);
+        assert!((tokens_sum(&first) - 100.0).abs() < 0.001);
+        assert!(
+            cache()
+                .lock()
+                .unwrap()
+                .get(&path)
+                .and_then(|e| e.claude.as_ref())
+                .is_some_and(|s| s.seen.contains("msg_1:req_1")),
+            "claude checkpoint must persist the counted id"
+        );
+
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        use std::io::Write;
+        write!(f, "{}\n", line("msg_1", "req_1", 100.0)).unwrap();
+        drop(f);
+        let second = claude_file(&path);
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            (tokens_sum(&second) - 100.0).abs() < 0.001,
+            "replay of a checkpointed id must not count twice, got {}",
+            tokens_sum(&second)
+        );
+    }
+
+    #[test]
+    fn file_days_aligns_a_legacy_midline_offset() {
+        let dir = std::env::temp_dir().join(format!("pane-jsonl-legacy-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("legacy.jsonl");
+        let line = |tokens: f64| {
+            json!({
+                "type": "usage.record",
+                "model": "kimi-code/k3",
+                "usage": {"inputOther": tokens, "output": 0.0},
+                "usageScope": "turn",
+                "time": 1_784_208_630_652i64
+            })
+            .to_string()
+        };
+        let first_line = line(1_000.0);
+        let second_line = line(4_000.0);
+        fs::write(&path, format!("{first_line}\n{}", &second_line[..12])).unwrap();
+        let first = file_days(&path, &mut |line, data| kimi_line(line, data));
+        assert!((tokens_sum(&first) - 1_000.0).abs() < 0.001);
+
+        // Old v4 cache stored the raw EOF (mid-line) and had no fingerprint.
+        let incomplete_len = fs::metadata(&path).unwrap().len();
+        if let Ok(mut map) = cache().lock() {
+            if let Some(e) = map.get_mut(&path) {
+                e.size = incomplete_len;
+                e.prefix_head.clear();
+                e.prefix_tail.clear();
+            }
+        }
+
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        use std::io::Write;
+        write!(f, "{}\n", &second_line[12..]).unwrap();
+        drop(f);
+
+        let second = file_days(&path, &mut |line, data| kimi_line(line, data));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            (tokens_sum(&second) - 5_000.0).abs() < 0.001,
+            "legacy mid-line offset must back up to the previous newline, got {}",
+            tokens_sum(&second)
+        );
+    }
+
+    #[test]
+    fn file_days_full_parses_a_larger_rewrite() {
+        let dir = std::env::temp_dir().join(format!("pane-jsonl-rewrite-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("rewrite.jsonl");
+        let line = |tokens: f64, time: i64| {
+            json!({
+                "type": "usage.record",
+                "model": "kimi-code/k3",
+                "usage": {"inputOther": tokens, "output": 0.0},
+                "usageScope": "turn",
+                "time": time
+            })
+            .to_string()
+        };
+        fs::write(&path, format!("{}\n", line(1_000.0, 1_784_208_630_652))).unwrap();
+        let first = file_days(&path, &mut |line, data| kimi_line(line, data));
+        assert!((tokens_sum(&first) - 1_000.0).abs() < 0.001);
+        assert!(
+            cache()
+                .lock()
+                .unwrap()
+                .get(&path)
+                .is_some_and(|e| !e.prefix_head.is_empty()),
+            "prefix fingerprint must be stored"
+        );
+
+        // Same-length first line, different clock — the start fingerprint
+        // includes the timestamp, so this is not treated as an append.
+        fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                line(2_000.0, 1_784_208_999_999),
+                line(3_000.0, 1_784_208_999_999)
+            ),
+        )
+        .unwrap();
+        let second = file_days(&path, &mut |line, data| kimi_line(line, data));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            (tokens_sum(&second) - 5_000.0).abs() < 0.001,
+            "larger rewrite must full-parse, got {}",
+            tokens_sum(&second)
+        );
+    }
+
+    #[test]
+    fn empty_prefix_fingerprint_still_tails() {
+        let dir = std::env::temp_dir().join(format!("pane-jsonl-oldfp-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("grow.jsonl");
+        let line = |tokens: f64| {
+            json!({
+                "type": "usage.record",
+                "model": "kimi-code/k3",
+                "usage": {"inputOther": tokens, "output": 0.0},
+                "usageScope": "turn",
+                "time": 1_784_208_630_652i64
+            })
+            .to_string()
+        };
+        fs::write(&path, format!("{}\n", line(1_000.0))).unwrap();
+        let first = file_days(&path, &mut |line, data| kimi_line(line, data));
+        assert!((tokens_sum(&first) - 1_000.0).abs() < 0.001);
+        if let Ok(mut map) = cache().lock() {
+            if let Some(e) = map.get_mut(&path) {
+                e.prefix_head.clear();
+                e.prefix_tail.clear();
+            }
+        }
+
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        use std::io::Write;
+        write!(f, "{}\n", line(4_000.0)).unwrap();
+        drop(f);
+
+        let second = file_days(&path, &mut |line, data| kimi_line(line, data));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            (tokens_sum(&second) - 5_000.0).abs() < 0.001,
+            "older cache with empty fingerprint must still tail, got {}",
+            tokens_sum(&second)
+        );
     }
 
     // ---- Input bounds: oversize lines, huge files, hostile model names ---

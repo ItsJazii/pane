@@ -14,6 +14,33 @@
   grip stay. Total Spend is unchanged (closes #212).
 
 ### Fixed
+- **Spend scan no longer re-reads whole session logs (or the whole
+  OpenCode ledger) on every refresh.** Growing JSONL files only parse
+  the new tail, OpenCode spend queries the last 31 days (integer clock
+  first — not a JSON walk of the whole table) and caches the live db
+  stamp, Claude/Codex/OpenCode/Devin run in parallel, and Cursor's CSV
+  export no longer blocks the local walk. The popover used to sit on
+  "Scanning session logs…" for minutes on a busy Codex/OpenCode machine.
+  Tail scans warm parser state from the last 1 MB of the cached prefix
+  only for stateful logs (Codex/Claude/Grok/Pi) — Kimi/Qwen skip that
+  extra read. Cache only complete JSONL lines; a legacy mid-line offset
+  backs up at most 64 KB instead of discarding the persist file.
+  Full-parse when a larger rewrite fails a 64+32-byte prefix check
+  (one file open). OpenCode takes the newest ledger rows via `rowid`
+  (no filesort). Overlapping spend collects wait rather than clobber
+  `touched`. A failed OpenCode read keeps the last good rows instead
+  of caching empty. Cursor-only unknown models still flag the catalog.
+  OpenCode skips a malformed message blob instead of dropping the
+  query. Codex/Grok/Claude/Pi restore a compact checkpoint so a tail
+  does not re-read 200 MB or double-count an older replay. A closed
+  JSONL file that ends without a newline still counts its last
+  record; a later append does not count that record twice. A
+  catalog refresh that changes a file's prices re-parses it
+  instead of wiping the card. A failed warmup keeps the cached
+  prefix instead of
+  full-rescanning with dirty parser state. OpenCode/Devin stamp
+  caches drop rows that age out of the window. One provider panic
+  no longer dumps every card.
 - **The local HTTP API no longer stamps restored snapshots as fresh.**
   `fetchedAt` is the last successful fetch, and every provider now
   reports `status` / `stale`. A failed refresh during the 3-minute

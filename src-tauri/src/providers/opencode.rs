@@ -230,7 +230,11 @@ fn extra_data_dirs() -> Vec<PathBuf> {
             }
         }
     }
-    dirs.extend(super::account_scan_roots());
+    for root in super::account_scan_roots() {
+        if root.join("opencode.db").is_file() || root.join("auth.json").is_file() {
+            dirs.push(root);
+        }
+    }
     dirs
 }
 
@@ -603,18 +607,140 @@ pub fn collect_cost_events() -> Vec<(f64, f64, f64, String, String)> {
 }
 
 pub fn collect_cost_events_in(dir: &Path) -> Vec<(f64, f64, f64, String, String)> {
-    with_live_db(dir, |db| {
-        Ok(read_messages(db)?
-            .0
-            .into_iter()
-            // Free models record cost 0 with real token counts — the
-            // tokens are usage facts and count at their true $0 price.
-            // Rows with neither cost nor tokens (aborted turns) drop.
-            .filter(|r| r.cost > 0.0 || r.tokens > 0.0)
-            .map(|r| (r.ts, r.cost, r.tokens, r.model, r.provider))
-            .collect())
-    })
-    .unwrap_or_default()
+    use std::sync::Mutex;
+    use std::time::SystemTime;
+    type Stamp = (SystemTime, u64);
+    type Row = (f64, f64, f64, String, String);
+    static CACHE: Mutex<Vec<(PathBuf, Stamp, Stamp, Vec<Row>)>> = Mutex::new(Vec::new());
+
+    let db_path = dir.join("opencode.db");
+    if !db_path.exists() {
+        return Vec::new();
+    }
+    let db_stamp = std::fs::metadata(&db_path)
+        .map(|m| (m.modified().unwrap_or(SystemTime::UNIX_EPOCH), m.len()))
+        .unwrap_or((SystemTime::UNIX_EPOCH, 0));
+    let wal = db_path.with_extension("db-wal");
+    let wal_stamp = std::fs::metadata(&wal)
+        .map(|m| (m.modified().unwrap_or(SystemTime::UNIX_EPOCH), m.len()))
+        .unwrap_or((SystemTime::UNIX_EPOCH, 0));
+
+    if let Ok(cache) = CACHE.lock() {
+        if let Some((_, d, w, rows)) = cache.iter().find(|(p, _, _, _)| p == &db_path) {
+            if *d == db_stamp && *w == wal_stamp {
+                // Stamp can sit still for days. Drop rows that have
+                // aged out of the 31-day window without a db re-read.
+                return rows_in_spend_window(rows);
+            }
+        }
+    }
+
+    let rows = match with_live_db(dir, |db| read_recent_cost_events(db)) {
+        Ok(rows) => rows,
+        Err(_) => {
+            // A failed read must not cache empty — the next stamp hit
+            // would hide spend until the db/WAL changes again. Keep the
+            // last good rows (if any) and retry on the next refresh.
+            if let Ok(cache) = CACHE.lock() {
+                if let Some((_, _, _, rows)) = cache.iter().find(|(p, _, _, _)| p == &db_path) {
+                    return rows_in_spend_window(rows);
+                }
+            }
+            return Vec::new();
+        }
+    };
+    if let Ok(mut cache) = CACHE.lock() {
+        if let Some(slot) = cache.iter_mut().find(|(p, _, _, _)| p == &db_path) {
+            *slot = (db_path, db_stamp, wal_stamp, rows.clone());
+        } else {
+            cache.push((db_path, db_stamp, wal_stamp, rows.clone()));
+        }
+    }
+    rows
+}
+
+fn rows_in_spend_window(rows: &[(f64, f64, f64, String, String)]) -> Vec<(f64, f64, f64, String, String)> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let cutoff_ms = (now_ms - 31 * 86_400 * 1_000) as f64;
+    rows.iter()
+        .filter(|(ts, _, _, _, _)| {
+            if *ts > 1_000_000_000_000.0 {
+                *ts >= cutoff_ms
+            } else {
+                *ts >= cutoff_ms / 1000.0
+            }
+        })
+        .cloned()
+        .collect()
+}
+
+/// Spend only needs ~31 days. The quota card still uses `read_messages`
+/// for the monthly Go cycle; this path must not pull that whole ledger.
+fn read_recent_cost_events(db: &Path) -> Result<Vec<(f64, f64, f64, String, String)>, String> {
+    let conn = super::open_readonly_sqlite(db)?;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let cutoff_ms = now_ms - 31 * 86_400 * 1_000;
+    // json_extract in WHERE made SQLite parse every blob in the table.
+    // Filter on the integer clock first; role/cost stay in Rust.
+    // Newest-first via rowid (clustered) — `ORDER BY time_created DESC`
+    // would filesort the 31-day match before LIMIT on a machine with a
+    // 176 MB ledger. Messages are inserted in clock order.
+    let max_ts: i64 = conn
+        .query_row("SELECT COALESCE(MAX(time_created), 0) FROM message", [], |row| row.get(0))
+        .unwrap_or(0);
+    let cutoff = if max_ts > 1_000_000_000_000 { cutoff_ms } else { cutoff_ms / 1000 };
+    // Pull raw blobs after the integer cutoff. json_extract in SELECT
+    // aborted the whole query on one malformed row; Rust skips those.
+    let mut stmt = conn
+        .prepare(
+            "SELECT time_created, data
+             FROM message
+             WHERE time_created >= ?1
+             ORDER BY rowid DESC
+             LIMIT ?2",
+        )
+        .map_err(|e| format!("query recent messages: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params![cutoff, super::MAX_LEDGER_ROWS as i64], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1).unwrap_or_default()))
+        })
+        .map_err(|e| format!("read recent messages: {e}"))?;
+    Ok(rows
+        .flatten()
+        .filter_map(|(time_created, data)| message_cost_event(time_created, &data))
+        .collect())
+}
+
+/// One assistant cost row, or None when the blob is junk / not spend.
+fn message_cost_event(time_created: i64, data: &str) -> Option<(f64, f64, f64, String, String)> {
+    let msg = serde_json::from_str::<Value>(data).ok()?;
+    if msg.get("role").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+    let provider = msg
+        .get("providerID")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let model = msg
+        .get("modelID")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let cost = msg.get("cost").and_then(Value::as_f64).unwrap_or(0.0);
+    let ts = msg
+        .pointer("/time/completed")
+        .or_else(|| msg.pointer("/time/created"))
+        .and_then(Value::as_f64)
+        .unwrap_or(time_created as f64);
+    let tokens = ["/tokens/input", "/tokens/output", "/tokens/reasoning"]
+        .iter()
+        .filter_map(|p| msg.pointer(p).and_then(Value::as_f64))
+        .sum::<f64>();
+    if cost <= 0.0 && tokens <= 0.0 {
+        return None;
+    }
+    Some((ts, cost, tokens, model, provider))
 }
 
 pub struct MessageRow {
@@ -731,6 +857,32 @@ mod tests {
 
     fn ms(iso: &str) -> f64 {
         chrono::DateTime::parse_from_rfc3339(iso).unwrap().timestamp_millis() as f64
+    }
+
+    #[test]
+    fn stamp_cache_drops_rows_past_the_cutoff() {
+        let now = chrono::Utc::now().timestamp_millis() as f64;
+        let old = now - 40.0 * 86_400_000.0;
+        let fresh = now - 2.0 * 86_400_000.0;
+        let rows = vec![
+            (old, 1.0, 10.0, "m".into(), "p".into()),
+            (fresh, 2.0, 20.0, "m".into(), "p".into()),
+        ];
+        let kept = rows_in_spend_window(&rows);
+        assert_eq!(kept.len(), 1);
+        assert!((kept[0].1 - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn malformed_message_blob_does_not_drop_neighbors() {
+        let good = r#"{"role":"assistant","providerID":"opencode-go","modelID":"k3","cost":1.5,"tokens":{"input":10,"output":5}}"#;
+        let bad = "{not-json";
+        let rows: Vec<_> = [good, bad, good]
+            .into_iter()
+            .filter_map(|data| message_cost_event(1_784_208_630, data))
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert!((rows[0].1 - 1.5).abs() < 1e-9);
     }
 
     #[test]
