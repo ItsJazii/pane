@@ -1198,7 +1198,7 @@ function isCardDisabled(id: string, disabled: string[] = config.disabled): boole
 
 /// True when this layout key can actually paint a row right now.
 function canRenderMinimal(s: Snapshot, spend: ProviderSpend | undefined, key: string): boolean {
-  if (key === TREND_KEY) return Boolean(spend);
+  if (key === TREND_KEY) return Boolean(spend?.trend.some((v) => v > 0));
   if (SPEND_KEYS.some(([label]) => label === key)) return Boolean(spend);
   return s.metrics.some((m) => m.label === key);
 }
@@ -1220,8 +1220,8 @@ function minimalItemKey(s: Snapshot): string | null {
     s.metrics.some((m) => m.label === k && m.kind === "progress"),
   );
   if (progress) return progress;
-  // Balance / credits / Used rows have no progress meter. Show that
-  // first visible value instead of collapsing the card to "ok".
+  // Balance / credits / Used / spend rows have no progress meter.
+  // Show that first visible value instead of collapsing the card to "ok".
   return visible[0] ?? null;
 }
 
