@@ -5,11 +5,12 @@ can read it.
 
 Sub2API cards use `GET /v1/usage/sub2api@<key-id>` and are also included
 in the collection. Each key stays independent even if its wallet or
-subscription values match another key. These entries additionally expose
-`status`, `stale`, `error`, and `warning` so failed refreshes cannot make
-historical data look current. Progress entries retain display amounts in
-`value`/`subtitle` as well as the percentage. Other providers keep their
-existing wire format.
+subscription values match another key. Every entry exposes `status` and
+`stale` so a restored last-good snapshot cannot pose as a live fetch.
+`fetchedAt` is the last successful fetch time (not the publish time).
+Sub2API entries additionally expose `error` and `warning`. Progress
+entries retain display amounts in `value`/`subtitle` as well as the
+percentage.
 
 This reads Pane's published snapshots and never initiates a remote usage
 request. Disabled or deleted keys return 404 and disappear from the
@@ -32,6 +33,8 @@ Wire format (compatible with the macOS OpenUsage API):
   "displayName": "Claude",
   "plan": "Max",
   "fetchedAt": "2026-07-08T01:30:00Z",
+  "status": "ok",
+  "stale": false,
   "lines": [{
     "type": "progress",
     "label": "Session",
