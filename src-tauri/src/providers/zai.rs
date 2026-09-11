@@ -50,16 +50,26 @@ async fn fetch(bases: &[&str]) -> Result<Snapshot, String> {
     for base in bases {
         match fetch_at(base, &key).await {
             Ok(snap) => return Ok(snap),
-            // Any failure moves on to the other site — a 401 means the
-            // key belongs to the other account; a transport error may
-            // just mean this site is unreachable from this network.
-            Err(e) => last_err = e,
+            Err(SiteFailure::WrongSite(e)) => last_err = e,
+            Err(SiteFailure::SiteError(e)) => return Err(e),
         }
     }
     Err(last_err)
 }
 
-async fn fetch_at(base: &str, key: &str) -> Result<Snapshot, String> {
+/// Why a site refused, split so the fallback only runs when the OTHER
+/// site can genuinely do better:
+/// - `WrongSite`: the key doesn't live on this site (401) or the site is
+///   unreachable — the sibling site may still answer.
+/// - `SiteError`: this site answered and is having a bad day (rate
+///   limit, 5xx, shape change). The sibling site would only 401 and
+///   mask the real reason, so the fallback must NOT run.
+enum SiteFailure {
+    WrongSite(String),
+    SiteError(String),
+}
+
+async fn fetch_at(base: &str, key: &str) -> Result<Snapshot, SiteFailure> {
     let quota_req = http()
         .get(format!("{base}/api/monitor/usage/quota/limit"))
         .bearer_auth(key)
@@ -70,22 +80,35 @@ async fn fetch_at(base: &str, key: &str) -> Result<Snapshot, String> {
         .send();
     let (quota_resp, plan_resp) = tokio::join!(quota_req, plan_req);
 
-    let quota_resp = quota_resp.map_err(|e| format!("quota request: {e}"))?;
+    // Transport-level failure often just means this site is unreachable
+    // from this network — the sibling site is worth a try.
+    let quota_resp =
+        quota_resp.map_err(|e| SiteFailure::WrongSite(format!("quota request: {e}")))?;
     if quota_resp.status().as_u16() == 401 {
-        return Err("API key was rejected — check it in Settings".into());
+        // A key 401s on the site it doesn't belong to.
+        return Err(SiteFailure::WrongSite(
+            "API key was rejected — check it in Settings".into(),
+        ));
     }
     if !quota_resp.status().is_success() {
-        return Err(format!("quota endpoint: HTTP {}", quota_resp.status()));
+        // The right site rate-limiting or erroring must surface as-is;
+        // the other site would only 401 and hide it.
+        return Err(SiteFailure::SiteError(format!(
+            "quota endpoint: HTTP {}",
+            quota_resp.status()
+        )));
     }
     let quota: Value = quota_resp
         .json()
         .await
-        .map_err(|e| format!("quota parse: {e}"))?;
+        .map_err(|e| SiteFailure::SiteError(format!("quota parse: {e}")))?;
 
     let mut metrics = Vec::new();
     collect_quota_metrics(quota.get("data").unwrap_or(&quota), &mut metrics);
     if metrics.is_empty() {
-        return Err("unexpected quota response shape (endpoint is undocumented)".into());
+        return Err(SiteFailure::SiteError(
+            "unexpected quota response shape (endpoint is undocumented)".into(),
+        ));
     }
     metrics.truncate(5);
 
@@ -280,6 +303,28 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "a working first site must short-circuit the fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_limit_on_the_correct_site_is_reported_as_is() {
+        // A 429 from the site the key belongs to must surface as a 429 —
+        // falling through to the sibling site would only earn a 401
+        // there and mask the real reason (and dodge the cooldown).
+        let zai = serve(vec![(429, "slow down".into()), (429, "slow down".into())]);
+        let bigmodel_server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let bigmodel = format!("http://{}", bigmodel_server.server_addr());
+        let error = match fetch(&[zai.as_str(), bigmodel.as_str()]).await {
+            Ok(_) => panic!("a rate-limited site must not look like success"),
+            Err(error) => error,
+        };
+        assert!(error.contains("429"), "{error}");
+        assert!(
+            bigmodel_server
+                .recv_timeout(std::time::Duration::from_millis(150))
+                .unwrap()
+                .is_none(),
+            "a site-level error must not trigger the other-site fallback"
         );
     }
 

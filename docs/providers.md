@@ -175,7 +175,11 @@ Ground rules that apply to every provider:
 - **Reads:** pasted key (Settings → **Z.ai / GLM**), `ZAI_API_KEY` /
   `GLM_API_KEY`, or the Z.ai CLI's key file. A GLM Coding Plan key from
   `open.bigmodel.cn` works here too — no CLI login needed.
-- **Calls:** `api.z.ai` quota + subscription endpoints.
+- **Calls:** `api.z.ai` first, then `open.bigmodel.cn` (the same GLM
+  coding-plan monitoring endpoints exist on both; a key 401s on the site
+  it doesn't belong to, and an unreachable first site falls through).
+  Quota + subscription endpoints only; a rate-limited or erroring site
+  is reported as-is instead of masking itself with the other site's 401.
 - **Shows:** Session/Weekly, monthly Web Searches quota, plan.
 
 ## Antigravity
