@@ -331,6 +331,7 @@ const PROVIDER_LINKS: Record<string, { label: string; url: string }[]> = {
   zai: [
     { label: "Dashboard", url: "https://z.ai/manage-apikey/coding-plan/personal/my-plan" },
     { label: "API Keys", url: "https://z.ai/manage-apikey/apikey-list" },
+    { label: "BigModel Keys", url: "https://open.bigmodel.cn/usercenter/apikeys" },
   ],
   opencode: [{ label: "Console", url: "https://opencode.ai/console" }],
   aihubmix: [{ label: "Console", url: "https://console.aihubmix.com/" }],

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Mainland GLM keys work on the Z.ai card.** The quota call used to
+  hit only `api.z.ai`, so a `open.bigmodel.cn` key got a 401 and an
+  error card — and some mainland networks cannot reach z.ai at all.
+  The card now tries the international site then the mainland host
+  (closes #214).
+
 ## 0.4.50 — 2026-09-11
 
 ### Changed
