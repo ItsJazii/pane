@@ -1676,6 +1676,11 @@ async fn fetch_usage(
             .unwrap_or_default()
     });
 
+    // Bind the default OpenCode fingerprint to this refresh so a swap of
+    // auth.json while the request is in flight cannot cache the old key's
+    // numbers under the new identity.
+    let opencode_identity_at_start = providers::opencode::default_identity();
+
     // Each provider future is boxed onto the heap and spawned as its own
     // task. A single tokio::join! over 28 inlined futures builds one huge
     // combined state machine on the calling thread's stack — at 28 providers
@@ -2023,6 +2028,17 @@ async fn fetch_usage(
         let mut failures = fail_state().lock().unwrap();
         for id in stale_key_card_ids {
             failures.remove(&id);
+        }
+    }
+    if opencode_identity_at_start != providers::opencode::default_identity() {
+        for s in &mut all {
+            if s.id == "opencode" {
+                *s = providers::Snapshot::error(
+                    "opencode",
+                    "OpenCode",
+                    "OpenCode login changed during refresh.".into(),
+                );
+            }
         }
     }
 

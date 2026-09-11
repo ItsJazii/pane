@@ -115,20 +115,34 @@ pub struct OpenCodeAccount {
 /// A dir that can't name its account never becomes a card; a dir whose
 /// fingerprint matches an already-seen login is skipped.
 pub fn discover_extra_accounts() -> Vec<OpenCodeAccount> {
-    discover_from(&data_dir(), extra_data_dirs())
+    discover_from(&data_dir(), extra_data_dirs(), true)
 }
 
-fn discover_from(default: &Path, extras: Vec<PathBuf>) -> Vec<OpenCodeAccount> {
+/// Extra homes that have their own Go key. Used for spend so a mid-write
+/// default `auth.json` cannot hide valid extra ledgers. Card discovery
+/// still aborts in that case (`discover_extra_accounts`) to avoid a
+/// duplicate usage card.
+pub fn extra_spend_accounts() -> Vec<OpenCodeAccount> {
+    discover_from(&data_dir(), extra_data_dirs(), false)
+}
+
+fn discover_from(
+    default: &Path,
+    extras: Vec<PathBuf>,
+    abort_unreadable_default: bool,
+) -> Vec<OpenCodeAccount> {
     // Claude/Codex abort when the default login exists but can't be
     // named. OpenCode splits that: a parsed file with no Go key is
     // OpenRouter-only (empty `seen`, extras still card). A file that
-    // exists but will not parse is treated as mid-write — extras stay
-    // hidden so a later successful default snapshot cannot duplicate.
+    // exists but will not parse is treated as mid-write — usage cards
+    // stay hidden so a later successful default snapshot cannot
+    // duplicate. Spend still walks extras (`abort_unreadable_default`
+    // = false) so those ledgers are not dropped for one rewrite.
     let mut seen = Vec::new();
     match dir_auth_state(default) {
-        DirAuth::Unreadable => return Vec::new(),
+        DirAuth::Unreadable if abort_unreadable_default => return Vec::new(),
+        DirAuth::Unreadable | DirAuth::ParsedNoGo | DirAuth::Missing => {}
         DirAuth::Identified(fp) => seen.push(fp),
-        DirAuth::ParsedNoGo | DirAuth::Missing => {}
     }
 
     let mut out = Vec::new();
@@ -532,29 +546,22 @@ fn utc_date(year: i32, month: u32, day: u32, h: u32, m: u32, s: u32, ms: u32) ->
 /// Total Spend. The provider id lets the spend engine split gateway
 /// providers (AihubMix) into their own slice.
 pub fn collect_cost_events() -> Vec<(f64, f64, f64, String, String)> {
-    let mut dirs = vec![data_dir()];
-    for acct in discover_extra_accounts() {
-        if !dirs.iter().any(|d| same_dir(d, &acct.dir)) {
-            dirs.push(acct.dir);
-        }
-    }
-    let mut out = Vec::new();
-    for dir in dirs {
-        let rows: Vec<(f64, f64, f64, String, String)> = with_live_db(&dir, |db| {
-            Ok(read_messages(db)?
-                .0
-                .into_iter()
-                // Free models record cost 0 with real token counts — the
-                // tokens are usage facts and count at their true $0 price.
-                // Rows with neither cost nor tokens (aborted turns) drop.
-                .filter(|r| r.cost > 0.0 || r.tokens > 0.0)
-                .map(|r| (r.ts, r.cost, r.tokens, r.model, r.provider))
-                .collect())
-        })
-        .unwrap_or_default();
-        out.extend(rows);
-    }
-    out
+    collect_cost_events_in(&data_dir())
+}
+
+pub fn collect_cost_events_in(dir: &Path) -> Vec<(f64, f64, f64, String, String)> {
+    with_live_db(dir, |db| {
+        Ok(read_messages(db)?
+            .0
+            .into_iter()
+            // Free models record cost 0 with real token counts — the
+            // tokens are usage facts and count at their true $0 price.
+            // Rows with neither cost nor tokens (aborted turns) drop.
+            .filter(|r| r.cost > 0.0 || r.tokens > 0.0)
+            .map(|r| (r.ts, r.cost, r.tokens, r.model, r.provider))
+            .collect())
+    })
+    .unwrap_or_default()
 }
 
 pub struct MessageRow {
@@ -844,7 +851,7 @@ mod tests {
             &extra,
             r#"{"opencode-go":{"type":"api","key":"work-key-aaa"}}"#,
         );
-        let found = discover_from(&root.join("default"), vec![extra.clone()]);
+        let found = discover_from(&root.join("default"), vec![extra.clone()], true);
         let fp = dir_identity(&extra).expect("fingerprint");
         let hash8: String = fp.chars().take(8).collect();
         assert_eq!(found.len(), 1);
@@ -866,7 +873,7 @@ mod tests {
             &extra,
             r#"{"opencode-go":{"type":"api","key":"work-key-aaa"}}"#,
         );
-        let found = discover_from(&default, vec![extra]);
+        let found = discover_from(&default, vec![extra], true);
         assert_eq!(found.len(), 1);
         assert!(found[0].id.starts_with("opencode@"));
         std::fs::remove_dir_all(&root).ok();
@@ -882,7 +889,8 @@ mod tests {
             &extra,
             r#"{"opencode-go":{"type":"api","key":"work-key-aaa"}}"#,
         );
-        assert!(discover_from(&default, vec![extra]).is_empty());
+        assert!(discover_from(&default, vec![extra.clone()], true).is_empty());
+        assert_eq!(discover_from(&default, vec![extra], false).len(), 1);
         std::fs::remove_dir_all(&root).ok();
     }
 }

@@ -1919,16 +1919,45 @@ fn grok() -> ProviderSpend {
 /// Returns OpenCode's spend plus the AihubMix rows as raw FileData — the
 /// caller merges in AihubMix traffic from other CLIs (Claude Code) before
 /// building the card's spend.
-fn opencode() -> (ProviderSpend, FileData) {
+fn fold_opencode_events(
+    id: impl Into<String>,
+    name: impl Into<String>,
+    events: impl IntoIterator<Item = (f64, f64, f64, String, String)>,
+) -> (ProviderSpend, FileData) {
     let mut oc = FileData::default();
     let mut aihubmix = FileData::default();
-    for (ts_ms, cost, tokens, model, provider) in providers::opencode::collect_cost_events() {
+    for (ts_ms, cost, tokens, model, provider) in events {
         if let Some(ts) = DateTime::from_timestamp_millis(ts_ms as i64) {
             let target = if provider == "aihubmix" { &mut aihubmix } else { &mut oc };
             add_event(target, ts, &model, cost, tokens);
         }
     }
-    (build_spend("opencode", "OpenCode", oc), aihubmix)
+    (build_spend(id, name, oc), aihubmix)
+}
+
+fn opencode() -> (ProviderSpend, FileData) {
+    fold_opencode_events(
+        "opencode",
+        "OpenCode",
+        providers::opencode::collect_cost_events(),
+    )
+}
+
+/// Spend for each extra OpenCode home, scanned from that dir's ledger.
+/// AihubMix-routed rows still fold into the gateway card.
+fn opencode_extra_accounts() -> (Vec<ProviderSpend>, FileData) {
+    let mut spends = Vec::new();
+    let mut aihubmix = FileData::default();
+    for acct in providers::opencode::extra_spend_accounts() {
+        let (sp, extra_ai) = fold_opencode_events(
+            acct.id,
+            acct.name,
+            providers::opencode::collect_cost_events_in(&acct.dir),
+        );
+        merge_data(&mut aihubmix, extra_ai);
+        spends.push(sp);
+    }
+    (spends, aihubmix)
 }
 
 /// Devin CLI keeps per-request token metrics in its local sessions.db
@@ -2310,6 +2339,8 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
         }
     }
     let (opencode_sp, mut aihubmix_data) = opencode();
+    let (extra_opencode_spends, aihubmix_via_extra_oc) = opencode_extra_accounts();
+    merge_data(&mut aihubmix_data, aihubmix_via_extra_oc);
     merge_data(&mut aihubmix_data, qwen_via_claude);
     let aihubmix_sp = build_spend("aihubmix", "AihubMix", aihubmix_data);
     let (codex_sp, kimi_via_codex) = codex(pi_codex);
@@ -2329,6 +2360,7 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
     ];
     list.extend(extra_claude_spends);
     list.extend(extra_codex_spends);
+    list.extend(extra_opencode_spends);
     list.extend(hermes_rest);
     if let Some(csv) = cursor_csv {
         list.push(cursor_from_csv(&csv));
