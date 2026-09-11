@@ -2000,7 +2000,13 @@ async fn fetch_usage(
         .collect();
     let mut all = Vec::with_capacity(handles.len());
     for h in handles {
-        if let Ok(snap) = h.await {
+        if let Ok(mut snap) = h.await {
+            // Stamp each provider as it lands — not once after the
+            // slowest sibling finishes — so fetchedAt is that card's
+            // last success, not the batch join clock.
+            if snap.status == "ok" && snap.fetched_at.is_none() {
+                snap.fetched_at = Some(now_ms() as i64);
+            }
             all.push(snap);
         }
     }
@@ -2135,6 +2141,7 @@ async fn fetch_usage(
                             restore_kimi_wallet_rows(s, &previous.snap);
                             if s.metrics.len() > n {
                                 skip_cache = true;
+                                s.attempt_failed = true;
                                 if age > STALE_GRACE_MS {
                                     s.stale = true;
                                 }
@@ -2143,12 +2150,13 @@ async fn fetch_usage(
                     }
                 }
                 if s.status == "ok" && !skip_cache {
-                    s.fetched_at = Some(now_ms);
+                    let at = s.fetched_at.unwrap_or(now_ms);
+                    s.fetched_at = Some(at);
                     s.attempt_failed = false;
                     map.insert(
                         s.id.clone(),
                         CachedSnap {
-                            at: now_ms,
+                            at,
                             snap: s.clone(),
                         },
                     );
