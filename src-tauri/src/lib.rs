@@ -1914,13 +1914,13 @@ async fn fetch_usage(
         ));
     }
     for acct in providers::opencode::discover_extra_accounts() {
-        let (id, name, dir) = (acct.id, acct.name, acct.dir);
+        let (id, name, dir, fp) = (acct.id, acct.name, acct.dir, acct.fingerprint);
         futs.push((
             id.clone(),
             Box::pin(guarded(
                 id.clone(),
                 name.clone(),
-                providers::opencode::snapshot_at(dir, id, name),
+                providers::opencode::snapshot_at(dir, id, name, Some(fp)),
             )),
         ));
     }
@@ -2123,10 +2123,18 @@ async fn fetch_usage(
                     && opencode_swapped_mid_refresh
                     && map.remove(fam).is_some()
                 {
-                    // First launch after this stamp, or a missing stored
-                    // identity: this refresh already saw the key change, so
-                    // drop the unstamped last-good before error restore
-                    // can paint the previous account.
+                    // Mid-refresh A→B with two known fingerprints: drop
+                    // the last-good so error restore cannot paint A as B.
+                    removed = true;
+                } else if fam == "opencode"
+                    && old.is_null()
+                    && !cur.is_null()
+                    && map.remove(fam).is_some()
+                {
+                    // First stamp after upgrade: the cached snapshot
+                    // predates identity tracking and may belong to a
+                    // previous login. Drop it rather than pin it to the
+                    // current key.
                     removed = true;
                 }
                 // And a transient null never OVERWRITES a known identity:

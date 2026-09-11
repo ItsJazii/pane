@@ -108,6 +108,7 @@ pub struct OpenCodeAccount {
     pub id: String,
     pub name: String,
     pub dir: PathBuf,
+    pub fingerprint: String,
 }
 
 /// Extra OpenCode profiles beyond `~/.local/share/opencode`: OPENCODE_HOME,
@@ -116,14 +117,6 @@ pub struct OpenCodeAccount {
 /// fingerprint matches an already-seen login is skipped.
 pub fn discover_extra_accounts() -> Vec<OpenCodeAccount> {
     discover_from(&data_dir(), extra_data_dirs(), true)
-}
-
-/// Extra homes that have their own Go key. Used for spend so a mid-write
-/// default `auth.json` cannot hide valid extra ledgers. Card discovery
-/// still aborts in that case (`discover_extra_accounts`) to avoid a
-/// duplicate usage card.
-pub fn extra_spend_accounts() -> Vec<OpenCodeAccount> {
-    discover_from(&data_dir(), extra_data_dirs(), false)
 }
 
 fn discover_from(
@@ -167,9 +160,48 @@ fn discover_from(
             id: format!("opencode@{hash8}"),
             name,
             dir,
+            fingerprint: fp,
         });
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+/// Extra homes that have a Go key, including dirs that share a
+/// fingerprint with the default login. Cards stay one-per-fingerprint;
+/// spend merges every ledger onto the matching card.
+pub fn extra_ledger_homes() -> Vec<(String, String, PathBuf)> {
+    let default = data_dir();
+    let default_fp = match dir_auth_state(&default) {
+        DirAuth::Identified(fp) => Some(fp),
+        _ => None,
+    };
+    let mut seen_dirs: Vec<PathBuf> = Vec::new();
+    let mut out = Vec::new();
+    for dir in extra_data_dirs() {
+        if same_dir(&dir, &default) {
+            continue;
+        }
+        if seen_dirs.iter().any(|d| same_dir(d, &dir)) {
+            continue;
+        }
+        let Some(fp) = dir_identity(&dir) else { continue };
+        if !scoped_id_charset(&fp) {
+            continue;
+        }
+        seen_dirs.push(dir.clone());
+        let (id, name) = if default_fp.as_ref() == Some(&fp) {
+            (ID.to_string(), NAME.to_string())
+        } else {
+            let hash8: String = fp.chars().take(8).collect();
+            let name = match dir_label(&dir) {
+                Some(l) => format!("OpenCode — {l}"),
+                None => format!("OpenCode @{hash8}"),
+            };
+            (format!("opencode@{hash8}"), name)
+        };
+        out.push((id, name, dir));
+    }
     out
 }
 
@@ -226,17 +258,27 @@ fn with_live_db<T>(dir: &Path, f: impl FnOnce(&Path) -> Result<T, String>) -> Re
 }
 
 pub async fn snapshot() -> Snapshot {
-    snapshot_at(data_dir(), ID.to_string(), NAME.to_string()).await
+    snapshot_at(data_dir(), ID.to_string(), NAME.to_string(), None).await
 }
 
-pub async fn snapshot_at(dir: PathBuf, id: String, name: String) -> Snapshot {
-    match fetch(&dir, &id, &name).await {
+pub async fn snapshot_at(
+    dir: PathBuf,
+    id: String,
+    name: String,
+    expected_fp: Option<String>,
+) -> Snapshot {
+    match fetch(&dir, &id, &name, expected_fp.as_deref()).await {
         Ok(s) => s,
         Err(e) => Snapshot::error(&id, &name, e),
     }
 }
 
-async fn fetch(dir: &Path, id: &str, name: &str) -> Result<Snapshot, String> {
+async fn fetch(
+    dir: &Path,
+    id: &str,
+    name: &str,
+    expected_fp: Option<&str>,
+) -> Result<Snapshot, String> {
     let auth_path = dir.join("auth.json");
     if !auth_path.exists() {
         return Ok(Snapshot::no_credentials(
@@ -252,6 +294,11 @@ async fn fetch(dir: &Path, id: &str, name: &str) -> Result<Snapshot, String> {
             "No OpenCode Go subscription found in auth.json.",
         ));
     };
+    if let Some(expected) = expected_fp {
+        if fingerprint_key(&key) != expected {
+            return Err("OpenCode login changed during refresh.".into());
+        }
+    }
 
     // Account-wide truth first; the local windows only when it fails
     // (offline, revoked key, or a gateway hiccup). The fallback names its

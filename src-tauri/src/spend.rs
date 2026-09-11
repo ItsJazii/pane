@@ -1919,11 +1919,9 @@ fn grok() -> ProviderSpend {
 /// Returns OpenCode's spend plus the AihubMix rows as raw FileData — the
 /// caller merges in AihubMix traffic from other CLIs (Claude Code) before
 /// building the card's spend.
-fn fold_opencode_events(
-    id: impl Into<String>,
-    name: impl Into<String>,
+fn fold_opencode_data(
     events: impl IntoIterator<Item = (f64, f64, f64, String, String)>,
-) -> (ProviderSpend, FileData) {
+) -> (FileData, FileData) {
     let mut oc = FileData::default();
     let mut aihubmix = FileData::default();
     for (ts_ms, cost, tokens, model, provider) in events {
@@ -1932,31 +1930,43 @@ fn fold_opencode_events(
             add_event(target, ts, &model, cost, tokens);
         }
     }
-    (build_spend(id, name, oc), aihubmix)
+    (oc, aihubmix)
 }
 
 fn opencode() -> (ProviderSpend, FileData) {
-    fold_opencode_events(
-        "opencode",
-        "OpenCode",
-        providers::opencode::collect_cost_events(),
-    )
+    let (mut oc, mut aihubmix) =
+        fold_opencode_data(providers::opencode::collect_cost_events());
+    for (id, _, dir) in providers::opencode::extra_ledger_homes() {
+        if id != "opencode" {
+            continue;
+        }
+        let (more, more_ai) = fold_opencode_data(providers::opencode::collect_cost_events_in(&dir));
+        merge_data(&mut oc, more);
+        merge_data(&mut aihubmix, more_ai);
+    }
+    (build_spend("opencode", "OpenCode", oc), aihubmix)
 }
 
-/// Spend for each extra OpenCode home, scanned from that dir's ledger.
+/// Spend for each extra OpenCode home. Dirs that share a fingerprint
+/// merge into one card (or into the default card when they match it).
 /// AihubMix-routed rows still fold into the gateway card.
 fn opencode_extra_accounts() -> (Vec<ProviderSpend>, FileData) {
-    let mut spends = Vec::new();
+    let mut groups: std::collections::BTreeMap<String, (String, FileData)> =
+        std::collections::BTreeMap::new();
     let mut aihubmix = FileData::default();
-    for acct in providers::opencode::extra_spend_accounts() {
-        let (sp, extra_ai) = fold_opencode_events(
-            acct.id,
-            acct.name,
-            providers::opencode::collect_cost_events_in(&acct.dir),
-        );
+    for (id, name, dir) in providers::opencode::extra_ledger_homes() {
+        if id == "opencode" {
+            continue;
+        }
+        let (data, extra_ai) = fold_opencode_data(providers::opencode::collect_cost_events_in(&dir));
         merge_data(&mut aihubmix, extra_ai);
-        spends.push(sp);
+        let entry = groups.entry(id).or_insert((name, FileData::default()));
+        merge_data(&mut entry.1, data);
     }
+    let spends = groups
+        .into_iter()
+        .map(|(id, (name, data))| build_spend(id, name, data))
+        .collect();
     (spends, aihubmix)
 }
 
