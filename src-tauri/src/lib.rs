@@ -2030,7 +2030,9 @@ async fn fetch_usage(
             failures.remove(&id);
         }
     }
-    if opencode_identity_at_start != providers::opencode::default_identity() {
+    let opencode_identity_now = providers::opencode::default_identity();
+    let opencode_swapped_mid_refresh = opencode_identity_at_start != opencode_identity_now;
+    if opencode_swapped_mid_refresh {
         for s in &mut all {
             if s.id == "opencode" {
                 *s = providers::Snapshot::error(
@@ -2098,6 +2100,15 @@ async fn fetch_usage(
                 // unreadable identity file must not dump the last-good
                 // cache — that's the safety net, not a swap.
                 if !old.is_null() && !cur.is_null() && old != cur && map.remove(fam).is_some() {
+                    removed = true;
+                } else if fam == "opencode"
+                    && opencode_swapped_mid_refresh
+                    && map.remove(fam).is_some()
+                {
+                    // First launch after this stamp, or a missing stored
+                    // identity: this refresh already saw the key change, so
+                    // drop the unstamped last-good before error restore
+                    // can paint the previous account.
                     removed = true;
                 }
                 // And a transient null never OVERWRITES a known identity:
