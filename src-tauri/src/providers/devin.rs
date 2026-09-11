@@ -364,7 +364,10 @@ const MAX_MESSAGE_ROWS: usize = 2_000_000;
 
 fn read_usage_events(db: &std::path::Path) -> Result<Vec<UsageEvent>, String> {
     let conn = super::open_readonly_sqlite(db)?;
-    let cutoff_s = chrono::Utc::now().timestamp() - 31 * 86_400;
+    // Node created_at is the index clock; attribution prefers metadata
+    // created_at. One extra day of slack covers a straddle without
+    // scanning the whole GB-sized sessions.db.
+    let cutoff_s = chrono::Utc::now().timestamp() - 32 * 86_400;
     let mut stmt = conn
         .prepare(&format!(
             "SELECT m.session_id, m.chat_message, m.created_at, s.model

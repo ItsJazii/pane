@@ -30,6 +30,9 @@
   (no filesort). Overlapping spend collects wait rather than clobber
   `touched`. A failed OpenCode read keeps the last good rows instead
   of caching empty. Cursor-only unknown models still flag the catalog.
+  OpenCode skips a malformed message blob instead of dropping the
+  query. Codex/Grok restore a compact checkpoint so a tail does not
+  re-read 200 MB. One provider panic no longer dumps every card.
 - **The local HTTP API no longer stamps restored snapshots as fresh.**
   `fetchedAt` is the last successful fetch, and every provider now
   reports `status` / `stale`. A failed refresh during the 3-minute

@@ -672,18 +672,11 @@ fn read_recent_cost_events(db: &Path) -> Result<Vec<(f64, f64, f64, String, Stri
         .query_row("SELECT COALESCE(MAX(time_created), 0) FROM message", [], |row| row.get(0))
         .unwrap_or(0);
     let cutoff = if max_ts > 1_000_000_000_000 { cutoff_ms } else { cutoff_ms / 1000 };
+    // Pull raw blobs after the integer cutoff. json_extract in SELECT
+    // aborted the whole query on one malformed row; Rust skips those.
     let mut stmt = conn
         .prepare(
-            "SELECT COALESCE(json_extract(data, '$.role'), ''),
-                    COALESCE(json_extract(data, '$.providerID'), 'unknown'),
-                    COALESCE(json_extract(data, '$.modelID'), 'unknown'),
-                    COALESCE(json_extract(data, '$.cost'), 0),
-                    COALESCE(json_extract(data, '$.time.completed'),
-                             json_extract(data, '$.time.created'),
-                             time_created),
-                    COALESCE(json_extract(data, '$.tokens.input'), 0)
-                        + COALESCE(json_extract(data, '$.tokens.output'), 0)
-                        + COALESCE(json_extract(data, '$.tokens.reasoning'), 0)
+            "SELECT time_created, data
              FROM message
              WHERE time_created >= ?1
              ORDER BY rowid DESC
@@ -692,23 +685,45 @@ fn read_recent_cost_events(db: &Path) -> Result<Vec<(f64, f64, f64, String, Stri
         .map_err(|e| format!("query recent messages: {e}"))?;
     let rows = stmt
         .query_map(rusqlite::params![cutoff, super::MAX_LEDGER_ROWS as i64], |row| {
-            Ok((
-                row.get::<_, String>(0).unwrap_or_default(),
-                row.get::<_, String>(1).unwrap_or_else(|_| "unknown".into()),
-                row.get::<_, String>(2).unwrap_or_else(|_| "unknown".into()),
-                row.get::<_, f64>(3).unwrap_or(0.0),
-                row.get::<_, f64>(4).unwrap_or(0.0),
-                row.get::<_, f64>(5).unwrap_or(0.0),
-            ))
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1).unwrap_or_default()))
         })
         .map_err(|e| format!("read recent messages: {e}"))?;
     Ok(rows
         .flatten()
-        .filter(|(role, _, _, cost, _, tokens)| {
-            role == "assistant" && (*cost > 0.0 || *tokens > 0.0)
-        })
-        .map(|(_, provider, model, cost, ts, tokens)| (ts, cost, tokens, model, provider))
+        .filter_map(|(time_created, data)| message_cost_event(time_created, &data))
         .collect())
+}
+
+/// One assistant cost row, or None when the blob is junk / not spend.
+fn message_cost_event(time_created: i64, data: &str) -> Option<(f64, f64, f64, String, String)> {
+    let msg = serde_json::from_str::<Value>(data).ok()?;
+    if msg.get("role").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+    let provider = msg
+        .get("providerID")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let model = msg
+        .get("modelID")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let cost = msg.get("cost").and_then(Value::as_f64).unwrap_or(0.0);
+    let ts = msg
+        .pointer("/time/completed")
+        .or_else(|| msg.pointer("/time/created"))
+        .and_then(Value::as_f64)
+        .unwrap_or(time_created as f64);
+    let tokens = ["/tokens/input", "/tokens/output", "/tokens/reasoning"]
+        .iter()
+        .filter_map(|p| msg.pointer(p).and_then(Value::as_f64))
+        .sum::<f64>();
+    if cost <= 0.0 && tokens <= 0.0 {
+        return None;
+    }
+    Some((ts, cost, tokens, model, provider))
 }
 
 pub struct MessageRow {
@@ -825,6 +840,18 @@ mod tests {
 
     fn ms(iso: &str) -> f64 {
         chrono::DateTime::parse_from_rfc3339(iso).unwrap().timestamp_millis() as f64
+    }
+
+    #[test]
+    fn malformed_message_blob_does_not_drop_neighbors() {
+        let good = r#"{"role":"assistant","providerID":"opencode-go","modelID":"k3","cost":1.5,"tokens":{"input":10,"output":5}}"#;
+        let bad = "{not-json";
+        let rows: Vec<_> = [good, bad, good]
+            .into_iter()
+            .filter_map(|data| message_cost_event(1_784_208_630, data))
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert!((rows[0].1 - 1.5).abs() < 1e-9);
     }
 
     #[test]

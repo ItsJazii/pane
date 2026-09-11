@@ -140,6 +140,11 @@ struct FileEntry {
     /// not regress. The tail alone is often a stable JSON suffix.
     prefix_head: Vec<u8>,
     prefix_tail: Vec<u8>,
+    /// Compact Grok pid→model checkpoint. Restored before a tail parse
+    /// so a model-change older than the 1 MB warmup still attributes.
+    grok_models: HashMap<i64, String>,
+    /// Compact Codex totals/model/gate. Same idea — no 200 MB re-read.
+    codex: Option<CodexFileState>,
 }
 
 /// One pricing question a file's parse asked, together with the answer it
@@ -296,6 +301,10 @@ struct PersistEntry {
     prefix_head: Vec<u8>,
     #[serde(default)]
     prefix_tail: Vec<u8>,
+    #[serde(default)]
+    grok_models: Vec<(i64, String)>,
+    #[serde(default)]
+    codex: Option<CodexFileState>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -357,6 +366,8 @@ fn load_persisted_cache() {
                     data,
                     prefix_head: clip_fingerprint(e.prefix_head, PREFIX_HEAD),
                     prefix_tail: clip_fingerprint(e.prefix_tail, PREFIX_TAIL),
+                    grok_models: clip_grok_models(e.grok_models.into_iter().collect()),
+                    codex: e.codex,
                 },
             );
         }
@@ -398,6 +409,8 @@ fn save_persisted_cache() {
                 probes: e.probes.clone(),
                 prefix_head: e.prefix_head.clone(),
                 prefix_tail: e.prefix_tail.clone(),
+                grok_models: e.grok_models.iter().map(|(k, v)| (*k, v.clone())).collect(),
+                codex: e.codex.clone(),
             }
         })
         .collect();
@@ -690,6 +703,72 @@ fn cached_prefix(
 /// Hostile/corrupt persist blobs must not sit in RAM. Oversized marks
 /// are dropped so the next scan still tails (speed) instead of holding
 /// the payload or forcing a full re-read.
+const MAX_GROK_PIDS: usize = 256;
+
+fn clip_grok_models(map: HashMap<i64, String>) -> HashMap<i64, String> {
+    if map.len() <= MAX_GROK_PIDS {
+        map
+    } else {
+        HashMap::new()
+    }
+}
+
+fn cache_unchanged(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+    let size = meta.len();
+    cache()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(path).map(|e| e.mtime == mtime && e.size == size))
+        .unwrap_or(false)
+}
+
+fn will_resume_tail(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    let gen = pricing::generation();
+    cache()
+        .lock()
+        .ok()
+        .and_then(|map| cached_prefix(&map, path, meta.len(), gen))
+        .is_some()
+}
+
+fn load_grok_models(path: &Path) -> HashMap<i64, String> {
+    cache()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(path).map(|e| e.grok_models.clone()))
+        .unwrap_or_default()
+}
+
+fn store_grok_models(path: &Path, models: HashMap<i64, String>) {
+    if let Ok(mut map) = cache().lock() {
+        if let Some(e) = map.get_mut(path) {
+            e.grok_models = clip_grok_models(models);
+        }
+    }
+}
+
+fn load_codex_ckpt(path: &Path) -> Option<CodexFileState> {
+    cache()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(path).and_then(|e| e.codex.clone()))
+}
+
+fn store_codex_ckpt(path: &Path, st: CodexFileState) {
+    if let Ok(mut map) = cache().lock() {
+        if let Some(e) = map.get_mut(path) {
+            e.codex = Some(st);
+        }
+    }
+}
+
 fn clip_fingerprint(bytes: Vec<u8>, cap: usize) -> Vec<u8> {
     if bytes.len() <= cap {
         bytes
@@ -750,6 +829,10 @@ fn remember_file(
 ) {
     let (prefix_head, prefix_tail) = read_prefix_marks(path, cached_size);
     if let Ok(mut map) = cache().lock() {
+        let (grok_models, codex) = map
+            .get(path)
+            .map(|e| (e.grok_models.clone(), e.codex.clone()))
+            .unwrap_or_default();
         map.insert(
             path.to_path_buf(),
             FileEntry {
@@ -760,6 +843,8 @@ fn remember_file(
                 data,
                 prefix_head,
                 prefix_tail,
+                grok_models,
+                codex,
             },
         );
     }
@@ -1562,7 +1647,7 @@ fn hermes() -> Vec<(&'static str, &'static str, FileData)> {
 
 /// One `token_count` usage object, tolerating the older field spellings
 /// (`prompt_tokens`, `cache_read_input_tokens`, …) the Mac scanner accepts.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 struct CodexRaw {
     input: f64,
     cached: f64,
@@ -1626,6 +1711,7 @@ fn codex_child_meta(payload: &Value) -> bool {
 
 /// How a child session's replayed parent history is gated until its first
 /// live turn.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 enum CodexReplayGate {
     /// Clear when `task_started.started_at` is at/after the child's creation
     /// epoch (replayed task_started lines carry the parent's older one).
@@ -1637,7 +1723,7 @@ enum CodexReplayGate {
 }
 
 /// Per-file parse state for one Codex rollout.
-#[derive(Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 struct CodexFileState {
     model: String,
     saw_meta: bool,
@@ -1949,8 +2035,21 @@ fn codex_session_files(home: &Path) -> Vec<PathBuf> {
 fn codex_scan(home: &Path) -> FileData {
     let mut all = FileData::default();
     for file in codex_session_files(home) {
-        let mut state = CodexFileState::default();
-        let data = file_days_stateful(&file, &mut |line, data| codex_line(&mut state, line, data));
+        if cache_unchanged(&file) {
+            merge_data(&mut all, file_days(&file, &mut |_, _| {}));
+            continue;
+        }
+        let tail = will_resume_tail(&file);
+        let ckpt = if tail { load_codex_ckpt(&file) } else { None };
+        let mut state = ckpt.clone().unwrap_or_default();
+        let data = if tail && ckpt.is_some() {
+            file_days(&file, &mut |line, data| codex_line(&mut state, line, data))
+        } else if tail {
+            file_days_stateful(&file, &mut |line, data| codex_line(&mut state, line, data))
+        } else {
+            file_days(&file, &mut |line, data| codex_line(&mut state, line, data))
+        };
+        store_codex_ckpt(&file, state);
         merge_data(&mut all, data);
     }
     all
@@ -2136,8 +2235,26 @@ fn grok() -> ProviderSpend {
     let path = root.join("logs").join("unified.jsonl");
     let mut all = FileData::default();
     if path.exists() {
-        let mut model_by_pid: HashMap<i64, String> = HashMap::new();
-        let data = file_days_stateful(&path, &mut |line, data| {
+        if cache_unchanged(&path) {
+            merge_data(&mut all, file_days(&path, &mut |_, _| {}));
+        } else {
+        let tail = will_resume_tail(&path);
+        let mut model_by_pid = if tail { load_grok_models(&path) } else { HashMap::new() };
+        let data = if tail && !model_by_pid.is_empty() {
+            file_days(&path, &mut |line, data| grok_line(&mut model_by_pid, line, data))
+        } else if tail {
+            file_days_stateful(&path, &mut |line, data| grok_line(&mut model_by_pid, line, data))
+        } else {
+            file_days(&path, &mut |line, data| grok_line(&mut model_by_pid, line, data))
+        };
+        store_grok_models(&path, model_by_pid);
+        merge_data(&mut all, data);
+        }
+    }
+    build_spend("grok", "Grok", all)
+}
+
+fn grok_line(model_by_pid: &mut HashMap<i64, String>, line: &str, data: &mut FileData) {
             if !line.contains("inference_done") && !line.contains("model") {
                 return;
             }
@@ -2204,10 +2321,6 @@ fn grok() -> ProviderSpend {
                 cache_write_1h: 0.0,
             };
             add_event(data, ts, &model, cost_for(&model, &p, &u, 200_000.0, ts), tokens);
-        });
-        merge_data(&mut all, data);
-    }
-    build_spend("grok", "Grok", all)
 }
 
 /// OpenCode stores real per-message costs in its database — no pricing
@@ -2619,6 +2732,17 @@ fn spend_step<T>(name: &str, f: impl FnOnce() -> T) -> T {
     out
 }
 
+fn take_join<T>(
+    handle: std::thread::ScopedJoinHandle<'_, T>,
+    name: &str,
+    fallback: T,
+) -> T {
+    handle.join().unwrap_or_else(|_| {
+        eprintln!("[pane] spend: {name} panicked — keeping the other providers");
+        fallback
+    })
+}
+
 fn collect_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -2664,14 +2788,27 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
         let qwen_t = s.spawn(|| spend_step("qwen", qwen));
 
         let (claude_sp, extra_claude_spends, mut minimax_extra, qwen_via_claude, mut kimi_routed) =
-            claude_t.join().expect("claude spend");
-        let (codex_sp, extra_codex_spends, kimi_via_codex) = codex_t.join().expect("codex spend");
+            take_join(claude_t, "claude", (
+                build_spend("claude", "Claude", FileData::default()),
+                Vec::new(),
+                FileData::default(),
+                FileData::default(),
+                FileData::default(),
+            ));
+        let (codex_sp, extra_codex_spends, kimi_via_codex) = take_join(
+            codex_t,
+            "codex",
+            (build_spend("codex", "Codex", FileData::default()), Vec::new(), FileData::default()),
+        );
         merge_data(&mut kimi_routed, kimi_via_codex);
-        let (opencode_sp, extra_opencode_spends, mut aihubmix_data) =
-            oc_t.join().expect("opencode spend");
+        let (opencode_sp, extra_opencode_spends, mut aihubmix_data) = take_join(
+            oc_t,
+            "opencode",
+            (build_spend("opencode", "OpenCode", FileData::default()), Vec::new(), FileData::default()),
+        );
         merge_data(&mut aihubmix_data, qwen_via_claude);
         let mut hermes_rest = Vec::new();
-        for (id, name, data) in hermes_t.join().expect("hermes spend") {
+        for (id, name, data) in take_join(hermes_t, "hermes", Vec::new()) {
             if id == "minimax" {
                 merge_data(&mut minimax_extra, data);
             } else {
@@ -2681,13 +2818,13 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
         let mut list = vec![
             claude_sp,
             codex_sp,
-            grok_t.join().expect("grok spend"),
+            take_join(grok_t, "grok", build_spend("grok", "Grok", FileData::default())),
             opencode_sp,
             build_spend("aihubmix", "AihubMix", aihubmix_data),
-            devin_t.join().expect("devin spend"),
+            take_join(devin_t, "devin", build_spend("devin", "Devin", FileData::default())),
             minimax(minimax_extra),
             kimi(kimi_routed),
-            qwen_t.join().expect("qwen spend"),
+            take_join(qwen_t, "qwen", build_spend("qwen", "Qwen Code", FileData::default())),
         ];
         list.extend(extra_claude_spends);
         list.extend(extra_codex_spends);
@@ -2799,6 +2936,8 @@ mod tests {
                 ],
                 prefix_head: b"head".to_vec(),
                 prefix_tail: b"abcd".to_vec(),
+                grok_models: vec![(42, "grok-4".into())],
+                codex: None,
             }],
         };
         let json = serde_json::to_string(&doc).unwrap();
@@ -2814,6 +2953,8 @@ mod tests {
         assert_eq!(a.probes, b.probes);
         assert_eq!(a.prefix_head, b.prefix_head);
         assert_eq!(a.prefix_tail, b.prefix_tail);
+        assert_eq!(a.grok_models, b.grok_models);
+        assert_eq!(a.codex.is_none(), b.codex.is_none());
     }
 
     /// A v2 cache (no probes/corrections fields) must not load as v3 —
