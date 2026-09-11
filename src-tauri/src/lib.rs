@@ -985,13 +985,18 @@ fn persist_last_ok_at(
     std::fs::write(path, serialized).map_err(|e| format!("write snapshot cache: {e}"))
 }
 
+// Thread-local, not global: a process-wide one-shot flag gets stolen by
+// whichever parallel test calls persist_last_ok inside the injecting
+// test's store -> consume window, failing BOTH tests at once.
 #[cfg(test)]
-static TEST_PERSIST_LAST_OK_FAIL: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    static TEST_PERSIST_LAST_OK_FAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 static SNAPSHOT_CACHE_NEEDS_FLUSH: AtomicBool = AtomicBool::new(false);
 
 fn persist_last_ok(map: &HashMap<String, CachedSnap>) -> Result<(), String> {
     #[cfg(test)]
-    if TEST_PERSIST_LAST_OK_FAIL.swap(false, Ordering::SeqCst) {
+    if TEST_PERSIST_LAST_OK_FAIL.with(|fail| fail.replace(false)) {
         SNAPSHOT_CACHE_NEEDS_FLUSH.store(true, Ordering::Release);
         return Err("test: persist last_ok failed".into());
     }
@@ -4025,8 +4030,17 @@ mod tests {
         assert_eq!(before.get(rotated), after.get(rotated));
     }
 
+    /// rotating_moonshot… and rotating_kimi… exercise the same two global
+    /// ids; under a parallel test runner they'd evict each other's
+    /// fixtures, so they serialize on this lock.
+    fn kimi_moonshot_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap()
+    }
+
     #[test]
     fn rotating_moonshot_also_forgets_folded_kimi_wallet() {
+        let _km = kimi_moonshot_test_lock();
         let tmp = TempConfig::new();
         let _moonshot = SnapCacheGuard::new("moonshot");
         let _kimi = SnapCacheGuard::new("kimi");
@@ -4092,6 +4106,7 @@ mod tests {
 
     #[test]
     fn rotating_kimi_does_not_reset_moonshot_usage() {
+        let _km = kimi_moonshot_test_lock();
         let tmp = TempConfig::new();
         let _kimi = SnapCacheGuard::new("kimi");
         let _moonshot = SnapCacheGuard::new("moonshot");
@@ -4151,7 +4166,10 @@ mod tests {
     #[test]
     fn blocked_credit_baselines_file_is_reported() {
         let tmp = TempConfig::new();
-        let id = "qwen";
+        // "qwen" belongs to clearing_missing_key…, which asserts that a
+        // no-op clear leaves the generation untouched — this test bumps
+        // its id's generation, so they must not share one.
+        let id = "aihubmix";
         let _guard = SnapCacheGuard::new(id);
         set_api_key_in(&tmp.dir, id, "key-a").unwrap();
         std::fs::create_dir(tmp.dir.join("credit_baselines.json")).unwrap();
@@ -4174,14 +4192,14 @@ mod tests {
         struct PersistFailGuard;
         impl Drop for PersistFailGuard {
             fn drop(&mut self) {
-                TEST_PERSIST_LAST_OK_FAIL.store(false, Ordering::SeqCst);
+                TEST_PERSIST_LAST_OK_FAIL.with(|fail| fail.set(false));
                 SNAPSHOT_CACHE_NEEDS_FLUSH.store(false, Ordering::Release);
             }
         }
         let _persist_guard = PersistFailGuard;
         set_api_key_in(&tmp.dir, id, "key-a").unwrap();
         seed_cached_ok(id, "DeepSeek");
-        TEST_PERSIST_LAST_OK_FAIL.store(true, Ordering::SeqCst);
+        TEST_PERSIST_LAST_OK_FAIL.with(|fail| fail.set(true));
         let error = set_api_key_in(&tmp.dir, id, "key-b").expect_err("persist fail must surface");
         assert!(
             error.contains("cached data"),
