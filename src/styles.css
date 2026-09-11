@@ -68,24 +68,24 @@
   margin-bottom: 2px;
 }
 
-/* Minimal view: one meter per card, tighter than compact. */
-:root[data-minimal="true"] .provider {
+/* Minimal view: one meter per ordinary card. Total Spend and Welcome
+   keep their own chrome (including share / dismiss). */
+:root[data-minimal="true"] .provider:not(.total-spend):not(.welcome-card) {
   padding: 2px 2px 0;
 }
-:root[data-minimal="true"] .card-panel {
+:root[data-minimal="true"] .provider:not(.total-spend):not(.welcome-card) .card-panel {
   padding: 2px 12px 4px;
 }
-:root[data-minimal="true"] .metric {
+:root[data-minimal="true"] .provider:not(.total-spend):not(.welcome-card) .metric {
   margin: 2px 0;
 }
-:root[data-minimal="true"] .provider-head {
+:root[data-minimal="true"] .provider:not(.total-spend):not(.welcome-card) .provider-head {
   margin-bottom: 0;
 }
-:root[data-minimal="true"] .plan,
-:root[data-minimal="true"] .quick-links,
-:root[data-minimal="true"] .share-btn,
-:root[data-minimal="true"] .card-caret,
-:root[data-minimal="true"] .on-demand {
+:root[data-minimal="true"] .provider:not(.total-spend):not(.welcome-card) .plan,
+:root[data-minimal="true"] .provider:not(.total-spend):not(.welcome-card) .quick-links,
+:root[data-minimal="true"] .provider:not(.total-spend):not(.welcome-card) .card-caret,
+:root[data-minimal="true"] .provider:not(.total-spend):not(.welcome-card) .on-demand {
   display: none;
 }
 

@@ -1195,22 +1195,27 @@ function isCardDisabled(id: string, disabled: string[] = config.disabled): boole
   return (fam === "onenewapi" || fam === "sub2api") && disabled.includes(fam);
 }
 
-/// The one row a card keeps in minimal view: starred first, else the
-/// first progress meter, else the first visible row, else nothing.
+/// True when this layout key can actually paint a row right now.
+function canRenderMinimal(s: Snapshot, spend: ProviderSpend | undefined, key: string): boolean {
+  if (key === TREND_KEY) return Boolean(spend);
+  if (SPEND_KEYS.some(([label]) => label === key)) return Boolean(spend);
+  return s.metrics.some((m) => m.label === key);
+}
+
+/// The one row a card keeps in minimal view: a visible starred meter,
+/// else the first visible progress meter, else the status word.
 function minimalItemKey(s: Snapshot): string | null {
   const L =
     providerFamily(s.id) === "sub2api"
       ? sub2ApiLiveLayout(s.metrics, providerLayout(s.id))
       : providerLayout(s.id);
-  const visible = L.metricOrder.filter((k) => !L.hidden.includes(k));
-  const hasRow = (k: string) =>
-    visible.includes(k) || s.metrics.some((m) => m.label === k);
-  const starred = L.starred.find(hasRow);
+  const spend = lastSpend.find((sp) => sp.id === s.id);
+  const visible = L.metricOrder.filter(
+    (k) => !L.hidden.includes(k) && canRenderMinimal(s, spend, k),
+  );
+  const starred = L.starred.find((k) => visible.includes(k));
   if (starred) return starred;
-  const firstProgress = visible.find((k) => s.metrics.find((m) => m.label === k)?.kind === "progress");
-  if (firstProgress) return firstProgress;
-  const anyProgress = s.metrics.find((m) => m.kind === "progress");
-  return anyProgress?.label ?? visible[0] ?? null;
+  return visible.find((k) => s.metrics.some((m) => m.label === k && m.kind === "progress")) ?? null;
 }
 
 function renderCard(s: Snapshot): string {
@@ -2264,6 +2269,8 @@ function applyAppearance(): void {
   document.documentElement.dataset.density = config.density;
   document.documentElement.dataset.minimal = config.minimal ? "true" : "false";
   document.querySelector("#minimal-btn")?.classList.toggle("active", config.minimal);
+  const minimal = document.querySelector<HTMLInputElement>("#minimal");
+  if (minimal) minimal.checked = config.minimal === true;
   const btn = document.querySelector<HTMLElement>("#theme-btn");
   if (btn) {
     btn.textContent = mode === "light" ? "☾" : "☀";
