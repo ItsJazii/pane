@@ -31,8 +31,13 @@
   `touched`. A failed OpenCode read keeps the last good rows instead
   of caching empty. Cursor-only unknown models still flag the catalog.
   OpenCode skips a malformed message blob instead of dropping the
-  query. Codex/Grok restore a compact checkpoint so a tail does not
-  re-read 200 MB. One provider panic no longer dumps every card.
+  query. Codex/Grok/Claude/Pi restore a compact checkpoint so a tail
+  does not re-read 200 MB or double-count an older replay. A closed
+  JSONL file that ends without a newline still counts its last
+  record. A failed warmup keeps the cached prefix instead of
+  full-rescanning with dirty parser state. OpenCode/Devin stamp
+  caches drop rows that age out of the window. One provider panic
+  no longer dumps every card.
 - **The local HTTP API no longer stamps restored snapshots as fresh.**
   `fetchedAt` is the last successful fetch, and every provider now
   reports `status` / `stale`. A failed refresh during the 3-minute

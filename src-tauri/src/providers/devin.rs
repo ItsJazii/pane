@@ -332,7 +332,7 @@ pub fn collect_usage_events() -> Vec<UsageEvent> {
     if let Ok(cache) = CACHE.lock() {
         if let Some((d, w, events)) = cache.as_ref() {
             if *d == db_stamp && *w == wal_stamp {
-                return events.clone();
+                return events_in_spend_window(events);
             }
         }
     }
@@ -351,9 +351,14 @@ pub fn collect_usage_events() -> Vec<UsageEvent> {
         Err(_) => CACHE
             .lock()
             .ok()
-            .and_then(|c| c.as_ref().map(|(_, _, e)| e.clone()))
+            .and_then(|c| c.as_ref().map(|(_, _, e)| events_in_spend_window(e)))
             .unwrap_or_default(),
     }
+}
+
+fn events_in_spend_window(events: &[UsageEvent]) -> Vec<UsageEvent> {
+    let cutoff_ms = chrono::Utc::now().timestamp_millis() - 32 * 86_400 * 1_000;
+    events.iter().filter(|e| e.ts_ms >= cutoff_ms).cloned().collect()
 }
 
 /// sessions.db keeps one row per message per branch and can be GBs; cap

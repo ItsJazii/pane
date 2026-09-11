@@ -145,6 +145,11 @@ struct FileEntry {
     grok_models: HashMap<i64, String>,
     /// Compact Codex totals/model/gate. Same idea — no 200 MB re-read.
     codex: Option<CodexFileState>,
+    /// Claude `{mid}:{rid}` / sidechain checkpoints. A replay older
+    /// than the 1 MB warmup still dedups.
+    claude: Option<ClaudeFileState>,
+    /// Pi message-id checkpoint. Same replay problem as Claude.
+    pi_seen: HashSet<String>,
 }
 
 /// One pricing question a file's parse asked, together with the answer it
@@ -305,6 +310,10 @@ struct PersistEntry {
     grok_models: Vec<(i64, String)>,
     #[serde(default)]
     codex: Option<CodexFileState>,
+    #[serde(default)]
+    claude: Option<ClaudeFileState>,
+    #[serde(default)]
+    pi_seen: Vec<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -368,6 +377,8 @@ fn load_persisted_cache() {
                     prefix_tail: clip_fingerprint(e.prefix_tail, PREFIX_TAIL),
                     grok_models: clip_grok_models(e.grok_models.into_iter().collect()),
                     codex: e.codex,
+                    claude: clip_claude_ckpt(e.claude),
+                    pi_seen: clip_pi_seen(e.pi_seen.into_iter().collect()),
                 },
             );
         }
@@ -411,6 +422,8 @@ fn save_persisted_cache() {
                 prefix_tail: e.prefix_tail.clone(),
                 grok_models: e.grok_models.iter().map(|(k, v)| (*k, v.clone())).collect(),
                 codex: e.codex.clone(),
+                claude: e.claude.clone(),
+                pi_seen: e.pi_seen.iter().cloned().collect(),
             }
         })
         .collect();
@@ -713,6 +726,28 @@ fn clip_grok_models(map: HashMap<i64, String>) -> HashMap<i64, String> {
     }
 }
 
+/// Hostile/corrupt persist blobs must not sit in RAM. A 20 MB Claude
+/// session is hundreds of ids, not tens of thousands — over the cap
+/// we drop the checkpoint so the next tail warms 1 MB instead.
+const MAX_DEDUP_IDS: usize = 8192;
+
+fn clip_claude_ckpt(st: Option<ClaudeFileState>) -> Option<ClaudeFileState> {
+    let st = st?;
+    if st.seen.len() > MAX_DEDUP_IDS || st.seen_mids.len() > MAX_DEDUP_IDS {
+        None
+    } else {
+        Some(st)
+    }
+}
+
+fn clip_pi_seen(seen: HashSet<String>) -> HashSet<String> {
+    if seen.len() <= MAX_DEDUP_IDS {
+        seen
+    } else {
+        HashSet::new()
+    }
+}
+
 fn cache_unchanged(path: &Path) -> bool {
     let Ok(meta) = fs::metadata(path) else {
         return false;
@@ -765,6 +800,37 @@ fn store_codex_ckpt(path: &Path, st: CodexFileState) {
     if let Ok(mut map) = cache().lock() {
         if let Some(e) = map.get_mut(path) {
             e.codex = Some(st);
+        }
+    }
+}
+
+fn load_claude_ckpt(path: &Path) -> Option<ClaudeFileState> {
+    cache()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(path).and_then(|e| e.claude.clone()))
+}
+
+fn store_claude_ckpt(path: &Path, st: ClaudeFileState) {
+    if let Ok(mut map) = cache().lock() {
+        if let Some(e) = map.get_mut(path) {
+            e.claude = clip_claude_ckpt(Some(st));
+        }
+    }
+}
+
+fn load_pi_seen(path: &Path) -> HashSet<String> {
+    cache()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(path).map(|e| e.pi_seen.clone()))
+        .unwrap_or_default()
+}
+
+fn store_pi_seen(path: &Path, seen: HashSet<String>) {
+    if let Ok(mut map) = cache().lock() {
+        if let Some(e) = map.get_mut(path) {
+            e.pi_seen = clip_pi_seen(seen);
         }
     }
 }
@@ -829,9 +895,16 @@ fn remember_file(
 ) {
     let (prefix_head, prefix_tail) = read_prefix_marks(path, cached_size);
     if let Ok(mut map) = cache().lock() {
-        let (grok_models, codex) = map
+        let (grok_models, codex, claude, pi_seen) = map
             .get(path)
-            .map(|e| (e.grok_models.clone(), e.codex.clone()))
+            .map(|e| {
+                (
+                    e.grok_models.clone(),
+                    e.codex.clone(),
+                    e.claude.clone(),
+                    e.pi_seen.clone(),
+                )
+            })
             .unwrap_or_default();
         map.insert(
             path.to_path_buf(),
@@ -845,6 +918,8 @@ fn remember_file(
                 prefix_tail,
                 grok_models,
                 codex,
+                claude,
+                pi_seen,
             },
         );
     }
@@ -943,35 +1018,45 @@ fn file_days_inner(
         // Replay a bounded window of the cached prefix into a discard
         // FileData so the caller's closure (Codex totals, Claude mids,
         // Grok pid→model, Pi seen ids) is warm before the real tail.
-        let Some(warm_pos) = seek_warmup(&mut reader, from) else {
-            PROBES.with(|p| {
-                p.borrow_mut().take();
-            });
-            return file_days_full(path, parse, mtime, size, gen);
-        };
-        if warm_pos < from {
-            let mut discard = FileData::default();
-            let (warm_ok, _) =
-                parse_jsonl_reader(&mut reader, parse, &mut discard, warm_pos, Some(from));
-            if !warm_ok || reader.seek(SeekFrom::Start(from)).is_err() {
-                PROBES.with(|p| {
-                    p.borrow_mut().take();
-                });
-                return file_days_full(path, parse, mtime, size, gen);
+        // A failed warmup mutates that closure — do not full-rescan
+        // with it or prefix events look like duplicates and vanish.
+        match seek_warmup(&mut reader, from) {
+            Some(warm_pos) if warm_pos < from => {
+                let mut discard = FileData::default();
+                let (warm_ok, _) =
+                    parse_jsonl_reader(&mut reader, parse, &mut discard, warm_pos, Some(from));
+                if !warm_ok || reader.seek(SeekFrom::Start(from)).is_err() {
+                    if reader.seek(SeekFrom::Start(from)).is_err() {
+                        PROBES.with(|p| {
+                            p.borrow_mut().take();
+                        });
+                        return data;
+                    }
+                }
+            }
+            Some(_) => {}
+            None => {
+                if reader.seek(SeekFrom::Start(from)).is_err() {
+                    PROBES.with(|p| {
+                        p.borrow_mut().take();
+                    });
+                    return data;
+                }
             }
         }
     } else if from > 0 && reader.seek(SeekFrom::Start(from)).is_err() {
+        // No warmup ran, but the closure may still hold a restored
+        // checkpoint (Codex/Grok/Claude/Pi). Keep the prefix.
         PROBES.with(|p| {
             p.borrow_mut().take();
         });
-        return file_days_full(path, parse, mtime, size, gen);
+        return data;
     }
     let (read_ok, last_complete) = parse_jsonl_reader(&mut reader, parse, &mut data, from, None);
     let probes = PROBES.with(|p| p.borrow_mut().take()).unwrap_or_default();
     if !read_ok {
-        if from > 0 {
-            return file_days_full(path, parse, mtime, size, gen);
-        }
+        // Prefix `data` is already correct. A full retry would reuse
+        // warmed/restored parser state and drop those events.
         return data;
     }
 
@@ -979,6 +1064,7 @@ fn file_days_inner(
     data
 }
 
+#[allow(dead_code)]
 fn file_days_full(
     path: &Path,
     parse: &mut dyn FnMut(&str, &mut FileData),
@@ -1052,8 +1138,9 @@ fn seek_warmup(reader: &mut BufReader<fs::File>, from: u64) -> Option<u64> {
 }
 
 /// Returns `(ok, last_complete_pos)`. `last_complete_pos` is the offset
-/// after the last newline we consumed — an unfinished last line is not
-/// parsed and not cached, so the next scan re-reads it once complete.
+/// after the last record we consumed. A finished last line, or a
+/// leftover that is already valid JSON (closed file, no trailing
+/// newline), advances the cache. A partial write does not.
 fn parse_jsonl_reader(
     reader: &mut impl BufRead,
     parse: &mut dyn FnMut(&str, &mut FileData),
@@ -1100,8 +1187,21 @@ fn parse_jsonl_reader(
                         buf.pop();
                     }
                 } else {
-                    // Incomplete last line — leave it for the next scan.
-                    return (true, last_complete);
+                    // No newline. A closed log may still end on a
+                    // complete JSON value — count it and cache through
+                    // EOF. A partial write fails serde and stays
+                    // uncached so the next scan retries.
+                    match String::from_utf8(buf) {
+                        Ok(line)
+                            if !line.is_empty()
+                                && serde_json::from_str::<Value>(&line).is_ok() =>
+                        {
+                            parse(&line, data);
+                            return (true, pos);
+                        }
+                        Ok(_) => return (true, last_complete),
+                        Err(_) => return (true, last_complete),
+                    }
                 }
                 match String::from_utf8(buf) {
                     Ok(line) => {
@@ -1296,8 +1396,9 @@ fn claude_cost(model: &str, t: &ClaudeTokens, ts: DateTime<Utc>) -> Option<f64> 
     Some(cost_for(model, &price, &u, 200_000.0, ts) * mult)
 }
 
-/// Per-file dedup state for the Claude scanner.
-#[derive(Default)]
+/// Per-file dedup state for the Claude scanner. Persisted so a tail
+/// can drop a replay whose original sits older than the 1 MB warmup.
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 struct ClaudeFileState {
     /// (message id, request id) pairs already counted.
     seen: HashSet<String>,
@@ -1481,9 +1582,7 @@ fn claude(extra: FileData) -> (ProviderSpend, FileData, FileData, FileData) {
     recent_jsonl_files(&root, &mut files);
     let mut all = FileData::default();
     for file in files {
-        let mut state = ClaudeFileState::default();
-        let data = file_days_stateful(&file, &mut |line, data| claude_line(&mut state, line, data));
-        merge_data(&mut all, data);
+        merge_data(&mut all, claude_file(&file));
     }
     // Usage from other scanners that belongs on this card (pi sessions)
     // driving a Claude account) joins before the splits below, so it gets
@@ -1516,9 +1615,7 @@ fn claude_extra_accounts() -> (Vec<ProviderSpend>, FileData, FileData, FileData)
         recent_jsonl_files(&root, &mut files);
         let mut all = FileData::default();
         for file in files {
-            let mut state = ClaudeFileState::default();
-            let data = file_days_stateful(&file, &mut |line, data| claude_line(&mut state, line, data));
-            merge_data(&mut all, data);
+            merge_data(&mut all, claude_file(&file));
         }
         merge_data(&mut minimax_extra, split_models(&mut all, "MiniMax"));
         merge_data(&mut qwen_extra, split_models(&mut all, "qwen"));
@@ -1526,6 +1623,27 @@ fn claude_extra_accounts() -> (Vec<ProviderSpend>, FileData, FileData, FileData)
         spends.push(build_spend(acct.id, acct.name, all));
     }
     (spends, minimax_extra, qwen_extra, kimi_extra)
+}
+
+/// One Claude session file. A restored checkpoint skips the 1 MB
+/// warmup; an older cache without one still warms. Exact hits must
+/// not `store_*` a Default and wipe a good checkpoint.
+fn claude_file(file: &Path) -> FileData {
+    if cache_unchanged(file) {
+        return file_days(file, &mut |_, _| {});
+    }
+    let tail = will_resume_tail(file);
+    let ckpt = if tail { load_claude_ckpt(file) } else { None };
+    let mut state = ckpt.clone().unwrap_or_default();
+    let data = if tail && ckpt.as_ref().is_some_and(|s| !s.seen.is_empty()) {
+        file_days(file, &mut |line, data| claude_line(&mut state, line, data))
+    } else if tail {
+        file_days_stateful(file, &mut |line, data| claude_line(&mut state, line, data))
+    } else {
+        file_days(file, &mut |line, data| claude_line(&mut state, line, data))
+    };
+    store_claude_ckpt(file, state);
+    data
 }
 
 /// MiniMax spend: the Agent CLI's local token_usage store (its own cost_usd
@@ -2214,8 +2332,20 @@ fn pi() -> (FileData, FileData) {
     recent_jsonl_files(&root, &mut files);
     let mut all = FileData::default();
     for file in files {
-        let mut seen = HashSet::new();
-        let data = file_days_stateful(&file, &mut |line, data| pi_line(&mut seen, line, data));
+        if cache_unchanged(&file) {
+            merge_data(&mut all, file_days(&file, &mut |_, _| {}));
+            continue;
+        }
+        let tail = will_resume_tail(&file);
+        let mut seen = if tail { load_pi_seen(&file) } else { HashSet::new() };
+        let data = if tail && !seen.is_empty() {
+            file_days(&file, &mut |line, data| pi_line(&mut seen, line, data))
+        } else if tail {
+            file_days_stateful(&file, &mut |line, data| pi_line(&mut seen, line, data))
+        } else {
+            file_days(&file, &mut |line, data| pi_line(&mut seen, line, data))
+        };
+        store_pi_seen(&file, seen);
         merge_data(&mut all, data);
     }
     let claude = take_tagged(&mut all, "claude");
@@ -2938,6 +3068,11 @@ mod tests {
                 prefix_tail: b"abcd".to_vec(),
                 grok_models: vec![(42, "grok-4".into())],
                 codex: None,
+                claude: Some(ClaudeFileState {
+                    seen: ["msg_1:req_1".into()].into_iter().collect(),
+                    seen_mids: [("msg_1".into(), false)].into_iter().collect(),
+                }),
+                pi_seen: vec!["pi-msg-1".into()],
             }],
         };
         let json = serde_json::to_string(&doc).unwrap();
@@ -2955,6 +3090,11 @@ mod tests {
         assert_eq!(a.prefix_tail, b.prefix_tail);
         assert_eq!(a.grok_models, b.grok_models);
         assert_eq!(a.codex.is_none(), b.codex.is_none());
+        assert_eq!(
+            a.claude.as_ref().map(|s| s.seen.len()),
+            b.claude.as_ref().map(|s| s.seen.len())
+        );
+        assert_eq!(a.pi_seen, b.pi_seen);
     }
 
     /// A v2 cache (no probes/corrections fields) must not load as v3 —
@@ -3182,6 +3322,97 @@ mod tests {
         assert!(
             (tokens_sum(&second) - 5_000.0).abs() < 0.001,
             "completed line must be parsed on the next scan, got {}",
+            tokens_sum(&second)
+        );
+    }
+
+    #[test]
+    fn file_days_counts_a_final_record_without_newline() {
+        let dir = std::env::temp_dir().join(format!("pane-jsonl-final-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("final.jsonl");
+        let line = |tokens: f64| {
+            json!({
+                "type": "usage.record",
+                "model": "kimi-code/k3",
+                "usage": {"inputOther": tokens, "output": 0.0},
+                "usageScope": "turn",
+                "time": 1_784_208_630_652i64
+            })
+            .to_string()
+        };
+        let first_line = line(1_000.0);
+        let second_line = line(4_000.0);
+        fs::write(&path, &first_line).unwrap();
+        let first = file_days(&path, &mut |line, data| kimi_line(line, data));
+        assert!(
+            (tokens_sum(&first) - 1_000.0).abs() < 0.001,
+            "closed file without a trailing newline must still count, got {}",
+            tokens_sum(&first)
+        );
+        let cached_size = cache().lock().unwrap().get(&path).map(|e| e.size).unwrap_or(0);
+        assert_eq!(cached_size, first_line.len() as u64);
+
+        let again = file_days(&path, &mut |line, data| kimi_line(line, data));
+        assert!(
+            (tokens_sum(&again) - 1_000.0).abs() < 0.001,
+            "unchanged closed file must not double-count, got {}",
+            tokens_sum(&again)
+        );
+
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        use std::io::Write;
+        write!(f, "\n{second_line}\n").unwrap();
+        drop(f);
+        let second = file_days(&path, &mut |line, data| kimi_line(line, data));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            (tokens_sum(&second) - 5_000.0).abs() < 0.001,
+            "append after a no-newline finale must add only the new record, got {}",
+            tokens_sum(&second)
+        );
+    }
+
+    #[test]
+    fn claude_checkpoint_drops_a_replay_older_than_warmup() {
+        let dir = std::env::temp_dir().join(format!("pane-claude-ckpt-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("session.jsonl");
+        let line = |mid: &str, rid: &str, tokens: f64| {
+            json!({
+                "type": "assistant",
+                "timestamp": "2026-07-10T10:00:00Z",
+                "requestId": rid,
+                "message": {
+                    "id": mid,
+                    "model": "claude-haiku-4-5",
+                    "usage": {"input_tokens": tokens, "output_tokens": 0.0}
+                }
+            })
+            .to_string()
+        };
+        fs::write(&path, format!("{}\n", line("msg_1", "req_1", 100.0))).unwrap();
+        let first = claude_file(&path);
+        assert!((tokens_sum(&first) - 100.0).abs() < 0.001);
+        assert!(
+            cache()
+                .lock()
+                .unwrap()
+                .get(&path)
+                .and_then(|e| e.claude.as_ref())
+                .is_some_and(|s| s.seen.contains("msg_1:req_1")),
+            "claude checkpoint must persist the counted id"
+        );
+
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        use std::io::Write;
+        write!(f, "{}\n", line("msg_1", "req_1", 100.0)).unwrap();
+        drop(f);
+        let second = claude_file(&path);
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            (tokens_sum(&second) - 100.0).abs() < 0.001,
+            "replay of a checkpointed id must not count twice, got {}",
             tokens_sum(&second)
         );
     }

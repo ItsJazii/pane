@@ -628,7 +628,9 @@ pub fn collect_cost_events_in(dir: &Path) -> Vec<(f64, f64, f64, String, String)
     if let Ok(cache) = CACHE.lock() {
         if let Some((_, d, w, rows)) = cache.iter().find(|(p, _, _, _)| p == &db_path) {
             if *d == db_stamp && *w == wal_stamp {
-                return rows.clone();
+                // Stamp can sit still for days. Drop rows that have
+                // aged out of the 31-day window without a db re-read.
+                return rows_in_spend_window(rows);
             }
         }
     }
@@ -641,7 +643,7 @@ pub fn collect_cost_events_in(dir: &Path) -> Vec<(f64, f64, f64, String, String)
             // last good rows (if any) and retry on the next refresh.
             if let Ok(cache) = CACHE.lock() {
                 if let Some((_, _, _, rows)) = cache.iter().find(|(p, _, _, _)| p == &db_path) {
-                    return rows.clone();
+                    return rows_in_spend_window(rows);
                 }
             }
             return Vec::new();
@@ -655,6 +657,21 @@ pub fn collect_cost_events_in(dir: &Path) -> Vec<(f64, f64, f64, String, String)
         }
     }
     rows
+}
+
+fn rows_in_spend_window(rows: &[(f64, f64, f64, String, String)]) -> Vec<(f64, f64, f64, String, String)> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let cutoff_ms = (now_ms - 31 * 86_400 * 1_000) as f64;
+    rows.iter()
+        .filter(|(ts, _, _, _, _)| {
+            if *ts > 1_000_000_000_000.0 {
+                *ts >= cutoff_ms
+            } else {
+                *ts >= cutoff_ms / 1000.0
+            }
+        })
+        .cloned()
+        .collect()
 }
 
 /// Spend only needs ~31 days. The quota card still uses `read_messages`
@@ -840,6 +857,20 @@ mod tests {
 
     fn ms(iso: &str) -> f64 {
         chrono::DateTime::parse_from_rfc3339(iso).unwrap().timestamp_millis() as f64
+    }
+
+    #[test]
+    fn stamp_cache_drops_rows_past_the_cutoff() {
+        let now = chrono::Utc::now().timestamp_millis() as f64;
+        let old = now - 40.0 * 86_400_000.0;
+        let fresh = now - 2.0 * 86_400_000.0;
+        let rows = vec![
+            (old, 1.0, 10.0, "m".into(), "p".into()),
+            (fresh, 2.0, 20.0, "m".into(), "p".into()),
+        ];
+        let kept = rows_in_spend_window(&rows);
+        assert_eq!(kept.len(), 1);
+        assert!((kept[0].1 - 2.0).abs() < 1e-9);
     }
 
     #[test]
