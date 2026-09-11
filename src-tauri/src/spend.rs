@@ -134,6 +134,12 @@ struct FileEntry {
     gen: u64,
     probes: Vec<PriceProbe>,
     data: FileData,
+    /// First / last bytes of the cached prefix — a larger rewrite that
+    /// is not an append fails this check and full-parses. Empty means
+    /// an older cache entry; those still tail so a busy machine does
+    /// not regress. The tail alone is often a stable JSON suffix.
+    prefix_head: Vec<u8>,
+    prefix_tail: Vec<u8>,
 }
 
 /// One pricing question a file's parse asked, together with the answer it
@@ -286,6 +292,10 @@ struct PersistEntry {
     /// they can only load through the exact-stamp fast path.
     #[serde(default)]
     probes: Vec<PriceProbe>,
+    #[serde(default)]
+    prefix_head: Vec<u8>,
+    #[serde(default)]
+    prefix_tail: Vec<u8>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -337,7 +347,18 @@ fn load_persisted_cache() {
             }
             let mtime = SystemTime::UNIX_EPOCH
                 + std::time::Duration::new(e.mtime_secs, e.mtime_nanos);
-            map.insert(e.path, FileEntry { mtime, size: e.size, gen, probes: e.probes, data });
+            map.insert(
+                e.path,
+                FileEntry {
+                    mtime,
+                    size: e.size,
+                    gen,
+                    probes: e.probes,
+                    data,
+                    prefix_head: e.prefix_head,
+                    prefix_tail: e.prefix_tail,
+                },
+            );
         }
     });
 }
@@ -375,6 +396,8 @@ fn save_persisted_cache() {
                     .collect(),
                 unpriced: e.data.unpriced.iter().map(|(m, c)| (m.clone(), *c)).collect(),
                 probes: e.probes.clone(),
+                prefix_head: e.prefix_head.clone(),
+                prefix_tail: e.prefix_tail.clone(),
             }
         })
         .collect();
@@ -518,6 +541,16 @@ const MAX_LOG_FILE_BYTES: u64 = 512 * 1024 * 1024;
 /// remainder read-and-discarded, never kept. Legit Claude/Codex lines
 /// reach ~1 MB, so 4 MiB loses nothing real.
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
+/// First / last bytes of a cached prefix — a larger rewrite that is
+/// not an append fails this check. Empty (older cache) still tails.
+/// The tail alone is often a stable JSON suffix (`"usageScope":…`);
+/// 64 bytes at the start usually includes the timestamp.
+const PREFIX_HEAD: usize = 64;
+const PREFIX_TAIL: usize = 32;
+/// Re-parse this much of the cached prefix into a discard `FileData`
+/// so Codex/Claude/Grok/Pi closures keep their per-file state. 1 MB
+/// is tiny next to a 200 MB session.
+const TAIL_WARMUP: u64 = 1024 * 1024;
 
 /// Report a log skipped for exceeding MAX_LOG_FILE_BYTES.
 fn oversized_log(path: &Path, size: u64) {
@@ -632,22 +665,100 @@ fn recent_jsonl_files(root: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// A later write that only appended bytes. Session logs are JSONL; a
-/// rewrite (shrink or same-size mtime bump) must full-parse.
-fn cached_prefix<'a>(
-    map: &'a mut HashMap<PathBuf, FileEntry>,
+/// rewrite (shrink or same-size mtime bump) must full-parse. A larger
+/// rewrite that keeps growing past the cached size is caught by the
+/// prefix fingerprint — empty fingerprints (older cache) still tail.
+fn cached_prefix(
+    map: &HashMap<PathBuf, FileEntry>,
     path: &Path,
     size: u64,
     gen: u64,
-) -> Option<(&'a FileData, &'a [PriceProbe], u64)> {
+) -> Option<(FileData, Vec<PriceProbe>, u64)> {
     let entry = map.get(path)?;
     if size <= entry.size {
         return None;
     }
-    if entry.gen == gen || probes_still_vouch(&entry.probes, &entry.data) {
-        Some((&entry.data, &entry.probes, entry.size))
-    } else {
-        None
+    if !(entry.gen == gen || probes_still_vouch(&entry.probes, &entry.data)) {
+        return None;
     }
+    if !prefix_still_matches(path, entry.size, &entry.prefix_head, &entry.prefix_tail) {
+        return None;
+    }
+    Some((entry.data.clone(), entry.probes.clone(), entry.size))
+}
+
+fn read_prefix_slice(path: &Path, start: u64, n: usize) -> Vec<u8> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let Ok(mut f) = fs::File::open(path) else {
+        return Vec::new();
+    };
+    if f.seek(SeekFrom::Start(start)).is_err() {
+        return Vec::new();
+    }
+    let mut buf = vec![0u8; n];
+    if f.read_exact(&mut buf).is_err() {
+        return Vec::new();
+    }
+    buf
+}
+
+fn read_prefix_head(path: &Path, end: u64) -> Vec<u8> {
+    if end == 0 {
+        return Vec::new();
+    }
+    read_prefix_slice(path, 0, PREFIX_HEAD.min(end as usize))
+}
+
+fn read_prefix_tail(path: &Path, end: u64) -> Vec<u8> {
+    if end == 0 {
+        return Vec::new();
+    }
+    let n = PREFIX_TAIL.min(end as usize);
+    read_prefix_slice(path, end - n as u64, n)
+}
+
+fn prefix_still_matches(path: &Path, end: u64, head: &[u8], tail: &[u8]) -> bool {
+    // Older cache: both empty — still tail so a busy machine does not
+    // regress to a full re-read.
+    if head.is_empty() && tail.is_empty() {
+        return true;
+    }
+    if !head.is_empty() && read_prefix_head(path, end) != head {
+        return false;
+    }
+    if !tail.is_empty() && read_prefix_tail(path, end) != tail {
+        return false;
+    }
+    true
+}
+
+fn remember_file(
+    path: &Path,
+    mtime: SystemTime,
+    cached_size: u64,
+    gen: u64,
+    probes: Vec<PriceProbe>,
+    data: FileData,
+) {
+    let prefix_head = read_prefix_head(path, cached_size);
+    let prefix_tail = read_prefix_tail(path, cached_size);
+    if let Ok(mut map) = cache().lock() {
+        map.insert(
+            path.to_path_buf(),
+            FileEntry {
+                mtime,
+                size: cached_size,
+                gen,
+                probes,
+                data,
+                prefix_head,
+                prefix_tail,
+            },
+        );
+    }
+    CACHE_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Parses one file into per-day totals, via the cache when unchanged.
@@ -690,10 +801,7 @@ fn file_days(path: &Path, parse: &mut dyn FnMut(&str, &mut FileData)) -> FileDat
     let resume = cache()
         .lock()
         .ok()
-        .and_then(|mut map| {
-            cached_prefix(&mut map, path, size, gen)
-                .map(|(data, probes, from)| (data.clone(), probes.to_vec(), from))
-        });
+        .and_then(|map| cached_prefix(&map, path, size, gen));
 
     let mut data = resume
         .as_ref()
@@ -719,13 +827,29 @@ fn file_days(path: &Path, parse: &mut dyn FnMut(&str, &mut FileData)) -> FileDat
         }
     };
     let mut reader = BufReader::new(file);
-    if from > 0 && reader.seek(SeekFrom::Start(from)).is_err() {
-        PROBES.with(|p| {
-            p.borrow_mut().take();
-        });
-        return file_days_full(path, parse, mtime, size, gen);
+    if from > 0 {
+        // Replay a bounded window of the cached prefix into a discard
+        // FileData so the caller's closure (Codex totals, Claude mids,
+        // Grok pid→model, Pi seen ids) is warm before the real tail.
+        let Some(warm_pos) = seek_warmup(&mut reader, from) else {
+            PROBES.with(|p| {
+                p.borrow_mut().take();
+            });
+            return file_days_full(path, parse, mtime, size, gen);
+        };
+        if warm_pos < from {
+            let mut discard = FileData::default();
+            let (warm_ok, _) =
+                parse_jsonl_reader(&mut reader, parse, &mut discard, warm_pos, Some(from));
+            if !warm_ok || reader.seek(SeekFrom::Start(from)).is_err() {
+                PROBES.with(|p| {
+                    p.borrow_mut().take();
+                });
+                return file_days_full(path, parse, mtime, size, gen);
+            }
+        }
     }
-    let read_ok = parse_jsonl_reader(&mut reader, parse, &mut data);
+    let (read_ok, last_complete) = parse_jsonl_reader(&mut reader, parse, &mut data, from, None);
     let probes = PROBES.with(|p| p.borrow_mut().take()).unwrap_or_default();
     if !read_ok {
         if from > 0 {
@@ -734,13 +858,7 @@ fn file_days(path: &Path, parse: &mut dyn FnMut(&str, &mut FileData)) -> FileDat
         return data;
     }
 
-    if let Ok(mut map) = cache().lock() {
-        map.insert(
-            path.to_path_buf(),
-            FileEntry { mtime, size, gen, probes, data: data.clone() },
-        );
-    }
-    CACHE_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
+    remember_file(path, mtime, last_complete, gen, probes, data.clone());
     data
 }
 
@@ -748,7 +866,7 @@ fn file_days_full(
     path: &Path,
     parse: &mut dyn FnMut(&str, &mut FileData),
     mtime: SystemTime,
-    size: u64,
+    _size: u64,
     gen: u64,
 ) -> FileData {
     let mut data = FileData::default();
@@ -760,27 +878,50 @@ fn file_days_full(
         return FileData::default();
     };
     let mut reader = BufReader::new(file);
-    let read_ok = parse_jsonl_reader(&mut reader, parse, &mut data);
+    let (read_ok, last_complete) = parse_jsonl_reader(&mut reader, parse, &mut data, 0, None);
     let probes = PROBES.with(|p| p.borrow_mut().take()).unwrap_or_default();
     if !read_ok {
         return data;
     }
-    if let Ok(mut map) = cache().lock() {
-        map.insert(
-            path.to_path_buf(),
-            FileEntry { mtime, size, gen, probes, data: data.clone() },
-        );
-    }
-    CACHE_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
+    remember_file(path, mtime, last_complete, gen, probes, data.clone());
     data
 }
 
+/// Seek to the 1 MB warmup window just before `from` and skip a
+/// partial first line. Returns the byte position the next parse starts
+/// at, or `from` if a giant line overshot the cached boundary.
+fn seek_warmup(reader: &mut BufReader<fs::File>, from: u64) -> Option<u64> {
+    let warm_at = from.saturating_sub(TAIL_WARMUP);
+    reader.seek(SeekFrom::Start(warm_at)).ok()?;
+    if warm_at == 0 {
+        return Some(0);
+    }
+    let (skipped, _) = skip_line_rest(reader).ok()?;
+    let pos = warm_at + skipped;
+    if pos > from {
+        reader.seek(SeekFrom::Start(from)).ok()?;
+        return Some(from);
+    }
+    Some(pos)
+}
+
+/// Returns `(ok, last_complete_pos)`. `last_complete_pos` is the offset
+/// after the last newline we consumed — an unfinished last line is not
+/// parsed and not cached, so the next scan re-reads it once complete.
 fn parse_jsonl_reader(
     reader: &mut impl BufRead,
     parse: &mut dyn FnMut(&str, &mut FileData),
     data: &mut FileData,
-) -> bool {
+    mut pos: u64,
+    stop_before: Option<u64>,
+) -> (bool, u64) {
+    let mut last_complete = pos;
     loop {
+        if let Some(limit) = stop_before {
+            if pos >= limit {
+                return (true, last_complete.min(limit));
+            }
+        }
         // One physical line, storing at most MAX_LINE_BYTES (+1 byte to
         // detect overflow) — a hostile log must not make a single line
         // allocate without bound.
@@ -790,51 +931,67 @@ fn parse_jsonl_reader(
             .take(MAX_LINE_BYTES as u64 + 1)
             .read_until(b'\n', &mut buf);
         match read {
-            Ok(0) => return true, // EOF
-            Ok(_) if buf.len() > MAX_LINE_BYTES && !buf.ends_with(b"\n") => {
+            Ok(0) => return (true, last_complete),
+            Ok(n) if buf.len() > MAX_LINE_BYTES && !buf.ends_with(b"\n") => {
+                pos += n as u64;
                 // Overlong line: discard the rest of it without storing.
-                if skip_line_rest(reader).is_err() {
-                    return false;
+                match skip_line_rest(reader) {
+                    Ok((skipped, found_nl)) => {
+                        pos += skipped;
+                        if found_nl {
+                            last_complete = pos;
+                        }
+                    }
+                    Err(_) => return (false, last_complete),
                 }
             }
-            Ok(_) => {
-                // Same terminator handling as BufRead::lines().
-                if buf.ends_with(b"\n") {
+            Ok(n) => {
+                pos += n as u64;
+                let had_nl = buf.ends_with(b"\n");
+                if had_nl {
                     buf.pop();
                     if buf.ends_with(b"\r") {
                         buf.pop();
                     }
+                } else {
+                    // Incomplete last line — leave it for the next scan.
+                    return (true, last_complete);
                 }
                 match String::from_utf8(buf) {
-                    Ok(line) => parse(&line, data),
+                    Ok(line) => {
+                        parse(&line, data);
+                        last_complete = pos;
+                    }
                     Err(_) => {
                         // lines() treated invalid UTF-8 as a read error;
                         // keep the file out of the cache the same way.
-                        return false;
+                        return (false, last_complete);
                     }
                 }
             }
-            Err(_) => return false,
+            Err(_) => return (false, last_complete),
         }
     }
 }
 
 /// Consume through the next '\n' (or EOF) using only the reader's own
-/// buffer — the unread tail of an overlong line.
-fn skip_line_rest(reader: &mut impl BufRead) -> std::io::Result<()> {
+/// buffer. Returns `(bytes_skipped, found_newline)`.
+fn skip_line_rest(reader: &mut impl BufRead) -> std::io::Result<(u64, bool)> {
+    let mut n = 0u64;
     loop {
         let buf = reader.fill_buf()?;
         if buf.is_empty() {
-            return Ok(());
+            return Ok((n, false));
         }
         match buf.iter().position(|&b| b == b'\n') {
             Some(i) => {
                 reader.consume(i + 1);
-                return Ok(());
+                return Ok((n + i as u64 + 1, true));
             }
             None => {
-                let n = buf.len();
-                reader.consume(n);
+                let k = buf.len();
+                reader.consume(k);
+                n += k as u64;
             }
         }
     }
@@ -2570,6 +2727,8 @@ mod tests {
                     PriceProbe::Lookup { key: "mystery-model".into(), price: None },
                     PriceProbe::FastMult { key: "claude-fable-5".into(), mult: 2.0 },
                 ],
+                prefix_head: b"head".to_vec(),
+                prefix_tail: b"abcd".to_vec(),
             }],
         };
         let json = serde_json::to_string(&doc).unwrap();
@@ -2583,6 +2742,8 @@ mod tests {
         assert_eq!(a.days, b.days);
         assert_eq!(a.unpriced, b.unpriced);
         assert_eq!(a.probes, b.probes);
+        assert_eq!(a.prefix_head, b.prefix_head);
+        assert_eq!(a.prefix_tail, b.prefix_tail);
     }
 
     /// A v2 cache (no probes/corrections fields) must not load as v3 —
@@ -2655,7 +2816,7 @@ mod tests {
             "usage": {"inputOther": 1000.0, "output": 1000.0},
             "usageScope": "turn", "time": 1784208630652i64})
         .to_string();
-        fs::write(&path, line).unwrap();
+        fs::write(&path, format!("{line}\n")).unwrap();
 
         let data = file_days(&path, &mut |line, data| kimi_line(line, data));
         assert!(!data.days.is_empty());
@@ -2729,6 +2890,167 @@ mod tests {
         assert!(
             (tokens_sum(&second) - 5_000.0).abs() < 0.001,
             "appended line must add to the cached prefix, got {}",
+            tokens_sum(&second)
+        );
+    }
+
+    #[test]
+    fn file_days_warms_codex_state_on_the_tail() {
+        let dir = std::env::temp_dir().join(format!("pane-codex-warm-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("rollout.jsonl");
+        let head = vec![
+            json!({"timestamp": "2026-09-10T10:00:00Z", "type": "turn_context",
+                   "payload": {"model": "gpt-5.6-terra"}})
+            .to_string(),
+            token_count_line("2026-09-10T10:00:01Z", Some((1_000.0, 100.0)), (1_000.0, 100.0)),
+        ];
+        fs::write(&path, format!("{}\n{}\n", head[0], head[1])).unwrap();
+        let mut st = CodexFileState::default();
+        let first = file_days(&path, &mut |line, data| codex_line(&mut st, line, data));
+        assert_eq!(tokens_sum(&first), 1_100.0);
+
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        use std::io::Write;
+        writeln!(
+            f,
+            "{}",
+            token_count_line("2026-09-10T10:00:09Z", None, (1_500.0, 150.0))
+        )
+        .unwrap();
+        drop(f);
+
+        // Production creates a fresh closure state per scan — warmup must
+        // refill prev_totals so the cumulative snapshot is a delta.
+        let mut st = CodexFileState::default();
+        let second = file_days(&path, &mut |line, data| codex_line(&mut st, line, data));
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(
+            tokens_sum(&second),
+            1_650.0,
+            "tail without warmup would add the full 1650 snapshot (2750)"
+        );
+    }
+
+    #[test]
+    fn file_days_does_not_skip_a_completed_partial_line() {
+        let dir = std::env::temp_dir().join(format!("pane-jsonl-partial-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("partial.jsonl");
+        let line = |tokens: f64| {
+            json!({
+                "type": "usage.record",
+                "model": "kimi-code/k3",
+                "usage": {"inputOther": tokens, "output": 0.0},
+                "usageScope": "turn",
+                "time": 1_784_208_630_652i64
+            })
+            .to_string()
+        };
+        let first_line = line(1_000.0);
+        let second_line = line(4_000.0);
+        fs::write(&path, format!("{first_line}\n{}", &second_line[..12])).unwrap();
+        let first = file_days(&path, &mut |line, data| kimi_line(line, data));
+        assert!((tokens_sum(&first) - 1_000.0).abs() < 0.001);
+        let cached_size = cache().lock().unwrap().get(&path).map(|e| e.size).unwrap_or(0);
+        assert_eq!(cached_size, first_line.len() as u64 + 1);
+
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        use std::io::Write;
+        write!(f, "{}\n", &second_line[12..]).unwrap();
+        drop(f);
+
+        let second = file_days(&path, &mut |line, data| kimi_line(line, data));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            (tokens_sum(&second) - 5_000.0).abs() < 0.001,
+            "completed line must be parsed on the next scan, got {}",
+            tokens_sum(&second)
+        );
+    }
+
+    #[test]
+    fn file_days_full_parses_a_larger_rewrite() {
+        let dir = std::env::temp_dir().join(format!("pane-jsonl-rewrite-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("rewrite.jsonl");
+        let line = |tokens: f64, time: i64| {
+            json!({
+                "type": "usage.record",
+                "model": "kimi-code/k3",
+                "usage": {"inputOther": tokens, "output": 0.0},
+                "usageScope": "turn",
+                "time": time
+            })
+            .to_string()
+        };
+        fs::write(&path, format!("{}\n", line(1_000.0, 1_784_208_630_652))).unwrap();
+        let first = file_days(&path, &mut |line, data| kimi_line(line, data));
+        assert!((tokens_sum(&first) - 1_000.0).abs() < 0.001);
+        assert!(
+            cache()
+                .lock()
+                .unwrap()
+                .get(&path)
+                .is_some_and(|e| !e.prefix_head.is_empty()),
+            "prefix fingerprint must be stored"
+        );
+
+        // Same-length first line, different clock — the start fingerprint
+        // includes the timestamp, so this is not treated as an append.
+        fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                line(2_000.0, 1_784_208_999_999),
+                line(3_000.0, 1_784_208_999_999)
+            ),
+        )
+        .unwrap();
+        let second = file_days(&path, &mut |line, data| kimi_line(line, data));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            (tokens_sum(&second) - 5_000.0).abs() < 0.001,
+            "larger rewrite must full-parse, got {}",
+            tokens_sum(&second)
+        );
+    }
+
+    #[test]
+    fn empty_prefix_fingerprint_still_tails() {
+        let dir = std::env::temp_dir().join(format!("pane-jsonl-oldfp-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("grow.jsonl");
+        let line = |tokens: f64| {
+            json!({
+                "type": "usage.record",
+                "model": "kimi-code/k3",
+                "usage": {"inputOther": tokens, "output": 0.0},
+                "usageScope": "turn",
+                "time": 1_784_208_630_652i64
+            })
+            .to_string()
+        };
+        fs::write(&path, format!("{}\n", line(1_000.0))).unwrap();
+        let first = file_days(&path, &mut |line, data| kimi_line(line, data));
+        assert!((tokens_sum(&first) - 1_000.0).abs() < 0.001);
+        if let Ok(mut map) = cache().lock() {
+            if let Some(e) = map.get_mut(&path) {
+                e.prefix_head.clear();
+                e.prefix_tail.clear();
+            }
+        }
+
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        use std::io::Write;
+        write!(f, "{}\n", line(4_000.0)).unwrap();
+        drop(f);
+
+        let second = file_days(&path, &mut |line, data| kimi_line(line, data));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            (tokens_sum(&second) - 5_000.0).abs() < 0.001,
+            "older cache with empty fingerprint must still tail, got {}",
             tokens_sum(&second)
         );
     }

@@ -633,7 +633,20 @@ pub fn collect_cost_events_in(dir: &Path) -> Vec<(f64, f64, f64, String, String)
         }
     }
 
-    let rows = with_live_db(dir, |db| Ok(read_recent_cost_events(db)?)).unwrap_or_default();
+    let rows = match with_live_db(dir, |db| read_recent_cost_events(db)) {
+        Ok(rows) => rows,
+        Err(_) => {
+            // A failed read must not cache empty — the next stamp hit
+            // would hide spend until the db/WAL changes again. Keep the
+            // last good rows (if any) and retry on the next refresh.
+            if let Ok(cache) = CACHE.lock() {
+                if let Some((_, _, _, rows)) = cache.iter().find(|(p, _, _, _)| p == &db_path) {
+                    return rows.clone();
+                }
+            }
+            return Vec::new();
+        }
+    };
     if let Ok(mut cache) = CACHE.lock() {
         if let Some(slot) = cache.iter_mut().find(|(p, _, _, _)| p == &db_path) {
             *slot = (db_path, db_stamp, wal_stamp, rows.clone());

@@ -2471,6 +2471,9 @@ async fn fetch_spend() -> Vec<spend::ProviderSpend> {
     if let Some(csv) = cursor_csv {
         let cursor = spend::cursor_from_csv(&csv);
         if spend::provider_spend_has_data(&cursor) {
+            if cursor.unpriced > 0 {
+                pricing::note_unpriced();
+            }
             result.push(cursor);
         }
     }

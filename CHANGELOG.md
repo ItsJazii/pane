@@ -21,6 +21,11 @@
   stamp, Claude/Codex/OpenCode/Devin run in parallel, and Cursor's CSV
   export no longer blocks the local walk. The popover used to sit on
   "Scanning session logs…" for minutes on a busy Codex/OpenCode machine.
+  Tail scans warm parser state from the last 1 MB of the cached prefix
+  (Codex cumulative totals, Claude/Grok/Pi), cache only complete JSONL
+  lines, and full-parse when a larger rewrite fails a 64+32-byte prefix
+  check. A failed OpenCode read keeps the last good rows instead of
+  caching empty. Cursor-only unknown models still flag the catalog.
 - **The local HTTP API no longer stamps restored snapshots as fresh.**
   `fetchedAt` is the last successful fetch, and every provider now
   reports `status` / `stale`. A failed refresh during the 3-minute
