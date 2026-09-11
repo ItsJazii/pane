@@ -48,29 +48,33 @@ async fn fetch(bases: &[&str]) -> Result<Snapshot, String> {
 }
 
 /// Why a site refused, split so the *final* error can prefer a real
-/// site problem over a sibling 401:
+/// site problem over a sibling 401, and a rate limit over a later 5xx:
 /// - `WrongSite`: the key doesn't live here (401) or the site is
 ///   unreachable — keep trying.
-/// - `SiteError`: this site answered badly (429 / 5xx / parse). Still
-///   try the sibling (a 503 on api.z.ai must not hide a working
-///   mainland key), but if every site fails, this error wins so the
-///   429 cooldown still sees `429` instead of a later 401.
+/// - `RateLimited`: this site answered 429. Still try the sibling (it
+///   may be the right host), but if every site fails this wins so the
+///   5-minute cooldown still sees `429`.
+/// - `SiteError`: 5xx / parse. Still try the sibling.
 enum SiteFailure {
     WrongSite(String),
+    RateLimited(String),
     SiteError(String),
 }
 
 async fn fetch_with_key(bases: &[&str], key: &str) -> Result<Snapshot, String> {
     let mut last_wrong = None;
+    let mut last_rate = None;
     let mut last_site_err = None;
     for base in bases {
         match fetch_at(base, key).await {
             Ok(snap) => return Ok(snap),
             Err(SiteFailure::WrongSite(e)) => last_wrong = Some(e),
+            Err(SiteFailure::RateLimited(e)) => last_rate = Some(e),
             Err(SiteFailure::SiteError(e)) => last_site_err = Some(e),
         }
     }
-    Err(last_site_err
+    Err(last_rate
+        .or(last_site_err)
         .or(last_wrong)
         .unwrap_or_else(|| "no endpoint reachable".into()))
 }
@@ -94,6 +98,12 @@ async fn fetch_at(base: &str, key: &str) -> Result<Snapshot, SiteFailure> {
         return Err(SiteFailure::WrongSite(
             "API key was rejected — check it in Settings".into(),
         ));
+    }
+    if quota_resp.status().as_u16() == 429 {
+        return Err(SiteFailure::RateLimited(format!(
+            "quota endpoint: HTTP {}",
+            quota_resp.status()
+        )));
     }
     if !quota_resp.status().is_success() {
         return Err(SiteFailure::SiteError(format!(
@@ -308,6 +318,19 @@ mod tests {
         // (or dodge the cooldown).
         let zai = serve(vec![(429, "slow down".into()), (429, "slow down".into())]);
         let bigmodel = serve(vec![(401, rejected()), (401, rejected())]);
+        let error = match fetch_with_key(&[zai.as_str(), bigmodel.as_str()], "k").await {
+            Ok(_) => panic!("a rate-limited site must not look like success"),
+            Err(error) => error,
+        };
+        assert!(error.contains("429"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn rate_limit_wins_over_a_later_sibling_outage() {
+        // A 429 then a 503 must still surface as 429 — last SiteError
+        // winning would drop the five-minute cooldown to one minute.
+        let zai = serve(vec![(429, "slow down".into()), (429, "slow down".into())]);
+        let bigmodel = serve(vec![(503, "down".into()), (503, "down".into())]);
         let error = match fetch_with_key(&[zai.as_str(), bigmodel.as_str()], "k").await {
             Ok(_) => panic!("a rate-limited site must not look like success"),
             Err(error) => error,
