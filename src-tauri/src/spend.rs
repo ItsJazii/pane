@@ -754,10 +754,17 @@ fn cache_unchanged(path: &Path) -> bool {
     };
     let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
     let size = meta.len();
+    let gen = pricing::generation();
     cache()
         .lock()
         .ok()
-        .and_then(|map| map.get(path).map(|e| e.mtime == mtime && e.size == size))
+        .and_then(|map| {
+            map.get(path).map(|e| {
+                e.mtime == mtime
+                    && e.size == size
+                    && (e.gen == gen || probes_still_vouch(&e.probes, &e.data))
+            })
+        })
         .unwrap_or(false)
 }
 
@@ -1091,13 +1098,25 @@ fn file_days_full(
 }
 
 /// If `from` is mid-line, walk back at most 64 KB to the previous
-/// newline. Already-aligned offsets cost one byte. No newline in that
-/// window keeps `from` so we do not re-parse cached complete lines.
+/// newline. Already-aligned offsets cost one byte. A cache that ended
+/// on a complete no-newline JSON value stays put when growth starts
+/// with `\n` — backing up would re-parse that record and double it.
+/// No newline in the window keeps `from` so we do not re-parse cached
+/// complete lines.
 fn align_to_line_start(reader: &mut BufReader<fs::File>, from: u64) -> u64 {
     if from == 0 {
         return 0;
     }
     if reader.seek(SeekFrom::Start(from - 1)).is_ok() {
+        let mut b = [0u8; 1];
+        if reader.read_exact(&mut b).is_ok() && b[0] == b'\n' {
+            return from;
+        }
+    }
+    // Cached through a complete record that had no trailing newline.
+    // The next scan's new bytes start here; a leading `\n` is a new
+    // line, not a resume inside the old object.
+    if reader.seek(SeekFrom::Start(from)).is_ok() {
         let mut b = [0u8; 1];
         if reader.read_exact(&mut b).is_ok() && b[0] == b'\n' {
             return from;
@@ -3206,6 +3225,36 @@ mod tests {
     }
 
     #[test]
+    fn cache_unchanged_rejects_stale_prices() {
+        let dir = std::env::temp_dir().join(format!("pane-cache-gen-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("session.jsonl");
+        let line = json!({
+            "type": "usage.record",
+            "model": "kimi-code/k3",
+            "usage": {"inputOther": 1000.0, "output": 0.0},
+            "usageScope": "turn",
+            "time": 1_784_208_630_652i64
+        })
+        .to_string();
+        fs::write(&path, format!("{line}\n")).unwrap();
+        let _ = file_days(&path, &mut |line, data| kimi_line(line, data));
+        assert!(cache_unchanged(&path), "fresh parse must look unchanged");
+
+        if let Ok(mut map) = cache().lock() {
+            if let Some(e) = map.get_mut(&path) {
+                e.gen = e.gen.saturating_add(1);
+                e.probes = vec![PriceProbe::Overflow];
+            }
+        }
+        assert!(
+            !cache_unchanged(&path),
+            "stale generation with dead probes must not take the empty-parser path"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn file_days_does_not_cache_an_unreadable_path() {
         // A directory has metadata but cannot be read as a file — the
         // previous insert-on-open-failure path would cache empty spend.
@@ -3343,32 +3392,35 @@ mod tests {
         };
         let first_line = line(1_000.0);
         let second_line = line(4_000.0);
-        fs::write(&path, &first_line).unwrap();
+        let third_line = line(2_000.0);
+        // Two records, last one without a newline — align must not
+        // walk back over the preceding `\n` when the file later grows.
+        fs::write(&path, format!("{first_line}\n{second_line}")).unwrap();
         let first = file_days(&path, &mut |line, data| kimi_line(line, data));
         assert!(
-            (tokens_sum(&first) - 1_000.0).abs() < 0.001,
+            (tokens_sum(&first) - 5_000.0).abs() < 0.001,
             "closed file without a trailing newline must still count, got {}",
             tokens_sum(&first)
         );
         let cached_size = cache().lock().unwrap().get(&path).map(|e| e.size).unwrap_or(0);
-        assert_eq!(cached_size, first_line.len() as u64);
+        assert_eq!(cached_size, first_line.len() as u64 + 1 + second_line.len() as u64);
 
         let again = file_days(&path, &mut |line, data| kimi_line(line, data));
         assert!(
-            (tokens_sum(&again) - 1_000.0).abs() < 0.001,
+            (tokens_sum(&again) - 5_000.0).abs() < 0.001,
             "unchanged closed file must not double-count, got {}",
             tokens_sum(&again)
         );
 
         let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
         use std::io::Write;
-        write!(f, "\n{second_line}\n").unwrap();
+        write!(f, "\n{third_line}\n").unwrap();
         drop(f);
         let second = file_days(&path, &mut |line, data| kimi_line(line, data));
         let _ = fs::remove_dir_all(&dir);
         assert!(
-            (tokens_sum(&second) - 5_000.0).abs() < 0.001,
-            "append after a no-newline finale must add only the new record, got {}",
+            (tokens_sum(&second) - 7_000.0).abs() < 0.001,
+            "append after a no-newline finale must not re-count the last record, got {}",
             tokens_sum(&second)
         );
     }

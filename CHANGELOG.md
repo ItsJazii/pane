@@ -34,7 +34,10 @@
   query. Codex/Grok/Claude/Pi restore a compact checkpoint so a tail
   does not re-read 200 MB or double-count an older replay. A closed
   JSONL file that ends without a newline still counts its last
-  record. A failed warmup keeps the cached prefix instead of
+  record; a later append does not count that record twice. A
+  catalog refresh that changes a file's prices re-parses it
+  instead of wiping the card. A failed warmup keeps the cached
+  prefix instead of
   full-rescanning with dirty parser state. OpenCode/Devin stamp
   caches drop rows that age out of the window. One provider panic
   no longer dumps every card.
