@@ -60,7 +60,43 @@ fn fingerprint_key(key: &str) -> String {
 }
 
 fn dir_identity(dir: &Path) -> Option<String> {
-    auth_entry_key_in(dir, "opencode-go").map(|k| fingerprint_key(&k))
+    match dir_auth_state(dir) {
+        DirAuth::Identified(fp) => Some(fp),
+        _ => None,
+    }
+}
+
+/// Parsed-no-Go is safe to keep discovering (OpenRouter-only default).
+/// An existing auth.json that we could not read or parse might be a
+/// truncate-and-rewrite; abort extras so the later default snapshot
+/// cannot card the same key twice.
+enum DirAuth {
+    Identified(String),
+    ParsedNoGo,
+    Unreadable,
+    Missing,
+}
+
+fn dir_auth_state(dir: &Path) -> DirAuth {
+    let path = dir.join("auth.json");
+    if !path.exists() {
+        return DirAuth::Missing;
+    }
+    let Ok(raw) = super::read_small_text(&path, MAX_AUTH_BYTES, "auth.json") else {
+        return DirAuth::Unreadable;
+    };
+    let Ok(doc) = serde_json::from_str::<Value>(&raw) else {
+        return DirAuth::Unreadable;
+    };
+    match doc
+        .get("opencode-go")
+        .and_then(|e| e.get("key"))
+        .and_then(Value::as_str)
+        .filter(|k| !k.is_empty())
+    {
+        Some(k) => DirAuth::Identified(fingerprint_key(k)),
+        None => DirAuth::ParsedNoGo,
+    }
 }
 
 /// The default login's account identity, for the snapshot-cache stamp.
@@ -79,17 +115,25 @@ pub struct OpenCodeAccount {
 /// A dir that can't name its account never becomes a card; a dir whose
 /// fingerprint matches an already-seen login is skipped.
 pub fn discover_extra_accounts() -> Vec<OpenCodeAccount> {
-    let default = data_dir();
-    // Claude/Codex abort discovery when the default login exists but
-    // can't be named (dedup would be unsafe). OpenCode's identity is a
-    // key fingerprint: no Go key means `seen` is empty, so there is no
-    // duplicate risk — an OpenRouter-only default must not hide extra
-    // OPENCODE_HOME / opencode-* Go profiles.
-    let mut seen: Vec<String> = dir_identity(&default).into_iter().collect();
+    discover_from(&data_dir(), extra_data_dirs())
+}
+
+fn discover_from(default: &Path, extras: Vec<PathBuf>) -> Vec<OpenCodeAccount> {
+    // Claude/Codex abort when the default login exists but can't be
+    // named. OpenCode splits that: a parsed file with no Go key is
+    // OpenRouter-only (empty `seen`, extras still card). A file that
+    // exists but will not parse is treated as mid-write — extras stay
+    // hidden so a later successful default snapshot cannot duplicate.
+    let mut seen = Vec::new();
+    match dir_auth_state(default) {
+        DirAuth::Unreadable => return Vec::new(),
+        DirAuth::Identified(fp) => seen.push(fp),
+        DirAuth::ParsedNoGo | DirAuth::Missing => {}
+    }
 
     let mut out = Vec::new();
-    for dir in extra_data_dirs() {
-        if same_dir(&dir, &default) {
+    for dir in extras {
+        if same_dir(&dir, default) {
             continue;
         }
         let Some(fp) = dir_identity(&dir) else { continue };
@@ -777,37 +821,68 @@ mod tests {
         assert_ne!(fingerprint_key(key), fingerprint_key("other-account"));
     }
 
-    #[test]
-    fn extra_profile_dir_becomes_its_own_card() {
-        let root = std::env::temp_dir().join(format!(
+    fn disc_root() -> PathBuf {
+        std::env::temp_dir().join(format!(
             "pane-opencode-disc-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
-        ));
+        ))
+    }
+
+    fn write_auth(dir: &Path, body: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("auth.json"), body).unwrap();
+    }
+
+    #[test]
+    fn extra_profile_dir_becomes_its_own_card() {
+        let root = disc_root();
         let extra = root.join("opencode-work");
-        std::fs::create_dir_all(&extra).unwrap();
-        std::fs::write(
-            extra.join("auth.json"),
+        write_auth(
+            &extra,
             r#"{"opencode-go":{"type":"api","key":"work-key-aaa"}}"#,
-        )
-        .unwrap();
+        );
+        let found = discover_from(&root.join("default"), vec![extra.clone()]);
         let fp = dir_identity(&extra).expect("fingerprint");
         let hash8: String = fp.chars().take(8).collect();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, format!("opencode@{hash8}"));
         assert_eq!(dir_label(&extra).as_deref(), Some("work"));
-        assert_eq!(format!("opencode@{hash8}").split('@').next(), Some("opencode"));
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
-    fn default_without_a_go_key_does_not_void_dedup() {
-        // seen starts empty when the default dir has no opencode-go key.
-        // Extra profiles can still card — unlike Claude/Codex, there is
-        // no unnamed default account to collide with.
-        let seen: Vec<String> = None::<String>.into_iter().collect();
-        assert!(seen.is_empty());
-        let extra = fingerprint_key("work-key-aaa");
-        assert!(!seen.iter().any(|s| s == &extra));
+    fn openrouter_only_default_still_discovers_extras() {
+        let root = disc_root();
+        let default = root.join("default");
+        let extra = root.join("opencode-work");
+        write_auth(
+            &default,
+            r#"{"openrouter":{"type":"api","key":"or-only"}}"#,
+        );
+        write_auth(
+            &extra,
+            r#"{"opencode-go":{"type":"api","key":"work-key-aaa"}}"#,
+        );
+        let found = discover_from(&default, vec![extra]);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].id.starts_with("opencode@"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn unreadable_default_auth_hides_extras() {
+        let root = disc_root();
+        let default = root.join("default");
+        let extra = root.join("opencode-work");
+        write_auth(&default, "{not-json");
+        write_auth(
+            &extra,
+            r#"{"opencode-go":{"type":"api","key":"work-key-aaa"}}"#,
+        );
+        assert!(discover_from(&default, vec![extra]).is_empty());
+        std::fs::remove_dir_all(&root).ok();
     }
 }
