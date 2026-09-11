@@ -171,14 +171,20 @@ fn discover_from(
 /// fingerprint with the default login. Cards stay one-per-fingerprint;
 /// spend merges every ledger onto the matching card.
 pub fn extra_ledger_homes() -> Vec<(String, String, PathBuf)> {
-    let default = data_dir();
-    let default_fp = match dir_auth_state(&default) {
+    extra_ledger_homes_from(&data_dir(), extra_data_dirs())
+}
+
+fn extra_ledger_homes_from(
+    default: &Path,
+    extras: Vec<PathBuf>,
+) -> Vec<(String, String, PathBuf)> {
+    let default_fp = match dir_auth_state(default) {
         DirAuth::Identified(fp) => Some(fp),
         _ => None,
     };
     let mut seen_dirs: Vec<PathBuf> = Vec::new();
     let mut out = Vec::new();
-    for dir in extra_data_dirs() {
+    for dir in extras {
         if same_dir(&dir, &default) {
             continue;
         }
@@ -938,6 +944,43 @@ mod tests {
         );
         assert!(discover_from(&default, vec![extra.clone()], true).is_empty());
         assert_eq!(discover_from(&default, vec![extra], false).len(), 1);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn extra_ledger_homes_merge_shared_and_default_keys() {
+        let root = disc_root();
+        let default = root.join("default");
+        let work = root.join("opencode-work");
+        let copy = root.join("opencode-copy");
+        let other = root.join("opencode-other");
+        write_auth(
+            &default,
+            r#"{"opencode-go":{"type":"api","key":"alice-key"}}"#,
+        );
+        write_auth(
+            &work,
+            r#"{"opencode-go":{"type":"api","key":"alice-key"}}"#,
+        );
+        write_auth(
+            &copy,
+            r#"{"opencode-go":{"type":"api","key":"alice-key"}}"#,
+        );
+        write_auth(
+            &other,
+            r#"{"opencode-go":{"type":"api","key":"bob-key"}}"#,
+        );
+        let found = extra_ledger_homes_from(
+            &default,
+            vec![work, copy.clone(), copy, other],
+        );
+        let alice: Vec<_> = found.iter().filter(|(id, _, _)| id == "opencode").collect();
+        let bob: Vec<_> = found
+            .iter()
+            .filter(|(id, _, _)| id.starts_with("opencode@"))
+            .collect();
+        assert_eq!(alice.len(), 2, "two extra homes share the default key");
+        assert_eq!(bob.len(), 1, "one distinct extra login");
         std::fs::remove_dir_all(&root).ok();
     }
 }
