@@ -1216,7 +1216,13 @@ function minimalItemKey(s: Snapshot): string | null {
   );
   const starred = L.starred.find((k) => visible.includes(k));
   if (starred) return starred;
-  return visible.find((k) => s.metrics.some((m) => m.label === k && m.kind === "progress")) ?? null;
+  const progress = visible.find((k) =>
+    s.metrics.some((m) => m.label === k && m.kind === "progress"),
+  );
+  if (progress) return progress;
+  // Balance / credits / Used rows have no progress meter. Show that
+  // first visible value instead of collapsing the card to "ok".
+  return visible[0] ?? null;
 }
 
 function renderCard(s: Snapshot): string {
