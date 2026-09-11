@@ -1637,6 +1637,7 @@ fn restore_last_success_after_error(
     current: &mut providers::Snapshot,
     previous: &providers::Snapshot,
     age_ms: i64,
+    previous_at_ms: i64,
 ) -> bool {
     let sub2api = family_of(&current.id) == "sub2api";
     if current.status != "error" || (!sub2api && age_ms > SNAPSHOT_CACHE_MS) {
@@ -1644,11 +1645,78 @@ fn restore_last_success_after_error(
     }
     let warning = current.error.clone();
     *current = previous.clone();
+    // The restored numbers were fetched at `previous_at_ms` — keep that
+    // truth on the snapshot so no downstream consumer (local HTTP API,
+    // tray, alerts) can mistake the restore for a fresh success.
+    current.fetched_at = Some(previous_at_ms);
     if sub2api || age_ms > STALE_GRACE_MS {
         current.stale = true;
         current.warning = warning;
     }
     true
+}
+
+/// One refresh's cache write-back: caches fresh successes and restores the
+/// last good snapshot (marked stale) for transient errors. Returns true
+/// when the map changed. A credential-scoped snapshot whose generation
+/// moved since the refresh started is skipped entirely — a result the old
+/// key produced must not re-enter the cache after a rotation.
+fn apply_cache_updates(
+    map: &mut HashMap<String, CachedSnap>,
+    all: &mut [providers::Snapshot],
+    expected: &HashMap<String, u64>,
+    now_ms: i64,
+) -> bool {
+    let mut dirty = false;
+    for s in all.iter_mut() {
+        if is_credential_scoped_card(&s.id) {
+            let current = key_card_snapshot_generations([s.id.clone()]);
+            if expected.get(&s.id) != current.get(&s.id) {
+                continue;
+            }
+        }
+        // Plan bars can succeed while the folded Moonshot wallet call
+        // fails; keep last-known API/Balance rows so Almost Out and the
+        // tray pin don't blink off for one timeout. Do not re-cache the
+        // patched snapshot — that would reset `at` and keep serving the
+        // same balance forever.
+        let mut skip_cache = false;
+        if s.id == "kimi" && s.status == "ok" && s.warning.is_some() {
+            if let Some(previous) = map.get("kimi") {
+                let age = now_ms - previous.at;
+                if age <= SNAPSHOT_CACHE_MS {
+                    let n = s.metrics.len();
+                    restore_kimi_wallet_rows(s, &previous.snap);
+                    if s.metrics.len() > n {
+                        skip_cache = true;
+                        if age > STALE_GRACE_MS {
+                            s.stale = true;
+                        }
+                    }
+                }
+            }
+        }
+        if s.status == "ok" && !skip_cache {
+            // Stamp the success time on the snapshot itself: everything
+            // downstream (HTTP publication included) reports when this
+            // data was actually fetched, not when it was re-served.
+            s.fetched_at = Some(now_ms);
+            map.insert(
+                s.id.clone(),
+                CachedSnap {
+                    at: now_ms,
+                    snap: s.clone(),
+                },
+            );
+            dirty = true;
+        } else if s.status == "error" {
+            if let Some(previous) = map.get(&s.id) {
+                let age = now_ms - previous.at;
+                restore_last_success_after_error(s, &previous.snap, age, previous.at);
+            }
+        }
+    }
+    dirty
 }
 
 /// Called by the UI. Refreshes every enabled provider at the same time and
@@ -2129,6 +2197,11 @@ async fn fetch_usage(
                     }
                 }
                 if s.status == "ok" && !skip_cache {
+                    // Stamp the success time on the snapshot itself:
+                    // everything downstream (HTTP publication included)
+                    // reports when this data was actually fetched, not
+                    // when it was re-served.
+                    s.fetched_at = Some(now_ms);
                     map.insert(
                         s.id.clone(),
                         CachedSnap {
@@ -2140,7 +2213,7 @@ async fn fetch_usage(
                 } else if s.status == "error" {
                     if let Some(previous) = map.get(&s.id) {
                         let age = now_ms - previous.at;
-                        restore_last_success_after_error(s, &previous.snap, age);
+                        restore_last_success_after_error(s, &previous.snap, age, previous.at);
                     }
                 }
             }
@@ -2352,6 +2425,10 @@ fn cached_usage() -> Vec<providers::Snapshot> {
         .map(|(_, c)| {
             let mut s = c.snap;
             s.stale = true;
+            // The on-disk `at` is the last success time — old caches
+            // predate the in-snapshot field, so the wrapper's value is
+            // authoritative either way. A restore is never "fetched now".
+            s.fetched_at = Some(c.at);
             s
         })
         .collect();
@@ -3392,10 +3469,13 @@ mod tests {
             vec![Metric::progress("Total quota", 25.0, None)],
         );
         let mut current = Snapshot::error("sub2api@wallet", "Panel · Key 1", "HTTP 401".into());
-        assert!(restore_last_success_after_error(&mut current, &previous, 1_000));
+        assert!(restore_last_success_after_error(&mut current, &previous, 1_000, 500));
         assert!(current.stale);
         assert_eq!(current.warning.as_deref(), Some("HTTP 401"));
         assert_eq!(current.metrics[0].used_percent, Some(25.0));
+        // The restore keeps the ORIGINAL success time — never the failed
+        // attempt's — so no downstream consumer can mistake it for fresh.
+        assert_eq!(current.fetched_at, Some(500));
     }
 
     #[test]
@@ -3403,7 +3483,7 @@ mod tests {
         let previous = Snapshot::ok("sub2api@offline", "Panel · Offline", None,
             vec![Metric::text("Balance", "$8.00".into())]);
         let mut current = Snapshot::error("sub2api@offline", "Panel · Offline", "Network error".into());
-        assert!(restore_last_success_after_error(&mut current, &previous, SNAPSHOT_CACHE_MS + 1));
+        assert!(restore_last_success_after_error(&mut current, &previous, SNAPSHOT_CACHE_MS + 1, 10_000));
         assert!(current.stale);
         assert_eq!(current.metrics[0].value.as_deref(), Some("$8.00"));
         assert_eq!(current.warning.as_deref(), Some("Network error"));
@@ -3497,11 +3577,7 @@ mod tests {
         );
         let mut current = Snapshot::error("codex", "Codex", "timeout".into());
 
-        assert!(restore_last_success_after_error(
-            &mut current,
-            &previous,
-            1_000
-        ));
+        assert!(restore_last_success_after_error(&mut current, &previous, 1_000, 500));
         assert_eq!(current.status, "ok");
         assert!(!current.stale);
         assert_eq!(current.warning, None);
@@ -3522,6 +3598,7 @@ mod tests {
             &mut current,
             &previous,
             STALE_GRACE_MS + 1,
+            500
         ));
         assert_eq!(current.status, "ok");
         assert!(current.stale);
@@ -3543,6 +3620,7 @@ mod tests {
             &mut current,
             &previous,
             SNAPSHOT_CACHE_MS + 1,
+            500
         ));
         assert_eq!(current.status, "error");
         assert!(!current.stale);
