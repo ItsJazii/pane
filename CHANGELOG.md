@@ -3,6 +3,12 @@
 ## Unreleased
 
 ### Fixed
+- **The local HTTP API no longer stamps restored snapshots as fresh.**
+  `fetchedAt` is the last successful fetch, and every provider now
+  reports `status` / `stale`. A failed refresh during the 3-minute
+  UI grace still looks current in the popover, but widgets see
+  `stale: true`. Alerts skip explicitly stale cards for every
+  provider, not just Sub2API (closes #216).
 - **Mainland GLM keys work on the Z.ai card.** The quota call used to
   hit only `api.z.ai`, so a `open.bigmodel.cn` key got a 401 and an
   error card — and some mainland networks cannot reach z.ai at all.
