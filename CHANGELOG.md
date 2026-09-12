@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.51 — 2026-09-12
+
 ### Added
 - **OpenCode extra profiles each get their own card.** `OPENCODE_HOME`
   and `~\.local\share\opencode-*` are discovered like Claude/Codex
