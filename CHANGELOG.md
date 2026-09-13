@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Fixed
+- **Devin spend no longer re-reads the whole `sessions.db` on every
+  refresh.** The Devin CLI's local store is multi-GB and its WAL changes
+  constantly, so the old stamp cache missed every time and each refresh
+  parsed ~3 GB of message JSON (80 s, one core pinned; 5+ min cold at
+  login). Pane now remembers the last message rowid it processed in
+  `devin_spend_cache.json` and only reads new rows — the first scan after
+  this update still indexes the store once, every later refresh and every
+  launch is milliseconds. Short reads also let the Devin CLI reclaim its
+  WAL.
+
 ## 0.4.51 — 2026-09-12
 
 ### Added
