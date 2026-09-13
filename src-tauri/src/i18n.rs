@@ -65,8 +65,7 @@ fn zh_metric(label: &str) -> String {
         "Bonus" => "赠送".into(),
         "Extra usage" => "额外用量".into(),
         "Extra credits" => "额外额度".into(),
-        "Reset credit" => "重置额度".into(),
-        "Reset credits" => "重置额度".into(),
+        "Rate Limit Resets" => "速率限制重置".into(),
         "Extra balance" => "额外余额".into(),
         "Kilo Pass" => "Kilo Pass".into(),
         "Requests today" => "今日请求".into(),
@@ -76,9 +75,6 @@ fn zh_metric(label: &str) -> String {
         "Recent models" => "最近使用的模型".into(),
         "Via" => "经由".into(),
         "Sessions" => "会话数".into(),
-        other if other.starts_with("Reset credit ") => {
-            format!("重置额度 {}", other.trim_start_matches("Reset credit "))
-        }
         other if other.ends_with(" weekly") => {
             format!("{} 每周", other.trim_end_matches(" weekly"))
         }
@@ -123,8 +119,7 @@ fn ru_metric(label: &str) -> String {
         "Bonus" => "Бонус".into(),
         "Extra usage" => "Дополнительно".into(),
         "Extra credits" => "Доп. кредиты".into(),
-        "Reset credit" => "Сброс лимита".into(),
-        "Reset credits" => "Сброс лимита".into(),
+        "Rate Limit Resets" => "Сбросы лимитов".into(),
         "Extra balance" => "Доп. баланс".into(),
         "Kilo Pass" => "Kilo Pass".into(),
         "Requests today" => "Запросы сегодня".into(),
@@ -134,9 +129,6 @@ fn ru_metric(label: &str) -> String {
         "Recent models" => "Недавние модели".into(),
         "Via" => "Через".into(),
         "Sessions" => "Сессии".into(),
-        other if other.starts_with("Reset credit ") => {
-            format!("Сброс лимита {}", other.trim_start_matches("Reset credit "))
-        }
         other if other.ends_with(" weekly") => {
             format!("{} за неделю", other.trim_end_matches(" weekly"))
         }
@@ -196,7 +188,7 @@ mod tests {
         let zh = json!({"locale": "zh"});
         assert_eq!(metric_label(&zh, "Session"), "会话");
         assert_eq!(metric_label(&zh, "Sonnet weekly"), "Sonnet 每周");
-        assert_eq!(metric_label(&zh, "Reset credit 2"), "重置额度 2");
+        assert_eq!(metric_label(&zh, "Rate Limit Resets"), "速率限制重置");
         assert_eq!(metric_label(&json!({"locale": "en"}), "Session"), "Session");
     }
 
@@ -205,8 +197,7 @@ mod tests {
         let ru = json!({"locale": "ru"});
         assert_eq!(metric_label(&ru, "Session"), "Сессия");
         assert_eq!(metric_label(&ru, "Sonnet weekly"), "Sonnet за неделю");
-        assert_eq!(metric_label(&ru, "Reset credit"), "Сброс лимита");
-        assert_eq!(metric_label(&ru, "Reset credit 2"), "Сброс лимита 2");
+        assert_eq!(metric_label(&ru, "Rate Limit Resets"), "Сбросы лимитов");
         assert_eq!(metric_label(&ru, "Recent models"), "Недавние модели");
         assert_eq!(quit_label(&ru), "Выйти из Pane");
     }

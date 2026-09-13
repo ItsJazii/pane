@@ -1,6 +1,7 @@
-use super::{http, Metric, Snapshot};
+use super::{http, Metric, ResetCredit, Snapshot};
 use base64::Engine;
 use chrono::Utc;
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
@@ -357,35 +358,30 @@ async fn fetch(dir: &std::path::Path, id: &str, name: &str) -> Result<Snapshot, 
         }
     }
 
-    // Per-credit rows with exact expiry (and a Use button in the UI) from
-    // the dedicated endpoint; fall back to the usage body's bare count.
+    // One resets row for all banked credits: per-credit expiries from the
+    // dedicated endpoint when it answers (empty included — "0 available"
+    // still opens the empty-state popover), else the usage body's bare
+    // count without expiries.
     match fetch_reset_credits(&access, &account_id).await {
-        Some(credits) if !credits.is_empty() => {
-            let many = credits.len() > 1;
-            for (i, (credit_id, expires_at)) in credits.iter().enumerate() {
-                let label = if many {
-                    format!("Reset credit {}", i + 1)
-                } else {
-                    "Reset credit".to_string()
-                };
-                metrics.push(Metric {
-                    label,
-                    kind: "action".into(),
-                    used_percent: None,
-                    detail: Some(credit_id.clone()),
-                    value: Some("Available".into()),
-                    resets_at: *expires_at,
-                    period_ms: None,
-                });
-            }
-        }
-        _ => {
+        Some(credits) => metrics.push(Metric::resets(
+            credits.len(),
+            Some(
+                credits
+                    .iter()
+                    .map(|(id, exp)| ResetCredit {
+                        id: Some(id.clone()),
+                        expires_at: *exp,
+                    })
+                    .collect(),
+            ),
+        )),
+        None => {
             if let Some(count) = usage
                 .pointer("/rate_limit_reset_credits/available_count")
                 .and_then(Value::as_i64)
             {
-                if count > 0 {
-                    metrics.push(Metric::text("Reset credits", count.to_string()));
+                if count >= 0 {
+                    metrics.push(Metric::resets(count as usize, None));
                 }
             }
         }
@@ -471,9 +467,72 @@ async fn fetch_reset_credits(access: &str, account_id: &str) -> Option<Vec<(Stri
     Some(out)
 }
 
+/// What one consume call settled into — the footer shows `message`, the
+/// popover picks its banner off `outcome`.
+#[derive(Serialize, Debug, PartialEq)]
+pub struct RedeemOutcome {
+    /// "success" | "nothing_to_reset" | "no_credit"
+    pub outcome: &'static str,
+    /// Footer status line.
+    pub message: String,
+    pub windows_reset: i64,
+}
+
+/// Consume answers HTTP 200 with a `code` field — the status alone can't
+/// distinguish a spent credit from a refusal that kept it.
+fn redeem_outcome(status: reqwest::StatusCode, body: &Value) -> Result<RedeemOutcome, String> {
+    if !status.is_success() {
+        let msg = body
+            .get("detail")
+            .and_then(Value::as_str)
+            .or_else(|| body.get("error").and_then(Value::as_str))
+            .unwrap_or("request failed");
+        return Err(format!("HTTP {status}: {msg}"));
+    }
+    let windows_reset = body.get("windows_reset").and_then(Value::as_i64).unwrap_or(0);
+    let success = || RedeemOutcome {
+        outcome: "success",
+        message: if windows_reset > 0 {
+            format!(
+                "Codex limits reset ({windows_reset} window{})",
+                if windows_reset == 1 { "" } else { "s" }
+            )
+        } else {
+            "Reset credit redeemed".to_string()
+        },
+        windows_reset,
+    };
+    match body.get("code").and_then(Value::as_str) {
+        // already_redeemed is the idempotency-key retry landing — the credit
+        // was spent (by us, earlier), which for the UI is a success.
+        Some("reset") | Some("already_redeemed") => Ok(success()),
+        Some("nothing_to_reset") => Ok(RedeemOutcome {
+            outcome: "nothing_to_reset",
+            message: "Your usage doesn't need a reset yet".into(),
+            windows_reset,
+        }),
+        Some("no_credit") => Ok(RedeemOutcome {
+            outcome: "no_credit",
+            message: "That reset is no longer available".into(),
+            windows_reset,
+        }),
+        // Older response shape carried no code; windows_reset > 0 is the
+        // only success signal it has.
+        _ if windows_reset > 0 => Ok(success()),
+        _ => Err("unexpected consume response".into()),
+    }
+}
+
 /// Consumes one banked reset credit — irreversible; the UI confirms first.
-/// POST /consume with a fresh idempotency key; the windows reset server-side.
-pub async fn redeem_credit(provider_id: &str, credit_id: &str) -> Result<String, String> {
+/// POST /consume with an idempotency key: the frontend mints one per credit
+/// when its confirm card opens and reuses it on retries, so a retried claim
+/// can't double-spend (the server answers already_redeemed → success).
+/// `redeem_request_id` None mints the current openusage-{ts}-{pid} key.
+pub async fn redeem_credit(
+    provider_id: &str,
+    credit_id: &str,
+    redeem_request_id: Option<String>,
+) -> Result<RedeemOutcome, String> {
     // Route the redeem to the account whose card offered the credit — an
     // extra account's Use button must spend ITS credit, not the default
     // login's (upstream's CodexResetClaimRouter, in one lookup).
@@ -487,11 +546,13 @@ pub async fn redeem_credit(provider_id: &str, credit_id: &str) -> Result<String,
             .ok_or_else(|| format!("unknown Codex account: {provider_id}"))?
     };
     let auth = load_access(&dir).await?;
-    let redeem_request_id = format!(
-        "openusage-{}-{}",
-        Utc::now().timestamp_millis(),
-        std::process::id()
-    );
+    let redeem_request_id = redeem_request_id.unwrap_or_else(|| {
+        format!(
+            "openusage-{}-{}",
+            Utc::now().timestamp_millis(),
+            std::process::id()
+        )
+    });
     let mut req = http()
         .post(format!("{CREDITS_URL}/consume"))
         .bearer_auth(&auth.token)
@@ -505,20 +566,7 @@ pub async fn redeem_credit(provider_id: &str, credit_id: &str) -> Result<String,
     let resp = req.send().await.map_err(|e| format!("consume request: {e}"))?;
     let status = resp.status();
     let body: Value = resp.json().await.unwrap_or_else(|_| json!({}));
-    if !status.is_success() {
-        let msg = body
-            .get("detail")
-            .and_then(Value::as_str)
-            .or_else(|| body.get("error").and_then(Value::as_str))
-            .unwrap_or("request failed");
-        return Err(format!("HTTP {status}: {msg}"));
-    }
-    let windows = body.get("windows_reset").and_then(Value::as_i64).unwrap_or(0);
-    Ok(if windows > 0 {
-        format!("Codex limits reset ({windows} window{})", if windows == 1 { "" } else { "s" })
-    } else {
-        "Reset credit redeemed".to_string()
-    })
+    redeem_outcome(status, &body)
 }
 
 fn push_window(metrics: &mut Vec<Metric>, node: Option<&Value>, fallback_label: &str) {
@@ -639,7 +687,9 @@ fn backup_credentials(path: &std::path::Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::{credits_balance, identity_from, openai_provenance, scoped_id_charset};
+    use super::{
+        credits_balance, identity_from, openai_provenance, redeem_outcome, scoped_id_charset,
+    };
     use base64::Engine;
     use serde_json::json;
 
@@ -707,5 +757,48 @@ mod tests {
         assert_eq!(credits_balance(&none), Some(0.0));
         // No credits object at all → no row.
         assert_eq!(credits_balance(&json!({})), None);
+    }
+
+    #[test]
+    fn consume_codes_map_to_outcomes() {
+        let ok = reqwest::StatusCode::OK;
+        let reset = redeem_outcome(ok, &json!({"code": "reset", "windows_reset": 2})).unwrap();
+        assert_eq!(reset.outcome, "success");
+        assert_eq!(reset.message, "Codex limits reset (2 windows)");
+        assert_eq!(reset.windows_reset, 2);
+
+        let redeemed =
+            redeem_outcome(ok, &json!({"code": "already_redeemed", "windows_reset": 0})).unwrap();
+        assert_eq!(redeemed.outcome, "success");
+        assert_eq!(redeemed.message, "Reset credit redeemed");
+
+        let nothing = redeem_outcome(ok, &json!({"code": "nothing_to_reset"})).unwrap();
+        assert_eq!(nothing.outcome, "nothing_to_reset");
+        assert_eq!(nothing.message, "Your usage doesn't need a reset yet");
+
+        let gone = redeem_outcome(ok, &json!({"code": "no_credit"})).unwrap();
+        assert_eq!(gone.outcome, "no_credit");
+        assert_eq!(gone.message, "That reset is no longer available");
+    }
+
+    #[test]
+    fn consume_without_code_falls_back_to_windows_reset() {
+        let ok = reqwest::StatusCode::OK;
+        let older = redeem_outcome(ok, &json!({"windows_reset": 2})).unwrap();
+        assert_eq!(older.outcome, "success");
+        assert_eq!(older.windows_reset, 2);
+        // No code and nothing reset: not a success we can stand behind.
+        assert!(redeem_outcome(ok, &json!({})).is_err());
+        assert!(redeem_outcome(ok, &json!({"code": "mystery"})).is_err());
+    }
+
+    #[test]
+    fn consume_http_error_keeps_detail_message() {
+        let forbidden = reqwest::StatusCode::FORBIDDEN;
+        let err =
+            redeem_outcome(forbidden, &json!({"detail": "credit expired"})).unwrap_err();
+        assert_eq!(err, "HTTP 403 Forbidden: credit expired");
+        let err = redeem_outcome(forbidden, &json!({})).unwrap_err();
+        assert_eq!(err, "HTTP 403 Forbidden: request failed");
     }
 }

@@ -937,32 +937,11 @@ select:focus-visible {
   color: var(--foreground);
 }
 
-/* Codex reset-credit row: expiry text + a small Use pill. */
+/* Action row (e.g. One/New API "Expiry"): right-aligned detail text. */
 .action-row .action-right {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.redeem-btn {
-  background: var(--primary);
-  color: var(--primary-foreground);
-  border: none;
-  border-radius: 999px;
-  font-size: 10.5px;
-  font-weight: 600;
-  font-family: inherit;
-  padding: 2px 10px;
-  cursor: pointer;
-  transition: opacity 0.15s ease, transform 0.1s ease;
-}
-
-.redeem-btn:hover {
-  opacity: 0.85;
-}
-
-.redeem-btn:active {
-  transform: scale(0.94);
 }
 
 .bar {
@@ -1342,6 +1321,297 @@ select:focus-visible {
   border-radius: 999px;
 }
 
+/* ------------------------------------------------- rate-limit resets row */
+
+/* Severity dot in the row's "N available" value, off the soonest expiry. */
+.status-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-right: 5px;
+  vertical-align: middle;
+}
+
+.status-dot.normal {
+  background: var(--chart-blue);
+}
+
+.status-dot.warning {
+  background: #eab308;
+}
+
+.status-dot.critical {
+  background: var(--destructive);
+}
+
+/* The value lights up as a chip while its popover is open or hovered. */
+.resets-value {
+  border-radius: 6px;
+  padding: 2px 6px;
+  margin: -2px -6px;
+}
+
+.resets-value.hot {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+/* Same surface as #model-tip, but interactive (Use/confirm/buttons). */
+#resets-pop {
+  position: fixed;
+  z-index: 50;
+  width: 250px;
+  box-sizing: border-box;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.5);
+  padding: 14px;
+}
+
+/* Vertical timeline: numbered severity dot on a hairline rail. */
+.rs-node {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.rs-rail {
+  width: 18px;
+  flex: none;
+  position: relative;
+  display: flex;
+  justify-content: center;
+  align-self: stretch;
+}
+
+.rs-rail::before,
+.rs-rail::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  margin-left: -0.75px;
+  width: 1.5px;
+  background: var(--border);
+}
+
+.rs-rail::before {
+  top: 0;
+  height: 6px;
+}
+
+.rs-rail::after {
+  top: 24px;
+  bottom: 0;
+}
+
+.rs-node.first .rs-rail::before,
+.rs-node.last .rs-rail::after {
+  display: none;
+}
+
+.rs-dot {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 500;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 6px;
+  flex: none;
+}
+
+.rs-dot.normal {
+  background: var(--chart-blue);
+}
+
+.rs-dot.warning {
+  background: #eab308;
+  color: #000;
+}
+
+.rs-dot.critical {
+  background: var(--destructive);
+}
+
+/* Fixed height so the countdown ⇄ Use swap can't move the row. */
+.rs-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  font-size: 12px;
+}
+
+.rs-body:has(.rs-confirm) {
+  height: auto;
+}
+
+/* Detached in-flight row (its credit already left the data): no rail. */
+.rs-detached {
+  margin-left: 28px;
+}
+
+.rs-trail {
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.rs-use {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--foreground);
+  font-size: 11px;
+  font-family: inherit;
+  padding: 2px 8px;
+  cursor: pointer;
+  animation: fade-in 0.12s ease;
+}
+
+.rs-use:hover {
+  background: var(--accent);
+}
+
+.rs-use:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* Other nodes freeze while one is confirming or claiming. */
+.rs-node.dim {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+/* Inline confirm card replacing the node's one-line body. */
+.rs-confirm {
+  flex: 1;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--accent);
+  margin: 4px 0;
+}
+
+.rs-q {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.rs-sub {
+  font-size: 11px;
+  color: var(--muted-foreground);
+  margin-top: 4px;
+}
+
+.rs-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.rs-actions button {
+  flex: 1;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: 6px;
+  padding: 4px 0;
+  cursor: pointer;
+}
+
+.rs-go {
+  background: var(--chart-blue);
+  color: #fff;
+  border: none;
+}
+
+.rs-go:hover {
+  opacity: 0.9;
+}
+
+.rs-cancel {
+  background: none;
+  color: var(--foreground);
+  border: 1px solid var(--border);
+}
+
+.rs-cancel:hover {
+  background: var(--accent);
+}
+
+.rs-spinner {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--foreground);
+  animation: rs-spin 0.8s linear infinite;
+}
+
+@keyframes rs-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Claim outcome banner above the timeline. */
+.rs-banner {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 9px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 8px;
+  transition: opacity 0.12s ease;
+}
+
+.rs-banner.success {
+  color: #22c55e;
+  background: rgb(34 197 94 / 0.12);
+}
+
+.rs-banner.info {
+  color: var(--chart-blue);
+  background: rgb(59 130 246 / 0.12);
+}
+
+.rs-banner.warn {
+  color: #f59e0b;
+  background: rgb(245 158 11 / 0.12);
+}
+
+.rs-banner.error {
+  color: var(--destructive);
+  background: rgb(239 68 68 / 0.12);
+}
+
+/* Empty and unknown-expiry states. */
+.rs-empty {
+  text-align: center;
+  padding: 8px 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+}
+
+.rs-empty .detail {
+  font-size: 11px;
+}
+
 /* ---------------------------------------------------------------- footer */
 
 /* Floats over the card list so content scrolls behind the glass,
@@ -1648,7 +1918,7 @@ body.drawer-open #drawer {
   box-shadow: 0 8px 24px rgb(0 0 0 / 0.12);
 }
 
-/* Reset credit expiring within 24h. */
+/* Action-row expiry within 24h. */
 .warn-dot {
   color: #eab308;
   font-size: 8px;

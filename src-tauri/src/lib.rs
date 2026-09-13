@@ -2963,11 +2963,13 @@ fn set_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<(), String> {
 async fn codex_redeem_credit(
     credit_id: String,
     provider_id: Option<String>,
-) -> Result<String, String> {
+    redeem_request_id: Option<String>,
+) -> Result<providers::codex::RedeemOutcome, String> {
     // provider_id routes multi-account redeems; absent = the default card
-    // (older frontend builds during an update overlap).
+    // (older frontend builds during an update overlap). redeem_request_id
+    // is the frontend's per-credit idempotency key.
     let pid = provider_id.unwrap_or_else(|| "codex".into());
-    providers::codex::redeem_credit(&pid, &credit_id).await
+    providers::codex::redeem_credit(&pid, &credit_id, redeem_request_id).await
 }
 
 /// Updater with the app version stamped into the endpoint by us. Tauri's

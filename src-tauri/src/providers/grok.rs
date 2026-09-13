@@ -1,4 +1,4 @@
-use super::{http, http_no_redirect, Metric, Snapshot};
+use super::{http, http_no_redirect, Metric, ResetCredit, Snapshot};
 use chrono::{DateTime, Duration, Utc};
 use prost::Message;
 use serde_json::Value;
@@ -577,30 +577,26 @@ fn proto_timestamp_millis(ts: &ProtoTimestamp) -> Option<i64> {
     ts.seconds.checked_mul(1000)?.checked_add(nanos_ms)
 }
 
+/// Grok's credits are read-only (no `id` — the token ids must never reach
+/// the wire or the UI), so they share Codex's resets row without its Use
+/// flow. An empty collection emits no row at all: unlike Codex, Grok has
+/// no empty-state to reach.
 fn metrics_from_tokens(tokens: Vec<ResetToken>) -> Vec<Metric> {
-    let mut credits: Vec<Option<i64>> = tokens
-        .into_iter()
-        .map(|token| token.validity_end.as_ref().and_then(proto_timestamp_millis))
-        .collect();
-    credits.sort_by_key(|expiry| expiry.unwrap_or(i64::MAX));
-    let many = credits.len() > 1;
-    credits
-        .into_iter()
-        .enumerate()
-        .map(|(i, resets_at)| Metric {
-            label: if many {
-                format!("Reset credit {}", i + 1)
-            } else {
-                "Reset credit".into()
-            },
-            kind: "action".into(),
-            used_percent: None,
-            detail: None,
-            value: Some("Available".into()),
-            resets_at,
-            period_ms: None,
-        })
-        .collect()
+    if tokens.is_empty() {
+        return vec![];
+    }
+    vec![Metric::resets(
+        tokens.len(),
+        Some(
+            tokens
+                .into_iter()
+                .map(|token| ResetCredit {
+                    id: None,
+                    expires_at: token.validity_end.as_ref().and_then(proto_timestamp_millis),
+                })
+                .collect(),
+        ),
+    )]
 }
 
 #[cfg(test)]
@@ -795,27 +791,37 @@ mod tests {
         out
     }
 
+    /// The per-credit list inside a resets row's detail JSON.
+    fn detail_credits(metric: &Metric) -> Vec<ResetCredit> {
+        serde_json::from_str(metric.detail.as_deref().expect("resets detail")).unwrap()
+    }
+
     #[test]
-    fn one_future_token_becomes_unnumbered_reset_credit() {
+    fn one_future_token_becomes_single_resets_row() {
         let proto = remaining_resets_proto(&[reset_token(TOKEN_ID, Some((FUTURE_SECS, 5_000_000)))]);
         let body = grpc_web_unary(&proto, Some(0));
 
         let metrics = reset_credit_metrics(&body).expect("one future credit");
         assert_eq!(metrics.len(), 1);
         let metric = &metrics[0];
-        assert_eq!(metric.label, "Reset credit");
-        assert_eq!(metric.kind, "action");
-        assert_eq!(metric.detail, None);
-        assert_eq!(metric.value.as_deref(), Some("Available"));
+        assert_eq!(metric.label, "Rate Limit Resets");
+        assert_eq!(metric.kind, "resets");
+        assert_eq!(metric.value.as_deref(), Some("1"));
         assert_eq!(metric.resets_at, Some(FUTURE_SECS * 1000 + 5));
         assert_eq!(metric.period_ms, None);
 
+        let credits = detail_credits(metric);
+        assert_eq!(
+            credits,
+            vec![ResetCredit {
+                id: None,
+                expires_at: Some(FUTURE_SECS * 1000 + 5)
+            }]
+        );
         let serialized = serde_json::to_string(metric).unwrap();
         assert!(!serialized.contains(TOKEN_ID), "token id leaked: {serialized}");
-        assert!(
-            serialized.contains("\"detail\":null"),
-            "redeem detail must stay empty: {serialized}"
-        );
+        // Read-only: no redeem id may ride the row.
+        assert!(!serialized.contains("\"id\""), "redeem id leaked: {serialized}");
     }
 
     fn assert_no_token_ids(metrics: &[Metric], ids: &[&str]) {
@@ -824,29 +830,32 @@ mod tests {
             assert!(!serialized.contains(id), "token id leaked: {serialized}");
         }
         for metric in metrics {
-            assert_eq!(metric.kind, "action");
-            assert_eq!(metric.detail, None);
+            assert_eq!(metric.kind, "resets");
+            for credit in detail_credits(metric) {
+                assert_eq!(credit.id, None, "redeem id leaked");
+            }
             assert!(!metric.label.contains("Usage"));
         }
     }
 
     #[test]
-    fn multiple_future_tokens_are_numbered_earliest_first() {
+    fn multiple_future_tokens_sort_earliest_first_in_one_row() {
         let proto = remaining_resets_proto(&[
             reset_token("tok-late", Some((FUTURE_SECS + 86_400, 0))),
             reset_token("tok-soon", Some((FUTURE_SECS, 0))),
         ]);
         let metrics = reset_credit_metrics(&grpc_web_unary(&proto, Some(0)))
             .expect("two future credits");
+        assert_eq!(metrics.len(), 1);
+        let metric = &metrics[0];
+        assert_eq!(metric.value.as_deref(), Some("2"));
+        assert_eq!(metric.resets_at, Some(FUTURE_SECS * 1000));
         assert_eq!(
-            metrics
+            detail_credits(metric)
                 .iter()
-                .map(|m| (m.label.as_str(), m.resets_at))
+                .map(|c| c.expires_at)
                 .collect::<Vec<_>>(),
-            vec![
-                ("Reset credit 1", Some(FUTURE_SECS * 1000)),
-                ("Reset credit 2", Some((FUTURE_SECS + 86_400) * 1000)),
-            ]
+            vec![Some(FUTURE_SECS * 1000), Some((FUTURE_SECS + 86_400) * 1000)]
         );
         assert_no_token_ids(&metrics, &["tok-late", "tok-soon"]);
     }
@@ -860,15 +869,19 @@ mod tests {
         ]);
         let metrics = reset_credit_metrics(&grpc_web_unary(&proto, Some(0)))
             .expect("trust endpoint collection");
+        assert_eq!(metrics.len(), 1);
+        let metric = &metrics[0];
+        assert_eq!(metric.value.as_deref(), Some("3"));
+        assert_eq!(metric.resets_at, Some((EARLIER_SECS - 1) * 1000));
         assert_eq!(
-            metrics
+            detail_credits(metric)
                 .iter()
-                .map(|m| (m.label.as_str(), m.resets_at))
+                .map(|c| c.expires_at)
                 .collect::<Vec<_>>(),
             vec![
-                ("Reset credit 1", Some((EARLIER_SECS - 1) * 1000)),
-                ("Reset credit 2", Some(EARLIER_SECS * 1000)),
-                ("Reset credit 3", Some(FUTURE_SECS * 1000)),
+                Some((EARLIER_SECS - 1) * 1000),
+                Some(EARLIER_SECS * 1000),
+                Some(FUTURE_SECS * 1000),
             ]
         );
         assert_no_token_ids(&metrics, &["tok-past", "tok-earlier", "tok-future"]);
@@ -888,11 +901,10 @@ mod tests {
         let metrics = reset_credit_metrics(&grpc_web_unary(&past_dated, Some(0)))
             .expect("past-dated token");
         assert_eq!(metrics.len(), 1);
-        assert_eq!(metrics[0].label, "Reset credit");
+        assert_eq!(metrics[0].label, "Rate Limit Resets");
         assert_eq!(metrics[0].resets_at, Some(EARLIER_SECS * 1000));
         let serialized = serde_json::to_string(&metrics).unwrap();
         assert!(!serialized.contains("tok-old"));
-        assert!(!serialized.contains("Reset credits"));
     }
 
     #[test]
@@ -909,14 +921,17 @@ mod tests {
         ]);
         let metrics = reset_credit_metrics(&grpc_web_unary(&proto, Some(0)))
             .expect("undated credits");
-        assert_eq!(metrics.len(), 8);
-        assert_eq!(metrics[0].label, "Reset credit 1");
-        assert_eq!(metrics[0].resets_at, Some(FUTURE_SECS * 1000));
-        for (index, metric) in metrics.iter().enumerate().skip(1) {
-            assert_eq!(metric.label, format!("Reset credit {}", index + 1));
-            assert_eq!(metric.resets_at, None);
-            assert_eq!(metric.value.as_deref(), Some("Available"));
+        assert_eq!(metrics.len(), 1);
+        let metric = &metrics[0];
+        assert_eq!(metric.value.as_deref(), Some("8"));
+        let credits = detail_credits(metric);
+        assert_eq!(credits.len(), 8);
+        // The one valid timestamp heads the list; the rest trail undated.
+        assert_eq!(credits[0].expires_at, Some(FUTURE_SECS * 1000));
+        for credit in credits.iter().skip(1) {
+            assert_eq!(credit.expires_at, None);
         }
+        assert_eq!(metric.resets_at, Some(FUTURE_SECS * 1000));
         assert_no_token_ids(
             &metrics,
             &[
@@ -940,9 +955,15 @@ mod tests {
         ]);
         let metrics = reset_credit_metrics(&grpc_web_unary(&proto, Some(0)))
             .expect("equal expiry");
-        assert_eq!(metrics[0].label, "Reset credit 1");
-        assert_eq!(metrics[1].label, "Reset credit 2");
-        assert_eq!(metrics[0].resets_at, metrics[1].resets_at);
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].value.as_deref(), Some("2"));
+        assert_eq!(
+            detail_credits(&metrics[0])
+                .iter()
+                .map(|c| c.expires_at)
+                .collect::<Vec<_>>(),
+            vec![Some(FUTURE_SECS * 1000), Some(FUTURE_SECS * 1000)]
+        );
         assert_no_token_ids(&metrics, &["tok-a", "tok-b"]);
     }
 
@@ -983,7 +1004,7 @@ mod tests {
         let metrics = reset_credit_metrics(&grpc_web_unary(&proto, Some(0)))
             .expect("unknown fields");
         assert_eq!(metrics.len(), 1);
-        assert_eq!(metrics[0].label, "Reset credit");
+        assert_eq!(metrics[0].label, "Rate Limit Resets");
         assert_eq!(metrics[0].resets_at, Some(FUTURE_SECS * 1000));
         assert_no_token_ids(&metrics, &[TOKEN_ID, "unknown-token-field"]);
     }
