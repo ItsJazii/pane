@@ -140,9 +140,9 @@ mod tests {
         drop(conn);
 
         let mut cache = fresh_cache();
-        let changed = refresh_cache(&path, &mut cache).expect("read-only live query");
+        let outcome = refresh_cache(&path, &mut cache).expect("read-only live query");
         let _ = std::fs::remove_file(&path);
-        assert!(changed);
+        assert_eq!(outcome, Refresh::Complete);
         assert_eq!(cache.events.len(), 1);
         assert_eq!(cache.events[0].input, 10.0);
         assert_eq!(cache.events[0].output, 4.0);
@@ -164,7 +164,7 @@ mod tests {
             now_s() - 3600,
         );
         let mut cache = fresh_cache();
-        assert_eq!(refresh_cache(&path, &mut cache), Ok(true));
+        assert_eq!(refresh_cache(&path, &mut cache), Ok(Refresh::Complete));
         assert_eq!(cache.events.len(), 1);
         assert_eq!(cache.last_rowid, 2);
         assert_eq!(cache.db_identity, "2026-05-30T00:00:00Z");
@@ -178,14 +178,14 @@ mod tests {
             "{\"role\":\"assistant\",\"message_id\":\"m2\",\"metadata\":{\"generation_model\":\"gpt-5\",\"metrics\":{\"input_tokens\":7,\"output_tokens\":3,\"cache_read_tokens\":0,\"cache_creation_tokens\":0}}}",
             now_s() - 3600,
         );
-        assert_eq!(refresh_cache(&path, &mut cache), Ok(true));
+        assert_eq!(refresh_cache(&path, &mut cache), Ok(Refresh::Complete));
         assert_eq!(cache.events.len(), 2);
         let m2 = cache.events.iter().find(|e| e.mid == "m2").unwrap();
         assert_eq!(m2.model, "gpt-5");
         assert_eq!(cache.last_rowid, 4);
 
         // A db the cache already caught up with is a no-op.
-        assert_eq!(refresh_cache(&path, &mut cache), Ok(false));
+        assert_eq!(refresh_cache(&path, &mut cache), Ok(Refresh::Unchanged));
         drop(conn);
         let _ = std::fs::remove_file(&path);
     }
@@ -217,7 +217,7 @@ mod tests {
                 mid: "stale".into(),
             }],
         };
-        assert_eq!(refresh_cache(&path, &mut cache), Ok(true));
+        assert_eq!(refresh_cache(&path, &mut cache), Ok(Refresh::Complete));
         let _ = std::fs::remove_file(&path);
         assert_eq!(cache.last_rowid, 2);
         assert_eq!(cache.events.len(), 2);
@@ -233,7 +233,7 @@ mod tests {
         insert_message(&conn, "s1", &assistant_msg("m1", 1, 1), now_s() - 3600);
         insert_message(&conn, "s1", &assistant_msg("m2", 2, 2), now_s() - 3600);
         let mut cache = fresh_cache();
-        assert_eq!(refresh_cache(&path, &mut cache), Ok(true));
+        assert_eq!(refresh_cache(&path, &mut cache), Ok(Refresh::Complete));
         assert_eq!(cache.events.len(), 2);
         assert_eq!(cache.last_rowid, 2);
         assert_eq!(cache.db_identity, "A");
@@ -249,7 +249,7 @@ mod tests {
         insert_message(&conn, "s1", &assistant_msg("n3", 3, 3), now_s() - 3600);
         drop(conn);
 
-        assert_eq!(refresh_cache(&path, &mut cache), Ok(true));
+        assert_eq!(refresh_cache(&path, &mut cache), Ok(Refresh::Complete));
         let _ = std::fs::remove_file(&path);
         assert_eq!(cache.db_identity, "B");
         assert_eq!(cache.last_rowid, 3);
@@ -269,7 +269,7 @@ mod tests {
         insert_message(&conn, "s1", &assistant_msg("m2", 2, 2), now_s() - 3600);
         insert_message(&conn, "s1", &assistant_msg("m3", 3, 3), now_s() - 3600);
         let mut cache = fresh_cache();
-        assert_eq!(refresh_cache(&path, &mut cache), Ok(true));
+        assert_eq!(refresh_cache(&path, &mut cache), Ok(Refresh::Complete));
         assert_eq!(cache.events.len(), 3);
         assert_eq!(cache.last_rowid, 3);
 
@@ -278,7 +278,7 @@ mod tests {
         // recreation, and counted spend stays until it ages out.
         conn.execute("DELETE FROM message_nodes WHERE rowid = 3", [])
             .unwrap();
-        assert_eq!(refresh_cache(&path, &mut cache), Ok(false));
+        assert_eq!(refresh_cache(&path, &mut cache), Ok(Refresh::Unchanged));
         drop(conn);
         let _ = std::fs::remove_file(&path);
         assert_eq!(cache.events.len(), 3);
@@ -304,20 +304,67 @@ mod tests {
         let mut cache = fresh_cache();
         // Each pass reads at most 2 rows and resumes where it stopped —
         // the rows past the cap are picked up, never skipped.
-        assert_eq!(refresh_cache_with_limit(&path, &mut cache, 2), Ok(true));
+        assert_eq!(
+            refresh_cache_with_limit(&path, &mut cache, 2),
+            Ok(Refresh::Capped)
+        );
         assert_eq!(cache.events.len(), 2);
         assert_eq!(cache.last_rowid, 2);
-        assert_eq!(refresh_cache_with_limit(&path, &mut cache, 2), Ok(true));
+        assert_eq!(
+            refresh_cache_with_limit(&path, &mut cache, 2),
+            Ok(Refresh::Capped)
+        );
         assert_eq!(cache.events.len(), 4);
         assert_eq!(cache.last_rowid, 4);
-        assert_eq!(refresh_cache_with_limit(&path, &mut cache, 2), Ok(true));
+        assert_eq!(
+            refresh_cache_with_limit(&path, &mut cache, 2),
+            Ok(Refresh::Complete)
+        );
         assert_eq!(cache.events.len(), 5);
         assert_eq!(cache.last_rowid, 5);
-        assert_eq!(refresh_cache_with_limit(&path, &mut cache, 2), Ok(false));
+        assert_eq!(
+            refresh_cache_with_limit(&path, &mut cache, 2),
+            Ok(Refresh::Unchanged)
+        );
         let _ = std::fs::remove_file(&path);
         let mut mids: Vec<&str> = cache.events.iter().map(|e| e.mid.as_str()).collect();
         mids.sort();
         assert_eq!(mids, ["m1", "m2", "m3", "m4", "m5"]);
+    }
+
+    #[test]
+    fn devin_capped_pass_keeps_refreshing_unchanged_db() {
+        let path = temp_db("capstall");
+        let conn = create_db(&path, "2026-05-30T00:00:00Z");
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'claude-sonnet-4')", [])
+            .unwrap();
+        for i in 1u32..=5 {
+            insert_message(
+                &conn,
+                "s1",
+                &assistant_msg(&format!("m{i}"), i, i),
+                now_s() - 3600,
+            );
+        }
+        drop(conn);
+        let sentinel: FileStamp = (std::time::UNIX_EPOCH, 0);
+        let mut state = DevinState {
+            db_stamp: sentinel,
+            wal_stamp: sentinel,
+            cache: fresh_cache(),
+        };
+        // The db never changes between calls; each capped pass must still
+        // resume instead of being short-circuited by the stamp fast path.
+        assert_eq!(collect_with(&path, &mut state, None, 2).len(), 2);
+        assert_eq!(state.db_stamp, sentinel);
+        assert_eq!(collect_with(&path, &mut state, None, 2).len(), 4);
+        assert_eq!(state.db_stamp, sentinel);
+        assert_eq!(collect_with(&path, &mut state, None, 2).len(), 5);
+        // Caught up: stamps recorded, next call takes the fast path.
+        assert_eq!(state.db_stamp, file_stamp(&path));
+        assert_eq!(collect_with(&path, &mut state, None, 2).len(), 5);
+        assert_eq!(state.cache.last_rowid, 5);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -372,7 +419,7 @@ mod tests {
         drop(conn);
 
         let mut cache = fresh_cache();
-        assert_eq!(refresh_cache(&path, &mut cache), Ok(true));
+        assert_eq!(refresh_cache(&path, &mut cache), Ok(Refresh::Complete));
         let _ = std::fs::remove_file(&path);
         assert_eq!(cache.events.len(), 1);
         assert_eq!(cache.last_rowid, 2);
@@ -667,13 +714,18 @@ fn load_cache(path: &std::path::Path) -> Option<DevinCache> {
     (cache.version == DEVIN_CACHE_VERSION).then_some(cache)
 }
 
-/// Atomic write via temp + rename; a failure just means the next run
-/// rescans from rowid 0 — the in-memory cache still serves this run.
+/// Atomic write via temp + rename (std::fs::rename replaces an existing
+/// file on Windows too); a failure is logged and just means the next run
+/// resumes from the last persisted rowid — the in-memory cache still
+/// serves this run.
 fn save_cache(path: &std::path::Path, cache: &DevinCache) {
     let Ok(json) = serde_json::to_string(cache) else { return };
     let tmp = path.with_extension("json.tmp");
     if std::fs::write(&tmp, json).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            eprintln!("[pane] devin: could not replace {}: {e}", path.display());
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
 }
 
@@ -845,10 +897,27 @@ fn merge_new_events(cache: &mut DevinCache, new: Vec<StoredEvent>, up_to_rowid: 
     cache.events.retain(|e| e.ts_ms >= cutoff_ms);
 }
 
-/// Read only the rows past the remembered rowid. Ok(true) when rows were
-/// processed or the store's identity changed (the caller persists);
-/// Ok(false) when nothing landed.
-fn refresh_cache(db: &std::path::Path, cache: &mut DevinCache) -> Result<bool, String> {
+/// Outcome of one incremental pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refresh {
+    /// Nothing landed since last pass; nothing to persist.
+    Unchanged,
+    /// Caught up to the store's max rowid (rows processed, identity
+    /// adopted, or a reset) — persist.
+    Complete,
+    /// Hit MAX_MESSAGE_ROWS; rows remain past last_rowid — persist, and
+    /// the caller must not record the file stamps so the next refresh
+    /// resumes even if the store didn't change.
+    Capped,
+}
+
+/// Read only the rows past the remembered rowid. Refresh::Complete when
+/// the pass caught up (rows processed, identity adopted, or a reset —
+/// the caller persists), Refresh::Capped when the row limit cut the pass
+/// short and rows remain past last_rowid, Refresh::Unchanged when
+/// nothing landed.
+#[cfg(test)]
+fn refresh_cache(db: &std::path::Path, cache: &mut DevinCache) -> Result<Refresh, String> {
     refresh_cache_with_limit(db, cache, MAX_MESSAGE_ROWS)
 }
 
@@ -856,7 +925,7 @@ fn refresh_cache_with_limit(
     db: &std::path::Path,
     cache: &mut DevinCache,
     limit: usize,
-) -> Result<bool, String> {
+) -> Result<Refresh, String> {
     let conn = super::open_readonly_sqlite(db)?;
     let identity = db_identity(&conn);
     let max = max_rowid(&conn)?;
@@ -885,7 +954,11 @@ fn refresh_cache_with_limit(
     // mark; nothing new landed, and already-counted spend stays until it
     // ages out of the window.
     if max <= cache.last_rowid {
-        return Ok(reset);
+        return Ok(if reset {
+            Refresh::Complete
+        } else {
+            Refresh::Unchanged
+        });
     }
     // Node created_at is the index clock; attribution prefers metadata
     // created_at. One extra day of slack covers a straddle without
@@ -896,7 +969,11 @@ fn refresh_cache_with_limit(
     // When the cap cut the batch short, resume from the highest rowid
     // read instead of max — the rest are picked up next refresh.
     merge_new_events(cache, new, if capped { last_read } else { max });
-    Ok(true)
+    Ok(if capped {
+        Refresh::Capped
+    } else {
+        Refresh::Complete
+    })
 }
 
 /// Per-request token metrics from the Devin CLI's local session store.
@@ -925,8 +1002,6 @@ pub fn collect_usage_events() -> Vec<UsageEvent> {
     if !db_path.exists() {
         return Vec::new();
     }
-    let db_stamp = file_stamp(&db_path);
-    let wal_stamp = file_stamp(&db_path.with_extension("db-wal"));
 
     let Ok(mut guard) = STATE.lock() else { return Vec::new() };
     let cache_file = cache_path();
@@ -944,15 +1019,34 @@ pub fn collect_usage_events() -> Vec<UsageEvent> {
         });
     }
     let Some(state) = guard.as_mut() else { return Vec::new() };
+    collect_with(&db_path, state, Some(&cache_file), MAX_MESSAGE_ROWS)
+}
+
+/// One collect against `db_path` with `state`. Stamps are recorded only
+/// when the pass caught up (or nothing landed): a capped pass leaves them
+/// stale so the next call resumes even if the store didn't change.
+/// `cache_file` None skips persisting (tests).
+fn collect_with(
+    db_path: &std::path::Path,
+    state: &mut DevinState,
+    cache_file: Option<&std::path::Path>,
+    limit: usize,
+) -> Vec<UsageEvent> {
+    let db_stamp = file_stamp(db_path);
+    let wal_stamp = file_stamp(&db_path.with_extension("db-wal"));
     if state.db_stamp == db_stamp && state.wal_stamp == wal_stamp {
         return events_in_spend_window(&state.cache.events);
     }
-    match refresh_cache(&db_path, &mut state.cache) {
-        Ok(changed) => {
-            state.db_stamp = db_stamp;
-            state.wal_stamp = wal_stamp;
-            if changed {
-                save_cache(&cache_file, &state.cache);
+    match refresh_cache_with_limit(db_path, &mut state.cache, limit) {
+        Ok(outcome) => {
+            if outcome != Refresh::Capped {
+                state.db_stamp = db_stamp;
+                state.wal_stamp = wal_stamp;
+            }
+            if outcome != Refresh::Unchanged {
+                if let Some(path) = cache_file {
+                    save_cache(path, &state.cache);
+                }
             }
             events_in_spend_window(&state.cache.events)
         }
