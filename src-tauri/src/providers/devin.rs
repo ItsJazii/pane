@@ -409,6 +409,25 @@ mod tests {
     }
 
     #[test]
+    fn devin_save_cache_creates_missing_config_dir() {
+        let dir = std::env::temp_dir().join(format!(
+            "pane-devin-test-cachedir-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("nested").join("devin_spend_cache.json");
+        // Fresh install: %APPDATA%\Pane may not exist yet when the first
+        // scan persists — the save must not silently drop the bookmark.
+        let mut cache = fresh_cache();
+        cache.last_rowid = 3;
+        save_cache(&path, &cache);
+        let loaded = load_cache(&path).expect("saved into a created dir");
+        assert_eq!(loaded.last_rowid, 3);
+        assert!(!path.with_extension("json.tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn devin_malformed_chat_message_is_skipped() {
         let path = temp_db("malformed");
         let conn = create_db(&path, "2026-05-30T00:00:00Z");
@@ -715,17 +734,26 @@ fn load_cache(path: &std::path::Path) -> Option<DevinCache> {
 }
 
 /// Atomic write via temp + rename (std::fs::rename replaces an existing
-/// file on Windows too); a failure is logged and just means the next run
-/// resumes from the last persisted rowid — the in-memory cache still
+/// file on Windows too). Creates the config dir — a fresh install may
+/// not have it yet. Failures are logged and just mean the next run
+/// resumes from the last persisted rowid; the in-memory cache still
 /// serves this run.
 fn save_cache(path: &std::path::Path, cache: &DevinCache) {
     let Ok(json) = serde_json::to_string(cache) else { return };
-    let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, json).is_ok() {
-        if let Err(e) = std::fs::rename(&tmp, path) {
-            eprintln!("[pane] devin: could not replace {}: {e}", path.display());
-            let _ = std::fs::remove_file(&tmp);
+    if let Some(dir) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("[pane] devin: could not create {}: {e}", dir.display());
+            return;
         }
+    }
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp, json) {
+        eprintln!("[pane] devin: could not write {}: {e}", tmp.display());
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        eprintln!("[pane] devin: could not replace {}: {e}", path.display());
+        let _ = std::fs::remove_file(&tmp);
     }
 }
 
