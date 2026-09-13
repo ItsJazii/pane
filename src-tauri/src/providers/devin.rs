@@ -76,8 +76,9 @@ mod tests {
     }
 
     /// A session store shaped like the real one: AUTOINCREMENT rowid
-    /// (aliased by row_id), one row per message per branch.
-    fn create_db(path: &std::path::Path) -> rusqlite::Connection {
+    /// (aliased by row_id), one row per message per branch, and the
+    /// refinery history row that stamps the db's lineage (birth).
+    fn create_db(path: &std::path::Path, birth: &str) -> rusqlite::Connection {
         let conn = rusqlite::Connection::open(path).unwrap();
         conn.execute_batch(
             "CREATE TABLE sessions (id TEXT PRIMARY KEY, model TEXT);
@@ -86,7 +87,18 @@ mod tests {
                  session_id TEXT NOT NULL,
                  chat_message TEXT NOT NULL,
                  created_at INTEGER NOT NULL
+             );
+             CREATE TABLE refinery_schema_history (
+                 version INTEGER PRIMARY KEY,
+                 name TEXT,
+                 applied_on TEXT,
+                 checksum TEXT
              );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO refinery_schema_history VALUES (1, 'initial_schema', ?1, '')",
+            rusqlite::params![birth],
         )
         .unwrap();
         conn
@@ -120,7 +132,7 @@ mod tests {
     #[test]
     fn usage_events_read_live_file_read_only() {
         let path = temp_db("read-only");
-        let conn = create_db(&path);
+        let conn = create_db(&path, "2026-05-30T00:00:00Z");
         conn.execute("INSERT INTO sessions VALUES ('s1', 'claude-sonnet-4')", [])
             .unwrap();
         // No metadata.created_at: ts falls back to the node clock.
@@ -141,7 +153,7 @@ mod tests {
     #[test]
     fn devin_incremental_read_dedups_and_only_reads_new_rows() {
         let path = temp_db("incremental");
-        let conn = create_db(&path);
+        let conn = create_db(&path, "2026-05-30T00:00:00Z");
         conn.execute("INSERT INTO sessions VALUES ('s1', 'claude-sonnet-4')", [])
             .unwrap();
         insert_message(&conn, "s1", &assistant_msg("m1", 10, 4), now_s() - 3600);
@@ -155,6 +167,7 @@ mod tests {
         assert_eq!(refresh_cache(&path, &mut cache), Ok(true));
         assert_eq!(cache.events.len(), 1);
         assert_eq!(cache.last_rowid, 2);
+        assert_eq!(cache.db_identity, "2026-05-30T00:00:00Z");
 
         // Same message on another branch (identical metrics) dedupes;
         // a new message joins with its own generation_model.
@@ -180,15 +193,18 @@ mod tests {
     #[test]
     fn devin_cache_rescans_when_rowids_restart() {
         let path = temp_db("restart");
-        let conn = create_db(&path);
+        let conn = create_db(&path, "2026-05-30T00:00:00Z");
         conn.execute("INSERT INTO sessions VALUES ('s1', 'claude-sonnet-4')", [])
             .unwrap();
         insert_message(&conn, "s1", &assistant_msg("a", 1, 1), now_s() - 3600);
         insert_message(&conn, "s1", &assistant_msg("b", 2, 2), now_s() - 3600);
         drop(conn);
 
+        // Same lineage, but the cache's rowid mark is past the db's
+        // AUTOINCREMENT high-water — the file is younger than the cache.
         let mut cache = DevinCache {
             version: DEVIN_CACHE_VERSION,
+            db_identity: "2026-05-30T00:00:00Z".into(),
             last_rowid: 100,
             events: vec![StoredEvent {
                 ts_ms: chrono::Utc::now().timestamp_millis(),
@@ -209,6 +225,102 @@ mod tests {
     }
 
     #[test]
+    fn devin_cache_rescans_when_db_is_replaced() {
+        let path = temp_db("replaced");
+        let conn = create_db(&path, "A");
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'claude-sonnet-4')", [])
+            .unwrap();
+        insert_message(&conn, "s1", &assistant_msg("m1", 1, 1), now_s() - 3600);
+        insert_message(&conn, "s1", &assistant_msg("m2", 2, 2), now_s() - 3600);
+        let mut cache = fresh_cache();
+        assert_eq!(refresh_cache(&path, &mut cache), Ok(true));
+        assert_eq!(cache.events.len(), 2);
+        assert_eq!(cache.last_rowid, 2);
+        assert_eq!(cache.db_identity, "A");
+        drop(conn);
+
+        // Same path, different lineage: Bob's db replaces Alice's.
+        super::super::remove_sqlite_files(&path);
+        let conn = create_db(&path, "B");
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'claude-sonnet-4')", [])
+            .unwrap();
+        insert_message(&conn, "s1", &assistant_msg("n1", 1, 1), now_s() - 3600);
+        insert_message(&conn, "s1", &assistant_msg("n2", 2, 2), now_s() - 3600);
+        insert_message(&conn, "s1", &assistant_msg("n3", 3, 3), now_s() - 3600);
+        drop(conn);
+
+        assert_eq!(refresh_cache(&path, &mut cache), Ok(true));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(cache.db_identity, "B");
+        assert_eq!(cache.last_rowid, 3);
+        assert_eq!(cache.events.len(), 3);
+        let mut mids: Vec<&str> = cache.events.iter().map(|e| e.mid.as_str()).collect();
+        mids.sort();
+        assert_eq!(mids, ["n1", "n2", "n3"]);
+    }
+
+    #[test]
+    fn devin_deleted_sessions_keep_counted_spend() {
+        let path = temp_db("deleted");
+        let conn = create_db(&path, "2026-05-30T00:00:00Z");
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'claude-sonnet-4')", [])
+            .unwrap();
+        insert_message(&conn, "s1", &assistant_msg("m1", 1, 1), now_s() - 3600);
+        insert_message(&conn, "s1", &assistant_msg("m2", 2, 2), now_s() - 3600);
+        insert_message(&conn, "s1", &assistant_msg("m3", 3, 3), now_s() - 3600);
+        let mut cache = fresh_cache();
+        assert_eq!(refresh_cache(&path, &mut cache), Ok(true));
+        assert_eq!(cache.events.len(), 3);
+        assert_eq!(cache.last_rowid, 3);
+
+        // `devin rm` pulls MAX(rowid) below the mark, but the
+        // AUTOINCREMENT high-water stays — a deletion is not a
+        // recreation, and counted spend stays until it ages out.
+        conn.execute("DELETE FROM message_nodes WHERE rowid = 3", [])
+            .unwrap();
+        assert_eq!(refresh_cache(&path, &mut cache), Ok(false));
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(cache.events.len(), 3);
+        assert_eq!(cache.last_rowid, 3);
+    }
+
+    #[test]
+    fn devin_row_cap_resumes_without_gaps() {
+        let path = temp_db("rowcap");
+        let conn = create_db(&path, "2026-05-30T00:00:00Z");
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'claude-sonnet-4')", [])
+            .unwrap();
+        for i in 1u32..=5 {
+            insert_message(
+                &conn,
+                "s1",
+                &assistant_msg(&format!("m{i}"), i, i),
+                now_s() - 3600,
+            );
+        }
+        drop(conn);
+
+        let mut cache = fresh_cache();
+        // Each pass reads at most 2 rows and resumes where it stopped —
+        // the rows past the cap are picked up, never skipped.
+        assert_eq!(refresh_cache_with_limit(&path, &mut cache, 2), Ok(true));
+        assert_eq!(cache.events.len(), 2);
+        assert_eq!(cache.last_rowid, 2);
+        assert_eq!(refresh_cache_with_limit(&path, &mut cache, 2), Ok(true));
+        assert_eq!(cache.events.len(), 4);
+        assert_eq!(cache.last_rowid, 4);
+        assert_eq!(refresh_cache_with_limit(&path, &mut cache, 2), Ok(true));
+        assert_eq!(cache.events.len(), 5);
+        assert_eq!(cache.last_rowid, 5);
+        assert_eq!(refresh_cache_with_limit(&path, &mut cache, 2), Ok(false));
+        let _ = std::fs::remove_file(&path);
+        let mut mids: Vec<&str> = cache.events.iter().map(|e| e.mid.as_str()).collect();
+        mids.sort();
+        assert_eq!(mids, ["m1", "m2", "m3", "m4", "m5"]);
+    }
+
+    #[test]
     fn devin_cache_roundtrip_and_version_gate() {
         let path = std::env::temp_dir().join(format!(
             "pane-devin-test-cache-{}.json",
@@ -217,6 +329,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let mut cache = fresh_cache();
+        cache.db_identity = "2026-05-30T00:00:00Z".into();
         cache.last_rowid = 7;
         cache.events.push(StoredEvent {
             ts_ms: 123,
@@ -230,13 +343,18 @@ mod tests {
         });
         save_cache(&path, &cache);
         let loaded = load_cache(&path).expect("roundtrip");
+        assert_eq!(loaded.db_identity, "2026-05-30T00:00:00Z");
         assert_eq!(loaded.last_rowid, 7);
         assert_eq!(loaded.events.len(), 1);
         assert_eq!(loaded.events[0].input, 10.0);
         assert_eq!(loaded.events[0].mid, "m1");
 
         // A file from another cache version is ignored.
-        std::fs::write(&path, "{\"version\":999,\"last_rowid\":1,\"events\":[]}").unwrap();
+        std::fs::write(
+            &path,
+            "{\"version\":999,\"db_identity\":\"x\",\"last_rowid\":1,\"events\":[]}",
+        )
+        .unwrap();
         assert!(load_cache(&path).is_none());
         let _ = std::fs::remove_file(&path);
         // Missing file is a cold start, not an error.
@@ -246,7 +364,7 @@ mod tests {
     #[test]
     fn devin_malformed_chat_message_is_skipped() {
         let path = temp_db("malformed");
-        let conn = create_db(&path);
+        let conn = create_db(&path, "2026-05-30T00:00:00Z");
         conn.execute("INSERT INTO sessions VALUES ('s1', 'claude-sonnet-4')", [])
             .unwrap();
         insert_message(&conn, "s1", "not json", now_s() - 3600);
@@ -486,7 +604,7 @@ fn file_stamp(path: &std::path::Path) -> FileStamp {
 
 /// Bump when the on-disk shape changes; a stale file rescan-resumes
 /// from rowid 0 instead of trusting an old layout.
-const DEVIN_CACHE_VERSION: u32 = 1;
+const DEVIN_CACHE_VERSION: u32 = 2;
 
 /// One priced Devin message plus its dedup key. `mid` is "" when the
 /// row carried neither message_id nor request_id (never deduped, as before).
@@ -518,6 +636,10 @@ impl StoredEvent {
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct DevinCache {
     version: u32,
+    /// Lineage stamp of the db these events came from. A replaced or
+    /// recreated store reuses rowids, so last_rowid alone can't tell it
+    /// apart — the identity can.
+    db_identity: String,
     /// Highest message_nodes rowid processed. rowid is AUTOINCREMENT and
     /// rows are append-only, so anything past it is new — the WAL changes
     /// on every keystroke, but rowids only move when messages land.
@@ -562,10 +684,37 @@ fn max_rowid(conn: &rusqlite::Connection) -> Result<i64, String> {
     .map_err(|e| format!("max rowid: {e}"))
 }
 
+/// Stable identity of the store's lineage: the moment the Devin CLI
+/// applied its first migration. A recreated or swapped-in db gets a
+/// new one. "" when the table is missing (old/odd stores still work).
+fn db_identity(conn: &rusqlite::Connection) -> String {
+    conn.query_row(
+        "SELECT COALESCE(applied_on, '') FROM refinery_schema_history ORDER BY version LIMIT 1",
+        [],
+        |r| r.get::<_, String>(0),
+    )
+    .unwrap_or_default()
+}
+
+/// AUTOINCREMENT high-water mark for message_nodes. Unlike MAX(rowid)
+/// it never drops when sessions are deleted, so a deletion is not
+/// mistaken for a recreated store. Floored at MAX(rowid) for tables
+/// without a sequence row.
+fn rowid_high_water(conn: &rusqlite::Connection, max_rowid: i64) -> i64 {
+    conn.query_row(
+        "SELECT seq FROM sqlite_sequence WHERE name = 'message_nodes'",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+    .max(max_rowid)
+}
+
 /// sessions.db keeps one row per message per branch and can be GBs; cap
-/// the scan so a bloated db can't pin a refresh. Newest-first ordering
-/// makes the cap deterministic: the oldest rows are dropped, never the
-/// recent ones. Real data is far below.
+/// the rows one refresh reads so a bloated store can't pin a refresh.
+/// The scan is oldest-first and resumes from the last rowid read, so a
+/// store bigger than the cap is indexed across successive refreshes —
+/// nothing is dropped. Real data is far below.
 const MAX_MESSAGE_ROWS: usize = 2_000_000;
 
 /// chat_message is a fat JSON blob — content/thinking/tool_calls carry
@@ -579,32 +728,37 @@ struct ChatMessage {
 }
 
 /// Read rows in `(after_rowid, up_to_rowid]` newer than `cutoff_s`,
-/// newest rowid first. Any row error aborts the batch so a half-read
-/// never advances last_rowid.
+/// oldest rowid first, at most `limit` rows. Returns the events, the
+/// highest rowid returned (`after_rowid` when no rows came back), and
+/// whether the cap was hit — the caller resumes from that rowid next
+/// pass instead of skipping the rest. Any row error aborts the batch so
+/// a half-read never advances last_rowid.
 fn read_new_events(
     conn: &rusqlite::Connection,
     after_rowid: i64,
     up_to_rowid: i64,
     cutoff_s: i64,
-) -> Result<Vec<StoredEvent>, String> {
+    limit: usize,
+) -> Result<(Vec<StoredEvent>, i64, bool), String> {
     let mut stmt = conn
         .prepare(
-            "SELECT m.session_id, m.chat_message, m.created_at, s.model
+            "SELECT m.rowid, m.session_id, m.chat_message, m.created_at, s.model
              FROM message_nodes m JOIN sessions s ON s.id = m.session_id
              WHERE m.rowid > ?1 AND m.rowid <= ?2 AND m.created_at >= ?3
-             ORDER BY m.rowid DESC
+             ORDER BY m.rowid ASC
              LIMIT ?4",
         )
         .map_err(|e| format!("query messages: {e}"))?;
     let rows = stmt
         .query_map(
-            rusqlite::params![after_rowid, up_to_rowid, cutoff_s, MAX_MESSAGE_ROWS as i64],
+            rusqlite::params![after_rowid, up_to_rowid, cutoff_s, limit as i64],
             |row| {
                 Ok((
-                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
                 ))
             },
         )
@@ -612,10 +766,12 @@ fn read_new_events(
 
     let mut out = Vec::new();
     let mut scanned = 0usize;
+    let mut last_read = after_rowid;
     for row in rows {
         scanned += 1;
-        let (session_id, chat_message, node_created_s, model) =
+        let (rowid, session_id, chat_message, node_created_s, model) =
             row.map_err(|e| format!("read message row: {e}"))?;
+        last_read = rowid;
         let Ok(msg) = serde_json::from_str::<ChatMessage>(&chat_message) else { continue };
         if msg.role.as_ref().and_then(Value::as_str) != Some("assistant") {
             continue;
@@ -657,19 +813,20 @@ fn read_new_events(
             mid,
         });
     }
-    if scanned >= MAX_MESSAGE_ROWS {
-        eprintln!(
-            "[pane] devin: sessions.db exceeds {MAX_MESSAGE_ROWS} rows — keeping newest rows, oldest usage is dropped"
-        );
+    let capped = scanned >= limit;
+    if capped {
+        eprintln!("[pane] devin: read {limit} rows this pass — resuming next refresh");
     }
-    Ok(out)
+    Ok((out, last_read, capped))
 }
 
 /// Append a batch of new events onto the cache: one message can appear
 /// on several branches of the session forest, so rows dedupe by
-/// (session, message id) — first wins. Then advance the high-water
-/// rowid and drop events that aged out of the spend window so the file
-/// can't grow forever.
+/// (session, message id) — first wins, and the batch is read
+/// oldest-first so the earliest branch copy is the one kept (branch
+/// copies carry identical metrics, so which one wins doesn't matter).
+/// Then advance the high-water rowid and drop events that aged out of
+/// the spend window so the file can't grow forever.
 fn merge_new_events(cache: &mut DevinCache, new: Vec<StoredEvent>, up_to_rowid: i64) {
     let mut seen: std::collections::HashSet<(String, String)> = cache
         .events
@@ -689,28 +846,56 @@ fn merge_new_events(cache: &mut DevinCache, new: Vec<StoredEvent>, up_to_rowid: 
 }
 
 /// Read only the rows past the remembered rowid. Ok(true) when rows were
-/// processed (the caller persists); Ok(false) when nothing landed.
+/// processed or the store's identity changed (the caller persists);
+/// Ok(false) when nothing landed.
 fn refresh_cache(db: &std::path::Path, cache: &mut DevinCache) -> Result<bool, String> {
+    refresh_cache_with_limit(db, cache, MAX_MESSAGE_ROWS)
+}
+
+fn refresh_cache_with_limit(
+    db: &std::path::Path,
+    cache: &mut DevinCache,
+    limit: usize,
+) -> Result<bool, String> {
     let conn = super::open_readonly_sqlite(db)?;
+    let identity = db_identity(&conn);
     let max = max_rowid(&conn)?;
-    if cache.last_rowid > max {
-        // AUTOINCREMENT never goes backwards: the db was recreated or
-        // reset — the old events describe a store that no longer exists.
-        eprintln!("[pane] devin: sessions.db rowids restarted — rescanning");
+    let high_water = rowid_high_water(&conn, max);
+    // A cache that never processed a row just adopts this store's
+    // identity — starting empty is a cold start, not a replacement
+    // (without this, a fresh cache's "" identity would trip the reset
+    // check on every first pass).
+    if cache.db_identity.is_empty() && cache.last_rowid == 0 {
+        cache.db_identity = identity.clone();
+    }
+    // A swapped or recreated db can reuse rowids below the remembered
+    // mark — the lineage stamp catches what last_rowid alone can't, and
+    // a high-water regression means the file itself is younger than the
+    // cache claims.
+    let reset = cache.db_identity != identity || high_water < cache.last_rowid;
+    if reset {
+        eprintln!("[pane] devin: sessions.db was recreated or replaced — rescanning");
         *cache = DevinCache {
             version: DEVIN_CACHE_VERSION,
+            db_identity: identity,
             ..Default::default()
         };
     }
-    if max == cache.last_rowid {
-        return Ok(false);
+    // Sessions deleted since the last pass can pull MAX(rowid) below the
+    // mark; nothing new landed, and already-counted spend stays until it
+    // ages out of the window.
+    if max <= cache.last_rowid {
+        return Ok(reset);
     }
     // Node created_at is the index clock; attribution prefers metadata
     // created_at. One extra day of slack covers a straddle without
     // scanning the whole GB-sized sessions.db.
     let cutoff_s = chrono::Utc::now().timestamp() - 32 * 86_400;
-    let new = read_new_events(&conn, cache.last_rowid, max, cutoff_s)?;
-    merge_new_events(cache, new, max);
+    let (new, last_read, capped) =
+        read_new_events(&conn, cache.last_rowid, max, cutoff_s, limit)?;
+    // When the cap cut the batch short, resume from the highest rowid
+    // read instead of max — the rest are picked up next refresh.
+    merge_new_events(cache, new, if capped { last_read } else { max });
     Ok(true)
 }
 
