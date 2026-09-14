@@ -177,18 +177,22 @@ Ground rules that apply to every provider:
   `context_usage_telemetry`) — and from Claude Code sessions that ran against MiniMax's
   Anthropic-compatible endpoint (those log MiniMax models into
   `~\.claude\projects\` and are re-routed here from the Claude card).
-- **Calls:** via the mcode login — `agent.minimax.io` matrix POSTs
-  `user/get_user_extra_info` and `commerce/get_membership_info` with
-  mcode's request signing (`yy`/`x-timestamp`/`x-signature`), then
+- **Calls:** via the mcode login — `agent.minimax.io` matrix POST
+  `user/get_user_extra_info` with mcode's request signing
+  (`yy`/`x-timestamp`/`x-signature`), then
   `platform.minimax.io/v1/api/openplatform/coding_plan/remains` with the
-  workspace's `X-Group-Id` (CN hosts: `agent.minimaxi.com` /
-  `www.minimaxi.com`); via a key — `api.minimax.io/v1/token_plan/remains`
-  (+ regional fallbacks).
-- **Shows:** 5 Hours + Weekly plan windows, the Video allowance row,
-  Credits (purchased + free, mcode login only), Plan ends; the plan tier
-  verbatim (e.g. "Ultra Plan") on the mcode login or "Coding Plan" on a
-  key; Today / Yesterday / 30-day spend with per-model breakdown (the
-  CLI's own cost_usd is preferred; catalog pricing otherwise).
+  workspace's `X-Group-Id`; the matrix `commerce/get_membership_info`
+  POST runs only when the workspace lookup didn't yield a plan tier
+  (CN hosts: `agent.minimaxi.com` / `www.minimaxi.com`); via a key —
+  `api.minimax.io/v1/token_plan/remains` (+ regional fallbacks).
+- **Shows:** 5 Hours + Weekly plan windows and the Video allowance row —
+  the same three bars mcode's Usage screen draws; the plan tier verbatim
+  (e.g. "Ultra Plan") on the mcode login. The last tier the login
+  reported is remembered in `minimax-plan.json` so the chip survives the
+  OAuth token lapsing while mcode isn't running; a key with no remembered
+  tier still shows "Coding Plan". Today / Yesterday / 30-day spend with
+  per-model breakdown (the CLI's own cost_usd is preferred; catalog
+  pricing otherwise).
 
 ## OpenRouter
 

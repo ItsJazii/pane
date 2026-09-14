@@ -22,9 +22,10 @@
   Pooled-enterprise and no-allowance accounts show nothing extra.
 - **MiniMax card works through the MiniMax Code (mcode) login.** No key
   needed when mcode is signed in — the card matches mcode's own Usage
-  screen: plan tier, 5 Hours and Weekly bars, a Video row, Credits, and
-  the plan's end date (the old "Session" label migrates to "5 Hours" in
-  saved layouts). A saved key still works and is the fallback.
+  screen: plan tier plus the 5 Hours, Weekly, and Video bars (the old
+  "Session" label migrates to "5 Hours" in saved layouts). The plan tier
+  is remembered so the chip survives the login token lapsing; a saved
+  key still works and is the fallback.
 - **Settings simplified.** The Privacy section is gone — the anonymous
   once-a-day statistic is always on and the "hide tray numbers while
   screen sharing" option was removed; the sidebar Minimal-view button is

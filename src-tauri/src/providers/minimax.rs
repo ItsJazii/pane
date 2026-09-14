@@ -108,6 +108,9 @@ async fn fetch() -> Result<Snapshot, String> {
 }
 
 async fn fetch_via_key(key: &str) -> Result<Snapshot, String> {
+    // When an mcode login was seen before its token lapsed, keep its plan
+    // tier on the chip instead of flipping back to "Coding Plan".
+    let plan = remembered_tier().unwrap_or_else(|| "Coding Plan".into());
     let mut last_error = String::from("quota endpoint unreachable");
     for endpoint in ENDPOINTS {
         let resp = match super::http()
@@ -144,7 +147,7 @@ async fn fetch_via_key(key: &str) -> Result<Snapshot, String> {
             last_error = format!("MiniMax: {msg} (code {})", status_code.unwrap_or(-1));
             continue;
         }
-        if let Some(snap) = parse_remains(&doc) {
+        if let Some(snap) = parse_remains(&doc, Some(plan.clone())) {
             return Ok(snap);
         }
         last_error = "no recognizable quota rows in response".into();
@@ -169,13 +172,13 @@ fn pick_row(rows: &[Value]) -> Option<&Value> {
         })
 }
 
-fn parse_remains(doc: &Value) -> Option<Snapshot> {
+fn parse_remains(doc: &Value, plan: Option<String>) -> Option<Snapshot> {
     let rows = doc.get("model_remains").and_then(Value::as_array)?;
     let metrics = remains_metrics(rows);
     if metrics.is_empty() {
         return None;
     }
-    Some(Snapshot::ok(ID, NAME, Some("Coding Plan".into()), metrics))
+    Some(Snapshot::ok(ID, NAME, plan, metrics))
 }
 
 /// Quota rows from a `model_remains` response, in mcode's Settings → Usage
@@ -516,60 +519,63 @@ async fn platform_remains(login: &McodeLogin, group_id: Option<&str>) -> Result<
     Ok(doc)
 }
 
-/// Thousands separators for the Credits row ("0 + 1,200").
-fn thousands(n: i64) -> String {
-    let digits = n.unsigned_abs().to_string();
-    let mut out = String::new();
-    if n < 0 {
-        out.push('-');
-    }
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
+/// Where the last plan tier seen through the mcode login is remembered:
+/// <config_dir>/minimax-plan.json. mcode's access token lapses after
+/// about an hour whenever the CLI isn't running to refresh it; the key
+/// path then takes over and would otherwise flip the chip back to the
+/// generic "Coding Plan".
+fn plan_cache_path(dir: &Path) -> PathBuf {
+    dir.join("minimax-plan.json")
 }
 
-fn str_amount(v: Option<&Value>) -> i64 {
-    v.and_then(|v| {
-        v.as_str()
-            .and_then(|s| s.trim().parse::<f64>().ok())
-            .or_else(|| v.as_f64())
+fn remembered_tier() -> Option<String> {
+    remembered_tier_in(&super::config_dir())
+}
+
+fn remembered_tier_in(dir: &Path) -> Option<String> {
+    let raw = super::read_small_text(&plan_cache_path(dir), 4096, "minimax plan cache").ok()?;
+    let doc: Value = serde_json::from_str(&raw).ok()?;
+    let tier = doc.get("tier").and_then(Value::as_str)?.trim();
+    (!tier.is_empty()).then(|| tier.to_string())
+}
+
+fn remember_tier(tier: &str) {
+    remember_tier_in(&super::config_dir(), tier);
+}
+
+/// Atomic temp-write + rename, same pattern as the Devin spend cache.
+/// Writes only when the tier on disk differs — a steady-state refresh
+/// costs one small read, no write.
+fn remember_tier_in(dir: &Path, tier: &str) {
+    if remembered_tier_in(dir).as_deref() == Some(tier) {
+        return;
+    }
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        eprintln!("[pane] minimax: could not create {}: {e}", dir.display());
+        return;
+    }
+    let path = plan_cache_path(dir);
+    let json = serde_json::json!({
+        "tier": tier,
+        "seen_ms": chrono::Utc::now().timestamp_millis(),
     })
-    .unwrap_or(0.0) as i64
-}
-
-/// "0 + 1,200" — purchased + free remaining credits, comma-grouped.
-/// An empty summary object counts as absent (no Credits row).
-fn credits_text(cs: &Value) -> Option<String> {
-    if !cs.is_object() {
-        return None;
+    .to_string();
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp, json) {
+        eprintln!("[pane] minimax: could not write {}: {e}", tmp.display());
+        return;
     }
-    let purchased = cs.get("purchased_remaining_amount");
-    let free = cs.get("free_remaining_amount");
-    if purchased.is_none() && free.is_none() {
-        return None;
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        eprintln!("[pane] minimax: could not replace {}: {e}", path.display());
+        let _ = std::fs::remove_file(&tmp);
     }
-    Some(format!(
-        "{} + {}",
-        thousands(str_amount(purchased)),
-        thousands(str_amount(free))
-    ))
 }
 
-/// "Sep 18, 2026" — plan expiry in local time, like mcode's Usage screen.
-fn plan_ends(expires_ms: i64) -> Option<String> {
-    chrono::DateTime::from_timestamp_millis(expires_ms)
-        .map(|d| d.with_timezone(&chrono::Local).format("%b %-d, %Y").to_string())
-}
-
-/// Plan/quota through the mcode login: workspace lookup, then membership
-/// and remains concurrently (remains needs the workspace's op_group_id).
-/// A failed workspace call just means the membership body is `{}` and the
-/// remains call goes without a group header. Only the remains call is
-/// fatal — a dead membership call costs the Credits row, nothing else.
+/// Plan/quota through the mcode login: workspace lookup, then the
+/// remains call (it needs the workspace's op_group_id). The membership
+/// call only runs when the workspace lookup didn't yield a plan tier —
+/// it is the fallback tier source, nothing else. Only the remains call
+/// is fatal.
 async fn fetch_via_mcode(login: &McodeLogin) -> Result<Snapshot, String> {
     let extra = matrix_post(login, "/matrix/api/v1/user/get_user_extra_info", "{}")
         .await
@@ -589,13 +595,18 @@ async fn fetch_via_mcode(login: &McodeLogin) -> Result<Snapshot, String> {
     let ws_tier = ws
         .and_then(|w| w.get("token_plan_tier").and_then(Value::as_str))
         .map(str::to_string);
-    let ws_expires = ws
-        .and_then(|w| w.get("token_plan_expires_at").and_then(Value::as_i64));
 
-    let member_body = workspace_id
-        .map(|id| serde_json::json!({ "workspace_id": id }).to_string())
-        .unwrap_or_else(|| "{}".into());
-    let member_req = matrix_post(login, "/matrix/api/v1/commerce/get_membership_info", &member_body);
+    let member_req = async {
+        if ws_tier.is_some() {
+            return None;
+        }
+        let body = workspace_id
+            .map(|id| serde_json::json!({ "workspace_id": id }).to_string())
+            .unwrap_or_else(|| "{}".into());
+        matrix_post(login, "/matrix/api/v1/commerce/get_membership_info", &body)
+            .await
+            .ok()
+    };
     let remains_req = platform_remains(login, ws_group.as_deref());
     let (member, remains) = tokio::join!(member_req, remains_req);
 
@@ -606,36 +617,21 @@ async fn fetch_via_mcode(login: &McodeLogin) -> Result<Snapshot, String> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let mut metrics = remains_metrics(&rows);
+    let metrics = remains_metrics(&rows);
     if metrics.is_empty() {
         return Err("no recognizable quota rows in response".into());
     }
 
-    let member = member.ok();
-    let pick = |ws: Option<String>, m: &str| {
-        ws.or_else(|| {
+    let tier = ws_tier
+        .or_else(|| {
             member
                 .as_ref()
-                .and_then(|d| d.get(m).and_then(Value::as_str))
+                .and_then(|d| d.get("token_plan_tier").and_then(Value::as_str))
                 .map(str::to_string)
         })
-    };
-    let tier = pick(ws_tier, "token_plan_tier").filter(|s| !s.trim().is_empty());
-    let expires = ws_expires.or_else(|| {
-        member
-            .as_ref()
-            .and_then(|d| d.get("token_plan_expires_at").and_then(Value::as_i64))
-    });
-
-    if let Some(text) = member
-        .as_ref()
-        .and_then(|d| d.get("op_credit_summary"))
-        .and_then(credits_text)
-    {
-        metrics.push(Metric::text("Credits", text));
-    }
-    if let Some(label) = expires.filter(|e| *e > 0).and_then(plan_ends) {
-        metrics.push(Metric::text("Plan ends", label));
+        .filter(|s| !s.trim().is_empty());
+    if let Some(t) = &tier {
+        remember_tier(t);
     }
 
     Ok(Snapshot::ok(ID, NAME, tier, metrics))
@@ -993,43 +989,49 @@ mod tests {
     }
 
     #[test]
-    fn membership_json_yields_tier_expiry_and_credits() {
-        // token_plan_expires_at ≈ Sep 18, 2026 local (midday UTC).
-        let expiry = chrono::DateTime::parse_from_rfc3339("2026-09-18T12:00:00Z")
-            .unwrap()
-            .timestamp_millis();
+    fn membership_tier_falls_back_when_workspace_lacks_one() {
+        // get_membership_info is only called for the tier the workspace
+        // lookup didn't yield — the field it reads.
         let member = json!({
             "op_group_id": "g-1",
             "has_token_plan": true,
-            "token_plan_tier": "Ultra Plan",
-            "token_plan_expires_at": expiry,
-            "op_credit_summary": {
-                "total_remaining_amount": "1200",
-                "purchased_remaining_amount": "0",
-                "free_remaining_amount": "1200"
-            },
-            "opcredit_balance": 0
+            "token_plan_tier": "Ultra Plan"
         });
         assert_eq!(
             member.get("token_plan_tier").and_then(serde_json::Value::as_str),
             Some("Ultra Plan")
         );
+    }
+
+    #[test]
+    fn remembered_tier_round_trips_and_survives_login_lapse() {
+        let dir = std::env::temp_dir().join(format!("pane-mmx-plan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(super::remembered_tier_in(&dir), None);
+
+        super::remember_tier_in(&dir, "Ultra Plan");
+        assert_eq!(super::remembered_tier_in(&dir).as_deref(), Some("Ultra Plan"));
+
+        // Re-saving the same tier is a no-op (no rewrite per refresh).
+        let mtime = std::fs::metadata(super::plan_cache_path(&dir))
+            .unwrap()
+            .modified()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        super::remember_tier_in(&dir, "Ultra Plan");
         assert_eq!(
-            member
-                .get("token_plan_expires_at")
-                .and_then(serde_json::Value::as_i64)
-                .and_then(super::plan_ends)
-                .as_deref(),
-            Some("Sep 18, 2026")
+            std::fs::metadata(super::plan_cache_path(&dir))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            mtime
         );
-        assert_eq!(
-            super::credits_text(member.get("op_credit_summary").unwrap()).as_deref(),
-            Some("0 + 1,200")
-        );
-        // No credit summary → no Credits row.
-        assert!(super::credits_text(&json!({})).is_none());
-        // Thousands separator shape.
-        assert_eq!(super::thousands(1_234_567), "1,234,567");
+
+        // A different tier replaces it; the key path would pick it up.
+        super::remember_tier_in(&dir, "Starter");
+        assert_eq!(super::remembered_tier_in(&dir).as_deref(), Some("Starter"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1058,10 +1060,11 @@ mod tests {
                 }
             ]
         });
-        let snap = super::parse_remains(&doc).expect("snapshot");
+        // The key path passes the remembered mcode tier (or "Coding Plan").
+        let snap = super::parse_remains(&doc, Some("Ultra Plan".into())).expect("snapshot");
         let labels: Vec<&str> = snap.metrics.iter().map(|m| m.label.as_str()).collect();
         assert_eq!(labels, ["5 Hours", "Weekly", "Video"]);
-        assert_eq!(snap.plan.as_deref(), Some("Coding Plan"));
+        assert_eq!(snap.plan.as_deref(), Some("Ultra Plan"));
 
         let five_h = &snap.metrics[0];
         assert_eq!(five_h.used_percent, Some(4.0));
@@ -1093,7 +1096,7 @@ mod tests {
                 }
             ]
         });
-        let snap = super::parse_remains(&doc).expect("snapshot");
+        let snap = super::parse_remains(&doc, Some("Coding Plan".into())).expect("snapshot");
         let labels: Vec<&str> = snap.metrics.iter().map(|m| m.label.as_str()).collect();
         assert_eq!(labels, ["5 Hours", "Weekly", "Video"]);
         assert_eq!(snap.metrics[1].value.as_deref(), Some("Unlimited"));
@@ -1101,7 +1104,7 @@ mod tests {
 
         // total 0 without unlimited → no Video row at all.
         doc["model_remains"][1]["current_interval_status"] = json!(1);
-        let snap = super::parse_remains(&doc).expect("snapshot");
+        let snap = super::parse_remains(&doc, Some("Coding Plan".into())).expect("snapshot");
         let labels: Vec<&str> = snap.metrics.iter().map(|m| m.label.as_str()).collect();
         assert_eq!(labels, ["5 Hours", "Weekly"]);
     }
