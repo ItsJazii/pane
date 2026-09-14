@@ -1343,7 +1343,7 @@ function renderCard(s: Snapshot): string {
   return `
     <article class="provider${muted}" data-provider="${escapeHtml(s.id)}">
       <div class="provider-head">
-        <span class="provider-icon drag-handle" title="${escapeHtml(t("card.drag"))}">${icon}</span>
+        <span class="provider-icon drag-handle" title="${escapeHtml(t("card.drag"))}">${icon || '<span class="grip-glyph">⠿</span>'}</span>
         <span class="provider-name">${escapeHtml(s.name)}</span>
         ${planChip}
         ${stale}
@@ -2049,7 +2049,7 @@ async function shareCard(id: string): Promise<void> {
     clone.classList.add("snap-card");
     if (id !== "__total__") {
       clone
-        .querySelectorAll(".share-btn, .card-caret, .quick-links, .action-row, .drag-grip")
+        .querySelectorAll(".share-btn, .card-caret, .quick-links, .action-row, .drag-grip, .grip-glyph")
         .forEach((n) => n.remove());
     }
 

@@ -87,6 +87,18 @@ pub(crate) fn provider_json(s: &Snapshot, fetched_at: &str) -> Value {
                     line["subtitle"] = json!(m.detail);
                 }
                 line
+            } else if m.kind == "resets" {
+                // The credit list in `detail` carries per-credit ids —
+                // internals that never leave the app. The wire gets the
+                // count and the soonest expiry only.
+                json!({
+                    "type": "text",
+                    "label": m.label,
+                    "value": format!("{} available", m.value.as_deref().unwrap_or("0")),
+                    "subtitle": Value::Null,
+                    "resetsAt": m.resets_at.map(iso8601),
+                    "color": Value::Null,
+                })
             } else {
                 json!({
                     "type": "text",
@@ -219,7 +231,7 @@ pub fn start() {
 #[cfg(test)]
 mod tests {
     use super::{host_ok, provider_json, publish, route};
-    use crate::providers::{Metric, Snapshot};
+    use crate::providers::{Metric, ResetCredit, Snapshot};
 
     #[test]
     fn sub2api_public_projection_preserves_stale_and_display_amounts_only() {
@@ -244,6 +256,33 @@ mod tests {
         assert_eq!(onenewapi["stale"], false);
         assert!(onenewapi.get("error").is_none());
         assert!(onenewapi.get("warning").is_none());
+    }
+
+    #[test]
+    fn resets_metric_serves_count_and_soonest_expiry_not_credit_ids() {
+        let snap = Snapshot::ok(
+            "codex",
+            "Codex",
+            None,
+            vec![Metric::resets(
+                2,
+                Some(vec![
+                    ResetCredit { id: Some("cred-abc123".into()), expires_at: Some(1_800_000_000_000) },
+                    ResetCredit { id: Some("cred-def456".into()), expires_at: Some(1_800_100_000_000) },
+                ]),
+            )],
+        );
+        let output = provider_json(&snap, "2026-09-05T00:00:00Z");
+        let line = &output["lines"][0];
+        assert_eq!(line["type"], "text");
+        assert_eq!(line["label"], "Rate Limit Resets");
+        assert_eq!(line["value"], "2 available");
+        assert_eq!(line["subtitle"], serde_json::Value::Null);
+        assert_eq!(line["resetsAt"], "2027-01-15T08:00:00Z");
+        let raw = output.to_string();
+        for leak in ["cred-abc123", "cred-def456", "expires_at"] {
+            assert!(!raw.contains(leak), "local HTTP leaked {leak}: {raw}");
+        }
     }
 
     #[test]

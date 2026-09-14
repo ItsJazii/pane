@@ -814,6 +814,12 @@ select:focus-visible {
 .drag-handle {
   cursor: grab;
 }
+/* Iconless providers still need a visible grip to grab. */
+.grip-glyph {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 16px;
+}
 .provider.dragging {
   opacity: 0.45;
 }
@@ -1407,7 +1413,7 @@ select:focus-visible {
 /* Same surface as #model-tip, but interactive (Use/confirm/buttons). */
 #resets-pop {
   position: fixed;
-  z-index: 50;
+  z-index: 60;
   width: 230px;
   box-sizing: border-box;
   background: var(--card);
