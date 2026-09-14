@@ -488,10 +488,9 @@ async fn fetch() -> Result<Snapshot, String> {
                     }
                     Err(_) => grok.abort(),
                 }
-            }
-            // Transport failure means api2.cursor.sh is unreachable —
-            // GetSandUsageStatus rides the same host, so it is skipped.
-            if let Ok(s) = summary_fetch(&token).await {
+            } else if let Ok(s) = summary_fetch(&token).await {
+                // Transport failure means api2.cursor.sh is unreachable —
+                // GetSandUsageStatus rides the same host, so it is skipped.
                 return Ok(s);
             }
             return match legacy_fetch(&token).await {
