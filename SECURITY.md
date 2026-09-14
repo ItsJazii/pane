@@ -40,10 +40,9 @@ All of this is auditable in the source — links go to the exact code.
   entire self-reporting surface is two anonymous channels, both
   documented field-by-field in [docs/privacy.md](docs/privacy.md): the
   update check (country-level install counting, no IPs stored) and an
-  opt-out once-a-day usage statistic (random install ID, daily rollups,
+  always-on once-a-day usage statistic (random install ID, daily rollups,
   error categories only — one auditable file,
-  [`src-tauri/src/telemetry.rs`](src-tauri/src/telemetry.rs)). Turning
-  the statistic off is a hard stop and deletes the stored ID. The full
+  [`src-tauri/src/telemetry.rs`](src-tauri/src/telemetry.rs)). The full
   list of network calls Pane can make is in
   [docs/privacy.md](docs/privacy.md).
 - **The local HTTP API is loopback-only, CORS-locked, and Host-checked.**

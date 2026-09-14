@@ -265,8 +265,7 @@ body {
 #refresh,
 #settings-btn,
 #customize-btn,
-#theme-btn,
-#minimal-btn {
+#theme-btn {
   background: none;
   border: none;
   color: var(--muted-foreground);
@@ -282,8 +281,6 @@ body {
 #customize-btn:hover,
 #customize-btn.active,
 #theme-btn:hover,
-#minimal-btn:hover,
-#minimal-btn.active,
 body.refreshing #refresh {
   background: var(--accent);
   color: var(--foreground);
@@ -390,6 +387,14 @@ body.settings-open #settings {
   font-size: 11px;
   color: var(--muted-foreground);
   line-height: 1.45;
+}
+
+.settings-sub {
+  font-size: 12px;
+  font-weight: 600;
+  margin: 14px 0 6px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
 }
 
 .setting-row {
