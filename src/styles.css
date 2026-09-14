@@ -56,16 +56,45 @@
   padding: 5px 2px 2px;
 }
 :root[data-density="compact"] .card-panel {
-  padding: 8px 12px;
+  padding: 3px 14px;
 }
 :root[data-density="compact"] .metric {
-  margin: 4px 0;
+  padding: 5px 0;
+}
+:root[data-density="compact"] .metric.trend {
+  padding: 4px 0;
+}
+:root[data-density="compact"] .metric.trend .trend-chart {
+  height: 14px;
+}
+:root[data-density="compact"] .metric-label {
+  font-size: 12px;
+}
+:root[data-density="compact"] .metric-foot .detail,
+:root[data-density="compact"] .left-val,
+:root[data-density="compact"] .pace-note,
+:root[data-density="compact"] .metric-text,
+:root[data-density="compact"] .metric-text .detail {
+  font-size: 11px;
+}
+:root[data-density="compact"] .metric-text {
+  padding: 4px 0;
+}
+:root[data-density="compact"] .metric-text + .metric-text {
+  padding-top: 1px;
 }
 :root[data-density="compact"] .bar {
   height: 4px;
 }
 :root[data-density="compact"] .provider-head {
   margin-bottom: 2px;
+}
+:root[data-density="compact"] .provider-head .provider-icon {
+  width: 14px;
+  height: 14px;
+}
+:root[data-density="compact"] .plan {
+  font-size: 10px;
 }
 
 /* Minimal view: one meter per ordinary card. Total Spend and Welcome
@@ -77,7 +106,7 @@
   padding: 2px 12px 4px;
 }
 :root[data-minimal="true"] .provider:not(.total-spend):not(.welcome-card) .metric {
-  margin: 2px 0;
+  padding: 2px 0;
 }
 :root[data-minimal="true"] .provider:not(.total-spend):not(.welcome-card) .provider-head {
   margin-bottom: 0;
@@ -753,21 +782,27 @@ select:focus-visible {
   padding: 7px 3px 3px;
 }
 
+/* Borderless grouped fill (upstream's metric panel): the card chrome is
+   the fill, not an outline. */
 .card-panel {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 11px 13px;
-  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+  background: rgba(255, 255, 255, 0.05);
+  border: none;
+  border-radius: 12px;
+  padding: 5px 14px;
+  transition: background 0.18s ease, box-shadow 0.18s ease;
 }
 
 .provider:hover .card-panel {
-  border-color: #3f3f46;
+  background: rgba(255, 255, 255, 0.07);
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
 }
 
+:root[data-theme="light"] .card-panel {
+  background: rgba(0, 0, 0, 0.04);
+}
+
 :root[data-theme="light"] .provider:hover .card-panel {
-  border-color: #d4d4d8;
+  background: rgba(0, 0, 0, 0.055);
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.07);
 }
 
@@ -778,18 +813,9 @@ select:focus-visible {
   padding: 11px 13px;
 }
 
-/* Drag grip: appears on card hover, left of the provider name. */
-.drag-grip {
-  opacity: 0;
+/* The provider icon doubles as the drag handle (upstream header). */
+.drag-handle {
   cursor: grab;
-  color: var(--muted-foreground);
-  font-size: 11px;
-  margin-right: 1px;
-  user-select: none;
-  transition: opacity 0.15s ease;
-}
-.provider:hover .drag-grip {
-  opacity: 0.8;
 }
 .provider.dragging {
   opacity: 0.45;
@@ -799,19 +825,25 @@ select:focus-visible {
 .metric.trend {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
+  padding: 6px 0;
+}
+.metric.trend .metric-label {
+  font-size: 12px;
+  font-weight: 600;
 }
 .metric.trend .trend-chart {
   flex: 1;
   min-width: 0;
-  height: 22px;
+  height: 18px;
 }
 
 .provider-head {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-bottom: 9px;
+  gap: 5px;
+  margin-bottom: 4px;
+  padding-left: 2px;
 }
 
 .provider-name {
@@ -835,11 +867,7 @@ select:focus-visible {
 }
 
 .metric {
-  margin-bottom: 11px;
-}
-
-.metric:last-child {
-  margin-bottom: 2px;
+  padding: 10px 0;
 }
 
 .metric-head {
@@ -847,16 +875,16 @@ select:focus-visible {
   justify-content: space-between;
   align-items: baseline;
   gap: 8px;
-  margin-bottom: 5px;
+  margin-bottom: 4px;
 }
 
 .metric-label {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
 }
 
 .pace-note {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -946,7 +974,7 @@ select:focus-visible {
 
 .bar {
   position: relative;
-  height: 6px;
+  height: 5px;
   background: var(--muted);
   border-radius: 999px;
 }
@@ -971,7 +999,7 @@ select:focus-visible {
   position: absolute;
   top: -2px;
   width: 2px;
-  height: 10px;
+  height: 9px;
   border-radius: 1px;
   background: var(--foreground);
   opacity: 0.55;
@@ -985,11 +1013,32 @@ select:focus-visible {
   margin-top: 4px;
 }
 
+.metric-foot .detail {
+  font-size: 12px;
+}
+
 .metric-text {
   display: flex;
   justify-content: space-between;
   font-size: 12px;
-  padding: 3px 0;
+  padding: 6px 0;
+}
+
+/* Text rows: bold label left, full-contrast value right (upstream's
+   secondary row — the value is data, not annotation). */
+.metric-text > span:first-child {
+  font-weight: 600;
+}
+
+.metric-text .detail {
+  color: var(--foreground);
+  font-size: 12px;
+}
+
+/* Neighboring text rows (Today · Yesterday · Rate Limit Resets · …)
+   cluster tighter than a row gap. */
+.metric-text + .metric-text {
+  padding-top: 2px;
 }
 
 .placeholder {
@@ -2243,43 +2292,39 @@ body.no-glass .cust-dock {
   background: var(--background) !important;
 }
 
-/* Share-card composition (used only inside ⧉ snapshots): metrics live in
-   an inset rounded panel under the header, like the Mac share cards. */
+/* Share-card composition (used only inside ⧉ snapshots): the header sits
+   directly on the snapshot background and only the metrics get a panel —
+   upstream's share layout, framed by #snap-root's padding. */
 .snap-card {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: 16px 18px 16px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 0;
 }
-/* The live popover keeps headers tight against transparent cards; on the
-   solid snapshot surface the header lines up with the panel's inner text
-   column (card 18px + head 16px = card 18px + panel 16px). */
 .snap-card .provider-head {
-  padding: 0 16px;
+  padding: 0 2px;
   margin-bottom: 12px;
 }
+.snap-card .provider-icon {
+  width: 20px;
+  height: 20px;
+}
+.snap-card .provider-name {
+  font-size: 15px;
+}
 .snap-card .card-panel {
-  background: rgba(0, 0, 0, 0.22);
+  background: rgba(255, 255, 255, 0.06);
   border: none;
   padding: 14px 16px 12px;
 }
-/* Light snapshots: in the app's light theme --background and --card are
-   both near-white, which made the share read as a washed grey blob on
-   white. The snapshot flips to the app's real light hierarchy instead —
-   grey frame, white card lifted by a soft shadow, faint inset panel. */
+/* Light snapshots: white page with a faint grey panel, like upstream's
+   light share — with no outer card any more, grey-on-grey would blur. */
 :root[data-theme="light"] #snap-root {
-  background: #e8eaee;
-}
-:root[data-theme="light"] .snap-card {
   background: #ffffff;
-  border-color: rgba(0, 0, 0, 0.08);
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.1);
 }
 :root[data-theme="light"] .snap-card .card-panel {
   background: rgba(0, 0, 0, 0.045);
-}
-.snap-card .metric {
-  margin: 12px 0;
 }
 
 /* Donut hover: the pointed-at wedge slides outward along its bisector

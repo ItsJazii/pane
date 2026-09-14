@@ -1343,13 +1343,12 @@ function renderCard(s: Snapshot): string {
   return `
     <article class="provider${muted}" data-provider="${escapeHtml(s.id)}">
       <div class="provider-head">
-        <span class="drag-grip" title="${escapeHtml(t("card.drag"))}">⠿</span>
+        <span class="provider-icon drag-handle" title="${escapeHtml(t("card.drag"))}">${icon}</span>
         <span class="provider-name">${escapeHtml(s.name)}</span>
         ${planChip}
         ${stale}
         <span class="spacer"></span>
         ${share}
-        <span class="provider-icon">${icon}</span>
       </div>
       <div class="card-panel">
         ${body}
@@ -2008,7 +2007,7 @@ async function shareCard(id: string): Promise<void> {
     const rect = el.getBoundingClientRect();
     const W = Math.ceil(rect.width);
     const S = 2;
-    const PAD = 20; // frame around the card, like the Mac share cards
+    const PAD = 16; // frame around the card, like the Mac share cards
     const FOOT = 34; // logo + tagline row
     // The tagline row already carries its own breathing room, so the frame
     // under it is thin — otherwise the tagline floats with dead space below.
@@ -4915,7 +4914,7 @@ window.addEventListener("DOMContentLoaded", () => {
   let dragCard: HTMLElement | null = null;
   let armedCard: HTMLElement | null = null;
   providersEl.addEventListener("mousedown", (e) => {
-    const grip = (e.target as HTMLElement).closest(".drag-grip");
+    const grip = (e.target as HTMLElement).closest(".drag-grip, .drag-handle");
     const card = grip?.closest<HTMLElement>("article[data-provider]");
     if (card) {
       card.draggable = true;
