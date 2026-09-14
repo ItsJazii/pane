@@ -2009,7 +2009,10 @@ async function shareCard(id: string): Promise<void> {
     const W = Math.ceil(rect.width);
     const S = 2;
     const PAD = 20; // frame around the card, like the Mac share cards
-    const FOOT = 30; // logo + tagline row
+    const FOOT = 34; // logo + tagline row
+    // The tagline row already carries its own breathing room, so the frame
+    // under it is thin — otherwise the tagline floats with dead space below.
+    const PAD_BOTTOM = 4;
 
     let css = "";
     for (const sheet of Array.from(document.styleSheets)) {
@@ -2064,11 +2067,11 @@ async function shareCard(id: string): Promise<void> {
     clone.style.left = "";
     clone.style.top = "";
     const W2 = W + PAD * 2;
-    const H2 = H + PAD * 2 + FOOT;
+    const H2 = H + PAD + FOOT + PAD_BOTTOM;
     css +=
       `#snap-root{font-family:${bodyStyle.fontFamily};font-size:${bodyStyle.fontSize};` +
       `color:${bodyStyle.color};letter-spacing:${bodyStyle.letterSpacing};` +
-      `background:var(--background);padding:${PAD}px;box-sizing:border-box;` +
+      `background:var(--background);padding:${PAD}px ${PAD}px ${PAD_BOTTOM}px;box-sizing:border-box;` +
       `width:${W2}px;height:${H2}px}`;
 
     // data-theme / data-density live on <html>; :root of the snapshot
