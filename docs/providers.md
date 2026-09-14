@@ -83,7 +83,9 @@ Ground rules that apply to every provider:
   (`%APPDATA%\Cursor\User\globalStorage\state.vscdb` — read live,
   read-only; a Temp copy is last-resort only and capped at 64 MB).
 - **Calls:** `api2.cursor.sh` Connect RPCs (`GetCurrentPeriodUsage`,
-  `GetPlanInfo`, `GetCreditGrantsBalance`); the dashboard's
+  `GetPlanInfo`, `GetCreditGrantsBalance`, `GetSandUsageStatus` — Grok
+  Bot weekly allowance; optional — skipped when the RPC host is
+  unreachable, never delays the card); the dashboard's
   usage-events CSV export (for spend). `GetCreditGrantsBalance` cents
   fields may be strings or numbers. A plan name missing from
   `GetPlanInfo` falls back to `GET cursor.com/api/auth/stripe`
@@ -97,8 +99,11 @@ Ground rules that apply to every provider:
   row when the account has promo grants (`totalCents` vs remaining);
   a **Bonus** text row behind Show more when `planUsage.bonusSpend` is
   reported — free provider-sponsored usage, with the pool estimate
-  (derived from `totalPercentUsed`) as context when it is sane; Total
-  usage text on bucket-era personal plans; per-day spend.
+  (derived from `totalPercentUsed`) as context when it is sane; a
+  **Grok Bot** bar (weekly percent used + reset) after Other Models on
+  accounts with an included Grok Bot allowance — hidden for
+  pooled-enterprise / no-allowance accounts; Total usage text on
+  bucket-era personal plans; per-day spend.
 
 ## OpenCode (Go plan)
 

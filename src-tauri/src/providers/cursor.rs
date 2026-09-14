@@ -212,9 +212,34 @@ fn refreshed_token() -> &'static std::sync::Mutex<Option<String>> {
     T.get_or_init(|| std::sync::Mutex::new(None))
 }
 
+/// Connect-RPC failure split by cause: `Transport` means the host never
+/// answered (DNS/TLS/timeout) — callers use it to decide whether another
+/// same-host RPC is worth attempting. `Other` covers non-2xx statuses
+/// and body parse failures.
+enum RpcError {
+    Transport(String),
+    Other(String),
+}
+
+impl std::fmt::Display for RpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            RpcError::Transport(m) | RpcError::Other(m) => m,
+        })
+    }
+}
+
+impl From<RpcError> for String {
+    fn from(e: RpcError) -> String {
+        match e {
+            RpcError::Transport(m) | RpcError::Other(m) => m,
+        }
+    }
+}
+
 /// Connect-RPC POST to Cursor's dashboard service. Returns Ok(None) on
 /// 401/403 so the caller can refresh and retry.
-async fn connect_post(method: &str, token: &str) -> Result<Option<Value>, String> {
+async fn connect_post(method: &str, token: &str) -> Result<Option<Value>, RpcError> {
     let resp = http()
         .post(format!("https://api2.cursor.sh/aiserver.v1.DashboardService/{method}"))
         .bearer_auth(token)
@@ -223,15 +248,17 @@ async fn connect_post(method: &str, token: &str) -> Result<Option<Value>, String
         .body("{}")
         .send()
         .await
-        .map_err(|e| format!("{method}: {e}"))?;
+        .map_err(|e| RpcError::Transport(format!("{method}: {e}")))?;
     match resp.status().as_u16() {
         401 | 403 => Ok(None),
-        s if !(200..300).contains(&(s as i32)) => Err(format!("{method}: HTTP {s}")),
+        s if !(200..300).contains(&(s as i32)) => {
+            Err(RpcError::Other(format!("{method}: HTTP {s}")))
+        }
         _ => resp
             .json::<Value>()
             .await
             .map(Some)
-            .map_err(|e| format!("{method} parse: {e}")),
+            .map_err(|e| RpcError::Other(format!("{method} parse: {e}"))),
     }
 }
 
@@ -443,15 +470,33 @@ async fn fetch() -> Result<Snapshot, String> {
     let mut usage = match connect_post("GetCurrentPeriodUsage", &token).await {
         Ok(u) => u,
         Err(e) => {
-            // api2.cursor.sh just failed — GetSandUsageStatus rides the
-            // same host, so asking it here would only extend an
-            // already-degraded fetch. Grok Bot is skipped on this path.
+            if !matches!(e, RpcError::Transport(_)) {
+                // The host answered, so GetSandUsageStatus is still worth
+                // a shot — but the optional bar must never delay the
+                // summary→legacy fallback. Start it now, don't gate on
+                // it; abort it if the summary itself fails.
+                let grok = tokio::spawn({
+                    let token = token.clone();
+                    async move { fetch_grok_bot(&token).await }
+                });
+                match summary_fetch(&token).await {
+                    Ok(mut s) => {
+                        if let Ok(Some(m)) = grok.await {
+                            push_grok_bot(&mut s, m);
+                        }
+                        return Ok(s);
+                    }
+                    Err(_) => grok.abort(),
+                }
+            }
+            // Transport failure means api2.cursor.sh is unreachable —
+            // GetSandUsageStatus rides the same host, so it is skipped.
             if let Ok(s) = summary_fetch(&token).await {
                 return Ok(s);
             }
             return match legacy_fetch(&token).await {
                 Ok(s) => Ok(s),
-                Err(_) => Err(e),
+                Err(_) => Err(e.into()),
             };
         }
     };
@@ -479,14 +524,21 @@ async fn fetch() -> Result<Snapshot, String> {
     // usage-summary goes first: Enterprise/team accounts that hide
     // planUsage from the RPC still report percentages there.
     if !enabled || plan_usage.is_none() || (limit.is_none() && total_pct.is_none()) {
-        // The summary REST call and the Grok Bot RPC are independent —
-        // run them together so the optional bar adds no latency.
-        let (summary, grok) = tokio::join!(summary_fetch(&token), fetch_grok_bot(&token));
-        if let Ok(mut s) = summary {
-            if let Some(m) = grok {
-                push_grok_bot(&mut s, m);
+        // The optional Grok Bot RPC must never delay the summary→legacy
+        // fallback: start it now, don't gate on it; abort it if the
+        // summary itself fails.
+        let grok = tokio::spawn({
+            let token = token.clone();
+            async move { fetch_grok_bot(&token).await }
+        });
+        match summary_fetch(&token).await {
+            Ok(mut s) => {
+                if let Ok(Some(m)) = grok.await {
+                    push_grok_bot(&mut s, m);
+                }
+                return Ok(s);
             }
-            return Ok(s);
+            Err(_) => grok.abort(),
         }
         return legacy_fetch(&token).await;
     }
