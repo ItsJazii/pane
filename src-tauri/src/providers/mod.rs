@@ -33,12 +33,22 @@ use std::sync::{Mutex, OnceLock};
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Metric {
     pub label: String,
-    pub kind: String, // "progress" | "text"
+    pub kind: String, // "progress" | "text" | "action" | "resets"
     pub used_percent: Option<f64>,
     pub detail: Option<String>,
     pub value: Option<String>,
     pub resets_at: Option<i64>,
     pub period_ms: Option<i64>,
+}
+
+/// One banked rate-limit reset credit. `id` is present when Pane can redeem
+/// it (Codex); Grok's are read-only.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ResetCredit {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Epoch ms; None when the API gave no expiry.
+    pub expires_at: Option<i64>,
 }
 
 impl Metric {
@@ -63,6 +73,30 @@ impl Metric {
             detail: None,
             value: Some(value),
             resets_at: None,
+            period_ms: None,
+        }
+    }
+
+    /// "Rate Limit Resets": one row for all banked credits — the count in
+    /// `value`, the per-credit list (soonest first) JSON-encoded in `detail`,
+    /// the soonest expiry in `resets_at`. `credits` None = the count came from
+    /// a source without per-credit expiries.
+    pub fn resets(count: usize, credits: Option<Vec<ResetCredit>>) -> Self {
+        let mut credits = credits;
+        if let Some(c) = credits.as_mut() {
+            c.sort_by_key(|credit| credit.expires_at.unwrap_or(i64::MAX));
+        }
+        Self {
+            label: "Rate Limit Resets".into(),
+            kind: "resets".into(),
+            used_percent: None,
+            detail: credits
+                .as_ref()
+                .and_then(|c| serde_json::to_string(c).ok()),
+            value: Some(count.to_string()),
+            resets_at: credits
+                .as_ref()
+                .and_then(|c| c.iter().filter_map(|credit| credit.expires_at).min()),
             period_ms: None,
         }
     }
@@ -1012,5 +1046,35 @@ mod credit_baseline_tests {
     fn forget_credit_baselines_missing_file_is_ok() {
         let tmp = TempDir::new();
         forget_credit_baselines_in(&tmp.0, &["deepseek".into()]).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod resets_tests {
+    use super::{Metric, ResetCredit};
+
+    #[test]
+    fn resets_metric_sorts_credits_soonest_first() {
+        let m = Metric::resets(
+            2,
+            Some(vec![
+                ResetCredit {
+                    id: Some("b".into()),
+                    expires_at: Some(2_000),
+                },
+                ResetCredit {
+                    id: Some("a".into()),
+                    expires_at: Some(1_000),
+                },
+            ]),
+        );
+        assert_eq!(m.kind, "resets");
+        assert_eq!(m.value.as_deref(), Some("2"));
+        assert_eq!(m.resets_at, Some(1_000));
+        let detail: Vec<ResetCredit> = serde_json::from_str(&m.detail.unwrap()).unwrap();
+        assert_eq!(
+            detail.iter().map(|c| c.id.as_deref()).collect::<Vec<_>>(),
+            vec![Some("a"), Some("b")]
+        );
     }
 }

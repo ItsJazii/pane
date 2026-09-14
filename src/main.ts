@@ -71,12 +71,20 @@ const PROVIDER_ICONS: Record<string, string> = {
 
 interface Metric {
   label: string;
-  kind: string;
+  kind: string; // "progress" | "text" | "action" | "resets"
   used_percent: number | null;
   detail: string | null;
   value: string | null;
   resets_at: number | null;
   period_ms: number | null;
+}
+
+/// One banked reset credit inside a "resets" row's detail JSON. `id` is
+/// present only when the credit can be redeemed (Codex); Grok's are
+/// read-only.
+interface ResetCredit {
+  id?: string;
+  expires_at: number | null;
 }
 
 interface Snapshot {
@@ -715,6 +723,23 @@ function ensureLayout(): void {
       }
     }
   }
+
+  // The per-credit "Reset credit"/"Reset credit N" rows collapsed into a
+  // single "Rate Limit Resets" row. Same shape as CURSOR_RENAMES: the
+  // first match is renamed in place (stars/order carry over), later
+  // duplicates are spliced out.
+  for (const [pid, L] of Object.entries(layout.providers)) {
+    const family = providerFamily(pid);
+    if (family !== "codex" && family !== "grok") continue;
+    for (const list of [L.metricOrder, L.hidden, L.starred, L.onDemand]) {
+      for (let i = 0; i < list.length; i++) {
+        if (!/^Reset credits?(?: \d+)?$/.test(list[i])) continue;
+        if (list.includes("Rate Limit Resets")) list.splice(i--, 1);
+        else list[i] = "Rate Limit Resets";
+        changed = true;
+      }
+    }
+  }
   const hermesHasRecentModels = lastSnapshots.some(
     (s) => providerFamily(s.id) === "hermes" && s.metrics.some((m) => m.label === "Recent models"),
   );
@@ -1032,7 +1057,29 @@ function computePace(m: Metric): Pace {
 // Dashboard rendering
 // ---------------------------------------------------------------------------
 
-function renderMetric(m: Metric): string {
+type ExpirySeverity = "normal" | "warning" | "critical";
+
+/// Same bands as upstream's WidgetData.expirySeverity: critical within
+/// 48h, warning within a week, normal beyond.
+function expirySeverity(msRemaining: number): ExpirySeverity {
+  if (msRemaining <= 48 * 3_600_000) return "critical";
+  if (msRemaining <= 7 * 86_400_000) return "warning";
+  return "normal";
+}
+
+/// Per-credit list carried in a "resets" row's detail; null when the count
+/// came from a source without per-credit expiries (or the JSON is broken).
+function parseResetCredits(m: Metric): ResetCredit[] | null {
+  if (!m.detail) return null;
+  try {
+    const parsed = JSON.parse(m.detail);
+    return Array.isArray(parsed) ? (parsed as ResetCredit[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+function renderMetric(m: Metric, providerId: string): string {
   if (m.kind === "progress" && m.used_percent !== null) {
     const used = clampPercent(m.used_percent);
     const left = Math.round(100 - used);
@@ -1087,9 +1134,28 @@ function renderMetric(m: Metric): string {
         </div>
       </div>`;
   }
-  // Action row (reset credits): exact expiry, plus a Use button only when
-  // the metric carries redeem detail. A credit dying within 24h gets an
-  // amber dot so it isn't wasted.
+  // One row for all banked reset credits — count plus a severity dot off
+  // the soonest expiry. The value is the hover target for the timeline
+  // popover (Use → confirm → claim for Codex; read-only for Grok).
+  if (m.kind === "resets") {
+    const count = Number(m.value ?? 0) || 0;
+    const credits = parseResetCredits(m);
+    const soonest = credits
+      ?.map((c) => c.expires_at)
+      .filter((x): x is number => x !== null)
+      .sort((a, b) => a - b)[0];
+    const dot =
+      count > 0 && soonest !== undefined
+        ? `<span class="status-dot ${expirySeverity(soonest - Date.now())}"></span>`
+        : "";
+    return `
+      <div class="metric-text resets-row">
+        <span>${escapeHtml(displayMetricLabel(m.label))}</span>
+        <span class="detail resets-value clickable" data-resets="${escapeHtml(providerId)}|${escapeHtml(m.label)}">${dot}${escapeHtml(t("card.nAvailable", { n: count }))}</span>
+      </div>`;
+  }
+  // Action row (e.g. One/New API "Expiry"): exact expiry, and an amber dot
+  // when a credit dies within 24h.
   if (m.kind === "action") {
     const expiry =
       m.resets_at !== null
@@ -1100,15 +1166,11 @@ function renderMetric(m: Metric): string {
       remaining !== null && remaining > 0 && remaining < 86_400_000
         ? `<span class="warn-dot" title="${escapeHtml(t("card.creditDying", { time: fmtDuration(remaining) }))}">●</span> `
         : "";
-    const useBtn = m.detail
-      ? `<button class="redeem-btn" data-redeem="${escapeHtml(m.detail)}" title="${escapeHtml(t("card.useTip"))}">${escapeHtml(t("card.use"))}</button>`
-      : "";
     return `
       <div class="metric-text action-row">
         <span>${soon}${escapeHtml(displayMetricLabel(m.label))}</span>
         <span class="action-right">
           <span class="detail">${escapeHtml(expiry)}</span>
-          ${useBtn}
         </span>
       </div>`;
   }
@@ -1179,7 +1241,7 @@ function renderItem(s: Snapshot, spend: ProviderSpend | undefined, key: string):
   if (spendKey)
     return spend ? renderSpendRow(s.id, spendKey[0], spendKey[1], spend[spendKey[1]], spend) : "";
   const metric = s.metrics.find((m) => m.label === key);
-  return metric ? renderMetric(metric) : "";
+  return metric ? renderMetric(metric, s.id) : "";
 }
 
 /// Account-scoped cards (claude@<hash>) inherit their family's chrome —
@@ -1281,13 +1343,12 @@ function renderCard(s: Snapshot): string {
   return `
     <article class="provider${muted}" data-provider="${escapeHtml(s.id)}">
       <div class="provider-head">
-        <span class="drag-grip" title="${escapeHtml(t("card.drag"))}">⠿</span>
+        <span class="provider-icon drag-handle" title="${escapeHtml(t("card.drag"))}">${icon || '<span class="grip-glyph">⠿</span>'}</span>
         <span class="provider-name">${escapeHtml(s.name)}</span>
         ${planChip}
         ${stale}
         <span class="spacer"></span>
         ${share}
-        <span class="provider-icon">${icon}</span>
       </div>
       <div class="card-panel">
         ${body}
@@ -1946,8 +2007,11 @@ async function shareCard(id: string): Promise<void> {
     const rect = el.getBoundingClientRect();
     const W = Math.ceil(rect.width);
     const S = 2;
-    const PAD = 20; // frame around the card, like the Mac share cards
-    const FOOT = 30; // logo + tagline row
+    const PAD = 16; // frame around the card, like the Mac share cards
+    const FOOT = 34; // logo + tagline row
+    // The tagline row already carries its own breathing room, so the frame
+    // under it is thin — otherwise the tagline floats with dead space below.
+    const PAD_BOTTOM = 4;
 
     let css = "";
     for (const sheet of Array.from(document.styleSheets)) {
@@ -1985,7 +2049,7 @@ async function shareCard(id: string): Promise<void> {
     clone.classList.add("snap-card");
     if (id !== "__total__") {
       clone
-        .querySelectorAll(".share-btn, .card-caret, .quick-links, .action-row, .drag-grip")
+        .querySelectorAll(".share-btn, .card-caret, .quick-links, .action-row, .drag-grip, .grip-glyph")
         .forEach((n) => n.remove());
     }
 
@@ -2002,11 +2066,11 @@ async function shareCard(id: string): Promise<void> {
     clone.style.left = "";
     clone.style.top = "";
     const W2 = W + PAD * 2;
-    const H2 = H + PAD * 2 + FOOT;
+    const H2 = H + PAD + FOOT + PAD_BOTTOM;
     css +=
       `#snap-root{font-family:${bodyStyle.fontFamily};font-size:${bodyStyle.fontSize};` +
       `color:${bodyStyle.color};letter-spacing:${bodyStyle.letterSpacing};` +
-      `background:var(--background);padding:${PAD}px;box-sizing:border-box;` +
+      `background:var(--background);padding:${PAD}px ${PAD}px ${PAD_BOTTOM}px;box-sizing:border-box;` +
       `width:${W2}px;height:${H2}px}`;
 
     // data-theme / data-density live on <html>; :root of the snapshot
@@ -2463,6 +2527,7 @@ function renderAll(): void {
   const el = document.querySelector("#providers")!;
   el.innerHTML =
     renderWelcome() + renderTotalSpend() + orderedSnapshots().map(renderCard).join("");
+  resetsPopover.onRender();
   if (customizeOpen) renderDrawerBody();
   rebuildTrail();
 }
@@ -2630,6 +2695,394 @@ function showModelTip(row: HTMLElement): void {
   tip.style.top = `${Math.max(4, top)}px`;
   tip.style.left = `${Math.max(8, Math.min(rect.left + 20, window.innerWidth - tip.offsetWidth - 8))}px`;
 }
+
+// ---------------------------------------------------------------------------
+// Rate Limit Resets popover
+// ---------------------------------------------------------------------------
+
+interface RedeemOutcome {
+  outcome: "success" | "nothing_to_reset" | "no_credit";
+  message: string;
+  windows_reset: number;
+}
+
+/// Upstream's HoverPopoverState + RateLimitResetsDetail in one controller:
+/// a 400ms dwell on the row's value opens the timeline, a 180ms grace lets
+/// the cursor travel into the popover, and the confirm → claim flow pins
+/// it so a cursor slip can't tear down a live claim.
+const resetsPopover = (() => {
+  let providerId = "";
+  let label = "";
+  let open = false;
+  let overInline = false;
+  let overDetail = false;
+  let pinned = false;
+  let showTimer: ReturnType<typeof setTimeout> | null = null;
+  let hideTimer: ReturnType<typeof setTimeout> | null = null;
+  // Credits claimed this session, keyed by credit id — a claimed node drops
+  // out of the timeline immediately instead of waiting for the refresh.
+  let claimed = new Set<string>();
+  // The node currently in its inline confirm, or being claimed, keyed like
+  // `claimed` (id, else `exp:<ms>` — only id'd credits are claimable).
+  let confirming: string | null = null;
+  let claiming: string | null = null;
+  // The node the cursor is over (drives the Use reveal).
+  let hovered: string | null = null;
+  // The credits the last render drew — nodeHover needs them for the
+  // countdown ⇄ Use swap without re-reading the snapshot.
+  let visible: ResetCredit[] = [];
+  // Per-credit idempotency keys, minted on first confirm and reused on
+  // every retry — a retried claim can never double-spend (the server
+  // answers already_redeemed, which counts as success).
+  const keys = new Map<string, string>();
+  let banner: { kind: "success" | "info" | "warn" | "error"; text: string } | null = null;
+  // True once a claim reset usage or the server refused with
+  // nothing_to_reset: the remaining Use buttons disable until the popover
+  // closes — by then real usage may have resumed.
+  let nothingToReset = false;
+
+  const pop = () => document.querySelector<HTMLElement>("#resets-pop")!;
+  const creditKey = (c: ResetCredit) => c.id ?? `exp:${c.expires_at}`;
+  const claimBusy = () => confirming !== null || claiming !== null;
+
+  function liveMetric(): Metric | null {
+    return (
+      lastSnapshots
+        .find((s) => s.id === providerId)
+        ?.metrics.find((m) => m.label === label) ?? null
+    );
+  }
+
+  function findAnchor(): HTMLElement | null {
+    const wanted = `${providerId}|${label}`;
+    return (
+      Array.from(document.querySelectorAll<HTMLElement>("[data-resets]")).find(
+        (a) => a.dataset.resets === wanted,
+      ) ?? null
+    );
+  }
+
+  function setHot(hot: boolean): void {
+    findAnchor()?.classList.toggle("hot", hot);
+  }
+
+  function position(): void {
+    const anchor = findAnchor();
+    const el = pop();
+    if (!anchor) return;
+    const rect = anchor.getBoundingClientRect();
+    el.hidden = false;
+    // Below the value, right edges aligned, clamped inside the viewport.
+    const top = Math.min(rect.bottom + 4, window.innerHeight - el.offsetHeight - 8);
+    el.style.top = `${Math.max(4, top)}px`;
+    el.style.left = `${Math.max(8, Math.min(rect.right - el.offsetWidth, window.innerWidth - el.offsetWidth - 8))}px`;
+  }
+
+  function close(): void {
+    if (showTimer) clearTimeout(showTimer);
+    if (hideTimer) clearTimeout(hideTimer);
+    showTimer = hideTimer = null;
+    open = false;
+    overInline = overDetail = pinned = false;
+    hovered = confirming = claiming = null;
+    visible = [];
+    banner = null;
+    nothingToReset = false;
+    setHot(false);
+    pop().hidden = true;
+  }
+
+  function scheduleHide(): void {
+    if (hideTimer) clearTimeout(hideTimer);
+    hideTimer = setTimeout(() => {
+      hideTimer = null;
+      if (!overInline && !overDetail && !pinned) close();
+    }, 180);
+  }
+
+  /// Fresh per-target claim state — `claimed`/`keys` survive a close (a
+  /// reopened popover shouldn't re-offer a just-claimed credit or mint a
+  /// second idempotency key) but die when the anchor moves to another row.
+  function retarget(pid: string, lbl: string): void {
+    if (pid === providerId && lbl === label) return;
+    providerId = pid;
+    label = lbl;
+    claimed = new Set();
+    keys.clear();
+    confirming = claiming = hovered = null;
+    visible = [];
+    banner = null;
+    nothingToReset = false;
+  }
+
+  const CLOCK_SVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.2 1.8"/></svg>`;
+
+  function bannerHtml(): string {
+    if (!banner) return "";
+    const glyph = { success: "✓", info: "i", warn: "⚠", error: "✕" }[banner.kind];
+    return `<div class="rs-banner ${banner.kind}"><span class="rs-banner-icon">${glyph}</span>${escapeHtml(banner.text)}</div>`;
+  }
+
+  function useBtnHtml(c: ResetCredit, key: string): string {
+    if (c.id === undefined || hovered !== key || claimBusy()) return "";
+    const off = nothingToReset
+      ? ` disabled title="${escapeHtml(t("resets.nothingToResetTip"))}"`
+      : "";
+    return `<button class="rs-use" data-rs-use="${escapeHtml(key)}"${off}>${escapeHtml(t("resets.use"))}</button>`;
+  }
+
+  function countdownHtml(c: ResetCredit): string {
+    if (c.expires_at === null) return "";
+    const remaining = c.expires_at - Date.now();
+    // A past-due or ≤5-minute expiry can't print a useful countdown.
+    return remaining > 5 * 60_000 ? escapeHtml(fmtDuration(remaining)) : "";
+  }
+
+  /// One node's body: resting line, inline confirm card, or the in-flight
+  /// spinner row — the numbered dot stays on the rail either way.
+  function nodeBodyHtml(c: ResetCredit, key: string): string {
+    if (confirming === key) {
+      return `<div class="rs-confirm">
+        <div class="rs-q">${escapeHtml(t("resets.confirmTitle"))}</div>
+        <div class="rs-sub">${escapeHtml(t("resets.confirmBody"))}</div>
+        <div class="rs-actions">
+          <button class="rs-go" data-rs-go="${escapeHtml(key)}">${escapeHtml(t("resets.reset"))}</button>
+          <button class="rs-cancel" data-rs-cancel>${escapeHtml(t("resets.cancel"))}</button>
+        </div>
+      </div>`;
+    }
+    if (claiming === key) {
+      return `<span class="rs-time detail">${escapeHtml(t("resets.resetting"))}</span><span class="rs-spinner"></span>`;
+    }
+    const remaining = c.expires_at === null ? null : c.expires_at - Date.now();
+    const imminent = remaining !== null && remaining <= 5 * 60_000;
+    const time =
+      c.expires_at === null
+        ? t("resets.expiryUnknown")
+        : imminent
+          ? t("resets.expiringSoon")
+          : fmtExact(c.expires_at);
+    return `<span class="rs-time">${escapeHtml(time)}</span><span class="rs-trail">${useBtnHtml(c, key) || countdownHtml(c)}</span>`;
+  }
+
+  function nodeHtml(c: ResetCredit, key: string, i: number, last: boolean): string {
+    const sev = c.expires_at === null ? "normal" : expirySeverity(c.expires_at - Date.now());
+    const cls = [
+      "rs-node",
+      i === 0 ? "first" : "",
+      last ? "last" : "",
+      claimBusy() && confirming !== key && claiming !== key ? "dim" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    return `<div class="${cls}" data-rs-credit="${escapeHtml(key)}">
+      <div class="rs-rail"><span class="rs-dot ${sev}">${i + 1}</span></div>
+      <div class="rs-body">${nodeBodyHtml(c, key)}</div>
+    </div>`;
+  }
+
+  function render(): void {
+    const m = liveMetric();
+    const el = pop();
+    if (!m) {
+      close();
+      return;
+    }
+    const all = parseResetCredits(m);
+    // Only subtract claimed credits still present in the data — a refresh
+    // that already dropped one would double-count the subtraction.
+    const claimedNow = all?.filter((c) => claimed.has(creditKey(c))).length ?? 0;
+    visible = (all ?? []).filter((c) => !claimed.has(creditKey(c)));
+    const count = Math.max(0, (Number(m.value ?? 0) || 0) - claimedNow);
+
+    // A credit awaiting confirmation vanished from the data (background
+    // refresh): fold the card and release the pin rather than stranding a
+    // pinned popover on a dead node. An in-flight claim owns its state.
+    if (confirming && !visible.some((c) => creditKey(c) === confirming)) {
+      confirming = null;
+      pinned = false;
+    }
+
+    // The row itself left the DOM (card collapsed, provider hidden) —
+    // nothing to anchor the popover to.
+    if (!findAnchor()) {
+      close();
+      return;
+    }
+
+    let html = bannerHtml();
+    if (claiming && !visible.some((c) => creditKey(c) === claiming)) {
+      // The claim's own forced refresh can drop the in-flight credit a
+      // beat before the outcome resolves — keep the spinner row alive so
+      // it hands off to the banner instead of blinking out. Only a
+      // surviving timeline renders under it; the empty state under a
+      // still-running spinner would read as a contradiction.
+      html += `<div class="rs-body rs-detached"><span class="rs-time detail">${escapeHtml(t("resets.resetting"))}</span><span class="rs-spinner"></span></div>`;
+      html += visible
+        .map((c, i) => nodeHtml(c, creditKey(c), i, i === visible.length - 1))
+        .join("");
+    } else if (visible.length > 0) {
+      html += visible
+        .map((c, i) => nodeHtml(c, creditKey(c), i, i === visible.length - 1))
+        .join("");
+    } else if (count > 0) {
+      // Credits exist but the expiry list wasn't fetched (usage-body
+      // count fallback) — state the count, not "no resets".
+      html += `<div class="rs-empty">${CLOCK_SVG}
+        <div>${escapeHtml(t("card.nAvailable", { n: count }))}</div>
+        <div class="detail">${escapeHtml(t("resets.expiryUnknown"))}</div></div>`;
+    } else {
+      html += `<div class="rs-empty">${CLOCK_SVG}<div>${escapeHtml(t("resets.none"))}</div></div>`;
+    }
+    el.innerHTML = html;
+    position();
+  }
+
+  /// The countdown ⇄ Use swap on node hover re-renders just that node's
+  /// trail — rebuilding the whole popover on every mouseover flickers.
+  function updateTrail(key: string | null): void {
+    if (key === null) return;
+    const node = pop().querySelector<HTMLElement>(`[data-rs-credit="${key}"]`);
+    const trail = node?.querySelector<HTMLElement>(".rs-trail");
+    const credit = visible.find((c) => creditKey(c) === key);
+    if (!trail || !credit) return;
+    trail.innerHTML = useBtnHtml(credit, key) || countdownHtml(credit);
+  }
+
+  function runClaim(key: string): void {
+    const credit = visible.find((c) => creditKey(c) === key);
+    confirming = null;
+    claiming = key;
+    render();
+    const status = document.querySelector("#status")!;
+    status.textContent = t("footer.redeeming");
+    invoke<RedeemOutcome>("codex_redeem_credit", {
+      creditId: credit?.id ?? key,
+      providerId,
+      redeemRequestId: keys.get(key),
+    })
+      .then(async (o) => {
+        status.textContent = o.message;
+        if (o.outcome === "success") {
+          claimed.add(key);
+          nothingToReset = true;
+          banner = { kind: "success", text: t("resets.claimed") };
+          // Await the forced refresh while still pinned: its renderAll
+          // re-renders the popover (banner survives) instead of closing it.
+          await refresh(true);
+        } else if (o.outcome === "nothing_to_reset") {
+          // The server spent no credit — the rest would refuse the same
+          // way right now, so the Use buttons disable for this session.
+          nothingToReset = true;
+          banner = { kind: "info", text: t("resets.noNeed") };
+        } else {
+          claimed.add(key);
+          banner = { kind: "warn", text: t("resets.gone") };
+          await refresh(true);
+        }
+      })
+      .catch((err) => {
+        banner = { kind: "error", text: t("resets.failed") };
+        status.textContent = t("footer.redeemFailed", { err: String(err) });
+      })
+      .finally(() => {
+        claiming = null;
+        pinned = false;
+        if (open) render();
+        scheduleHide();
+      });
+  }
+
+  return {
+    /// Cursor entered the row's value chip.
+    inlineEnter(target: HTMLElement): void {
+      const [pid, lbl] = (target.dataset.resets ?? "").split("|");
+      if (!pid || !lbl) return;
+      retarget(pid, lbl);
+      overInline = true;
+      if (hideTimer) {
+        clearTimeout(hideTimer);
+        hideTimer = null;
+      }
+      setHot(true);
+      if (open) {
+        render();
+        return;
+      }
+      if (showTimer) return;
+      showTimer = setTimeout(() => {
+        showTimer = null;
+        if (!overInline) return;
+        open = true;
+        render();
+      }, 400);
+    },
+    /// Cursor left the row's value chip entirely.
+    inlineLeave(): void {
+      overInline = false;
+      setHot(open);
+      scheduleHide();
+    },
+    detailEnter(): void {
+      overDetail = true;
+      if (hideTimer) {
+        clearTimeout(hideTimer);
+        hideTimer = null;
+      }
+    },
+    detailLeave(): void {
+      overDetail = false;
+      scheduleHide();
+    },
+    /// Node hover inside the popover: reveal that credit's Use button.
+    nodeHover(key: string | null): void {
+      if (claimBusy()) return;
+      if (key === hovered) return;
+      const prev = hovered;
+      hovered = key;
+      updateTrail(prev);
+      updateTrail(hovered);
+    },
+    /// Click delegation inside the popover.
+    click(target: HTMLElement): void {
+      const use = target.closest<HTMLElement>("[data-rs-use]");
+      if (use) {
+        const key = use.dataset.rsUse!;
+        if (!keys.has(key)) keys.set(key, crypto.randomUUID());
+        banner = null;
+        hovered = null;
+        confirming = key;
+        pinned = true;
+        render();
+        return;
+      }
+      if (target.closest("[data-rs-cancel]")) {
+        confirming = null;
+        pinned = false;
+        render();
+        scheduleHide();
+        return;
+      }
+      const go = target.closest<HTMLElement>("[data-rs-go]");
+      if (go) runClaim(go.dataset.rsGo!);
+    },
+    /// Every card-list re-render rebuilds the anchor under us — re-read
+    /// the fresh metric, re-find the anchor and re-light the chip rather
+    /// than closing; render() itself closes when the row or its metric is
+    /// gone. A routine refresh must not kill an open timeline or banner.
+    onRender(): void {
+      if (!open) return;
+      render();
+      setHot(true);
+    },
+    onScroll(): void {
+      if (open && !pinned) close();
+    },
+    dismiss(): void {
+      close();
+    },
+  };
+})();
 
 // ---------------------------------------------------------------------------
 // Refresh + tray strip
@@ -4461,7 +4914,7 @@ window.addEventListener("DOMContentLoaded", () => {
   let dragCard: HTMLElement | null = null;
   let armedCard: HTMLElement | null = null;
   providersEl.addEventListener("mousedown", (e) => {
-    const grip = (e.target as HTMLElement).closest(".drag-grip");
+    const grip = (e.target as HTMLElement).closest(".drag-grip, .drag-handle");
     const card = grip?.closest<HTMLElement>("article[data-provider]");
     if (card) {
       card.draggable = true;
@@ -4540,32 +4993,6 @@ window.addEventListener("DOMContentLoaded", () => {
       setDrawer(true);
       return;
     }
-    const redeem = target.closest<HTMLElement>("[data-redeem]");
-    if (redeem) {
-      const creditId = redeem.dataset.redeem!;
-      // Multi-account: the redeem must ride the account whose card offered
-      // the credit, not the default login's token.
-      const providerId =
-        redeem.closest<HTMLElement>("article.provider")?.dataset.provider ?? "codex";
-      void appConfirm({
-        title: t("redeem.title"),
-        message: t("redeem.body"),
-        confirmLabel: t("redeem.confirm"),
-      }).then((ok) => {
-        if (!ok) return;
-        const status = document.querySelector("#status")!;
-        status.textContent = t("footer.redeeming");
-        void invoke<string>("codex_redeem_credit", { creditId, providerId })
-          .then((msg) => {
-            status.textContent = msg;
-            void refresh(true);
-          })
-          .catch((err) => {
-            status.textContent = t("footer.redeemFailed", { err: String(err) });
-          });
-      });
-      return;
-    }
     const tab = target.closest("[data-tab]");
     if (tab) {
       switchSpendTab(tab.getAttribute("data-tab") as SpendTab);
@@ -4600,6 +5027,11 @@ window.addEventListener("DOMContentLoaded", () => {
   providersEl.addEventListener("mouseover", (e) => {
     if (customizeOpen) return;
     const target = e.target as HTMLElement;
+    const resets = target.closest<HTMLElement>("[data-resets]");
+    if (resets) {
+      resetsPopover.inlineEnter(resets);
+      return;
+    }
     const bar = target.closest<HTMLElement>("[data-trend]");
     if (bar) {
       showTrendTip(bar);
@@ -4610,16 +5042,33 @@ window.addEventListener("DOMContentLoaded", () => {
   });
   providersEl.addEventListener("mouseout", (e) => {
     const target = e.target as HTMLElement;
-    const hovered = target.closest<HTMLElement>("[data-spend], [data-trend]");
     const to = e.relatedTarget as HTMLElement | null;
+    const resets = target.closest<HTMLElement>("[data-resets]");
+    if (resets && (!to || !resets.contains(to))) resetsPopover.inlineLeave();
+    const hovered = target.closest<HTMLElement>("[data-spend], [data-trend]");
     if (hovered && (!to || !hovered.contains(to))) tip.hidden = true;
   });
   let scrollRaf = 0;
   providersEl.addEventListener("scroll", () => {
     tip.hidden = true;
+    resetsPopover.onScroll();
     cancelAnimationFrame(scrollRaf);
     scrollRaf = requestAnimationFrame(updateTrailActive);
   });
+
+  const rsPop = document.querySelector<HTMLElement>("#resets-pop")!;
+  rsPop.addEventListener("mouseenter", () => resetsPopover.detailEnter());
+  rsPop.addEventListener("mouseleave", () => resetsPopover.detailLeave());
+  rsPop.addEventListener("mouseover", (e) => {
+    const node = (e.target as HTMLElement).closest<HTMLElement>(".rs-node");
+    resetsPopover.nodeHover(node?.dataset.rsCredit ?? null);
+  });
+  rsPop.addEventListener("mouseout", (e) => {
+    const node = (e.target as HTMLElement).closest<HTMLElement>(".rs-node");
+    const to = e.relatedTarget as HTMLElement | null;
+    if (node && (!to || !node.contains(to))) resetsPopover.nodeHover(null);
+  });
+  rsPop.addEventListener("click", (e) => resetsPopover.click(e.target as HTMLElement));
 
   document.querySelector("#trail")!.addEventListener("click", (e) => {
     const tick = (e.target as HTMLElement).closest<HTMLElement>("[data-trail]");
@@ -4647,6 +5096,7 @@ window.addEventListener("DOMContentLoaded", () => {
     setSettings(false);
     dismissConfirm?.();
     dismissWhatsNew?.();
+    resetsPopover.dismiss();
     // A fresh update's notes present on the first open after launch.
     if (pendingWhatsNew) {
       showChangelogDialog(t("dialog.whatsNew", { version: appVersion }), pendingWhatsNew);

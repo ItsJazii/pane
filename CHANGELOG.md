@@ -2,7 +2,25 @@
 
 ## Unreleased
 
+### Added
+- **Rate Limit Resets row.** Codex (and Grok, read-only) reset credits
+  are one row — `● N available`, the dot blue / yellow within 7 days /
+  red within 48 hours of the soonest expiry — instead of a "Reset credit
+  1/2/3" row each. Hovering the value opens a timeline of every credit
+  with its exact expiry and countdown; hovering a credit reveals **Use**,
+  which confirms inline and reports the outcome right there (claimed,
+  not needed yet, no longer available, failed). Saved layouts migrate
+  automatically.
+- **Cards follow the OpenUsage design.** Provider icon on the left (it
+  is the drag handle now), bolder row labels, full-contrast values,
+  borderless grouped metric panel, upstream type sizes and spacing in
+  both densities. Share images put the header on the background with
+  only the metrics in a panel and a tighter footer.
+
 ### Fixed
+- **Using a Codex reset credit reported success even when nothing was
+  reset.** The consume endpoint's `nothing_to_reset` / `no_credit`
+  answers are now shown as such; `already_redeemed` counts as done.
 - **Devin spend no longer re-reads the whole `sessions.db` on every
   refresh.** The Devin CLI's local store is multi-GB and its WAL changes
   constantly, so the old stamp cache missed every time and each refresh

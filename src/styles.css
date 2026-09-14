@@ -56,16 +56,42 @@
   padding: 5px 2px 2px;
 }
 :root[data-density="compact"] .card-panel {
-  padding: 8px 12px;
+  padding: 3px 14px;
 }
 :root[data-density="compact"] .metric {
-  margin: 4px 0;
+  padding: 5px 0;
+}
+:root[data-density="compact"] .metric.trend {
+  padding: 4px 0;
+}
+:root[data-density="compact"] .metric-label {
+  font-size: 12px;
+}
+:root[data-density="compact"] .metric-foot .detail,
+:root[data-density="compact"] .left-val,
+:root[data-density="compact"] .pace-note,
+:root[data-density="compact"] .metric-text,
+:root[data-density="compact"] .metric-text .detail {
+  font-size: 11px;
+}
+:root[data-density="compact"] .metric-text {
+  padding: 4px 4px;
+}
+:root[data-density="compact"] .metric-text + .metric-text {
+  padding-top: 1px;
 }
 :root[data-density="compact"] .bar {
   height: 4px;
 }
 :root[data-density="compact"] .provider-head {
   margin-bottom: 2px;
+}
+:root[data-density="compact"] .provider-head .provider-icon {
+  width: 14px;
+  height: 14px;
+}
+:root[data-density="compact"] .plan {
+  font-size: 10px;
 }
 
 /* Minimal view: one meter per ordinary card. Total Spend and Welcome
@@ -77,7 +103,7 @@
   padding: 2px 12px 4px;
 }
 :root[data-minimal="true"] .provider:not(.total-spend):not(.welcome-card) .metric {
-  margin: 2px 0;
+  padding: 2px 0;
 }
 :root[data-minimal="true"] .provider:not(.total-spend):not(.welcome-card) .provider-head {
   margin-bottom: 0;
@@ -753,21 +779,27 @@ select:focus-visible {
   padding: 7px 3px 3px;
 }
 
+/* Borderless grouped fill (upstream's metric panel): the card chrome is
+   the fill, not an outline. */
 .card-panel {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 11px 13px;
-  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+  background: rgba(255, 255, 255, 0.05);
+  border: none;
+  border-radius: 12px;
+  padding: 5px 14px;
+  transition: background 0.18s ease, box-shadow 0.18s ease;
 }
 
 .provider:hover .card-panel {
-  border-color: #3f3f46;
+  background: rgba(255, 255, 255, 0.07);
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
 }
 
+:root[data-theme="light"] .card-panel {
+  background: rgba(0, 0, 0, 0.04);
+}
+
 :root[data-theme="light"] .provider:hover .card-panel {
-  border-color: #d4d4d8;
+  background: rgba(0, 0, 0, 0.055);
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.07);
 }
 
@@ -778,18 +810,15 @@ select:focus-visible {
   padding: 11px 13px;
 }
 
-/* Drag grip: appears on card hover, left of the provider name. */
-.drag-grip {
-  opacity: 0;
+/* The provider icon doubles as the drag handle (upstream header). */
+.drag-handle {
   cursor: grab;
-  color: var(--muted-foreground);
-  font-size: 11px;
-  margin-right: 1px;
-  user-select: none;
-  transition: opacity 0.15s ease;
 }
-.provider:hover .drag-grip {
-  opacity: 0.8;
+/* Iconless providers still need a visible grip to grab. */
+.grip-glyph {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 16px;
 }
 .provider.dragging {
   opacity: 0.45;
@@ -799,7 +828,12 @@ select:focus-visible {
 .metric.trend {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
+  padding: 6px 0;
+}
+.metric.trend .metric-label {
+  font-size: 12px;
+  font-weight: 600;
 }
 .metric.trend .trend-chart {
   flex: 1;
@@ -810,8 +844,9 @@ select:focus-visible {
 .provider-head {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-bottom: 9px;
+  gap: 5px;
+  margin-bottom: 4px;
+  padding-left: 2px;
 }
 
 .provider-name {
@@ -835,11 +870,7 @@ select:focus-visible {
 }
 
 .metric {
-  margin-bottom: 11px;
-}
-
-.metric:last-child {
-  margin-bottom: 2px;
+  padding: 10px 0;
 }
 
 .metric-head {
@@ -847,16 +878,16 @@ select:focus-visible {
   justify-content: space-between;
   align-items: baseline;
   gap: 8px;
-  margin-bottom: 5px;
+  margin-bottom: 4px;
 }
 
 .metric-label {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
 }
 
 .pace-note {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted-foreground);
   white-space: nowrap;
 }
@@ -937,32 +968,11 @@ select:focus-visible {
   color: var(--foreground);
 }
 
-/* Codex reset-credit row: expiry text + a small Use pill. */
+/* Action row (e.g. One/New API "Expiry"): right-aligned detail text. */
 .action-row .action-right {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.redeem-btn {
-  background: var(--primary);
-  color: var(--primary-foreground);
-  border: none;
-  border-radius: 999px;
-  font-size: 10.5px;
-  font-weight: 600;
-  font-family: inherit;
-  padding: 2px 10px;
-  cursor: pointer;
-  transition: opacity 0.15s ease, transform 0.1s ease;
-}
-
-.redeem-btn:hover {
-  opacity: 0.85;
-}
-
-.redeem-btn:active {
-  transform: scale(0.94);
 }
 
 .bar {
@@ -1006,11 +1016,35 @@ select:focus-visible {
   margin-top: 4px;
 }
 
+.metric-foot .detail {
+  font-size: 12px;
+}
+
 .metric-text {
   display: flex;
   justify-content: space-between;
   font-size: 12px;
-  padding: 3px 0;
+  /* Side inset matches the spend rows' hover chip so every text row's
+     label starts on the same x. */
+  margin: 0 -4px;
+  padding: 6px 4px;
+}
+
+/* Text rows: bold label left, full-contrast value right (upstream's
+   secondary row — the value is data, not annotation). */
+.metric-text > span:first-child {
+  font-weight: 600;
+}
+
+.metric-text .detail {
+  color: var(--foreground);
+  font-size: 12px;
+}
+
+/* Neighboring text rows (Today · Yesterday · Rate Limit Resets · …)
+   cluster tighter than a row gap. */
+.metric-text + .metric-text {
+  padding-top: 2px;
 }
 
 .placeholder {
@@ -1281,8 +1315,6 @@ select:focus-visible {
 .spend-row {
   cursor: default;
   border-radius: 6px;
-  margin: 0 -4px;
-  padding: 3px 4px;
 }
 
 .spend-row:hover {
@@ -1340,6 +1372,298 @@ select:focus-visible {
   height: 100%;
   background: var(--chart-blue);
   border-radius: 999px;
+}
+
+/* ------------------------------------------------- rate-limit resets row */
+
+/* Severity dot in the row's "N available" value, off the soonest expiry. */
+.status-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-right: 5px;
+  vertical-align: middle;
+}
+
+.status-dot.normal {
+  background: var(--chart-blue);
+}
+
+.status-dot.warning {
+  background: #eab308;
+}
+
+.status-dot.critical {
+  background: var(--destructive);
+}
+
+/* The value lights up as a chip while its popover is open or hovered. */
+.resets-value {
+  border-radius: 6px;
+  padding: 2px 6px;
+  margin: -2px -6px;
+}
+
+.resets-value.hot {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+/* Same surface as #model-tip, but interactive (Use/confirm/buttons). */
+#resets-pop {
+  position: fixed;
+  z-index: 60;
+  width: 230px;
+  box-sizing: border-box;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.5);
+  padding: 9px 11px;
+  font-size: 11.5px;
+}
+
+/* Vertical timeline: numbered severity dot on a hairline rail. */
+.rs-node {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.rs-rail {
+  width: 16px;
+  flex: none;
+  position: relative;
+  display: flex;
+  justify-content: center;
+  align-self: stretch;
+}
+
+.rs-rail::before,
+.rs-rail::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  margin-left: -0.75px;
+  width: 1.5px;
+  background: var(--border);
+}
+
+.rs-rail::before {
+  top: 0;
+  height: 5px;
+}
+
+.rs-rail::after {
+  top: 21px;
+  bottom: 0;
+}
+
+.rs-node.first .rs-rail::before,
+.rs-node.last .rs-rail::after {
+  display: none;
+}
+
+.rs-dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 500;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 5px;
+  flex: none;
+}
+
+.rs-dot.normal {
+  background: var(--chart-blue);
+}
+
+.rs-dot.warning {
+  background: #eab308;
+  color: #000;
+}
+
+.rs-dot.critical {
+  background: var(--destructive);
+}
+
+/* Fixed height so the countdown ⇄ Use swap can't move the row. */
+.rs-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  font-size: 11.5px;
+}
+
+.rs-body:has(.rs-confirm) {
+  height: auto;
+}
+
+/* Detached in-flight row (its credit already left the data): no rail. */
+.rs-detached {
+  margin-left: 24px;
+}
+
+.rs-trail {
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.rs-use {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--foreground);
+  font-size: 10.5px;
+  font-family: inherit;
+  padding: 2px 8px;
+  cursor: pointer;
+  animation: fade-in 0.12s ease;
+}
+
+.rs-use:hover {
+  background: var(--accent);
+}
+
+.rs-use:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* Other nodes freeze while one is confirming or claiming. */
+.rs-node.dim {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+/* Inline confirm card replacing the node's one-line body. */
+.rs-confirm {
+  flex: 1;
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--accent);
+  margin: 4px 0;
+}
+
+.rs-q {
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.rs-sub {
+  font-size: 10.5px;
+  color: var(--muted-foreground);
+  margin-top: 4px;
+}
+
+.rs-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.rs-actions button {
+  flex: 1;
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: 500;
+  border-radius: 6px;
+  padding: 4px 0;
+  cursor: pointer;
+}
+
+.rs-go {
+  background: var(--chart-blue);
+  color: #fff;
+  border: none;
+}
+
+.rs-go:hover {
+  opacity: 0.9;
+}
+
+.rs-cancel {
+  background: none;
+  color: var(--foreground);
+  border: 1px solid var(--border);
+}
+
+.rs-cancel:hover {
+  background: var(--accent);
+}
+
+.rs-spinner {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--foreground);
+  animation: rs-spin 0.8s linear infinite;
+}
+
+@keyframes rs-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Claim outcome banner above the timeline. */
+.rs-banner {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 7px 8px;
+  border-radius: 8px;
+  font-size: 11.5px;
+  font-weight: 500;
+  margin-bottom: 6px;
+  transition: opacity 0.12s ease;
+}
+
+.rs-banner.success {
+  color: #22c55e;
+  background: rgb(34 197 94 / 0.12);
+}
+
+.rs-banner.info {
+  color: var(--chart-blue);
+  background: rgb(59 130 246 / 0.12);
+}
+
+.rs-banner.warn {
+  color: #f59e0b;
+  background: rgb(245 158 11 / 0.12);
+}
+
+.rs-banner.error {
+  color: var(--destructive);
+  background: rgb(239 68 68 / 0.12);
+}
+
+/* Empty and unknown-expiry states. */
+.rs-empty {
+  text-align: center;
+  padding: 8px 0;
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+}
+
+.rs-empty .detail {
+  font-size: 10.5px;
 }
 
 /* ---------------------------------------------------------------- footer */
@@ -1648,7 +1972,7 @@ body.drawer-open #drawer {
   box-shadow: 0 8px 24px rgb(0 0 0 / 0.12);
 }
 
-/* Reset credit expiring within 24h. */
+/* Action-row expiry within 24h. */
 .warn-dot {
   color: #eab308;
   font-size: 8px;
@@ -1972,43 +2296,39 @@ body.no-glass .cust-dock {
   background: var(--background) !important;
 }
 
-/* Share-card composition (used only inside ⧉ snapshots): metrics live in
-   an inset rounded panel under the header, like the Mac share cards. */
+/* Share-card composition (used only inside ⧉ snapshots): the header sits
+   directly on the snapshot background and only the metrics get a panel —
+   upstream's share layout, framed by #snap-root's padding. */
 .snap-card {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: 16px 18px 16px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 0;
 }
-/* The live popover keeps headers tight against transparent cards; on the
-   solid snapshot surface the header lines up with the panel's inner text
-   column (card 18px + head 16px = card 18px + panel 16px). */
 .snap-card .provider-head {
-  padding: 0 16px;
+  padding: 0 2px;
   margin-bottom: 12px;
 }
+.snap-card .provider-icon {
+  width: 20px;
+  height: 20px;
+}
+.snap-card .provider-name {
+  font-size: 15px;
+}
 .snap-card .card-panel {
-  background: rgba(0, 0, 0, 0.22);
+  background: rgba(255, 255, 255, 0.06);
   border: none;
   padding: 14px 16px 12px;
 }
-/* Light snapshots: in the app's light theme --background and --card are
-   both near-white, which made the share read as a washed grey blob on
-   white. The snapshot flips to the app's real light hierarchy instead —
-   grey frame, white card lifted by a soft shadow, faint inset panel. */
+/* Light snapshots: white page with a faint grey panel, like upstream's
+   light share — with no outer card any more, grey-on-grey would blur. */
 :root[data-theme="light"] #snap-root {
-  background: #e8eaee;
-}
-:root[data-theme="light"] .snap-card {
   background: #ffffff;
-  border-color: rgba(0, 0, 0, 0.08);
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.1);
 }
 :root[data-theme="light"] .snap-card .card-panel {
   background: rgba(0, 0, 0, 0.045);
-}
-.snap-card .metric {
-  margin: 12px 0;
 }
 
 /* Donut hover: the pointed-at wedge slides outward along its bisector

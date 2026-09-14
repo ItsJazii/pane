@@ -10,7 +10,9 @@ subscription values match another key. Every entry exposes `status` and
 `fetchedAt` is the last successful fetch time (not the publish time).
 Sub2API entries additionally expose `error` and `warning`. Progress
 entries retain display amounts in `value`/`subtitle` as well as the
-percentage.
+percentage. A Rate Limit Resets row is a text line whose `value` is
+"N available" and whose `resetsAt` is the soonest expiry; per-credit ids
+are never served.
 
 This reads Pane's published snapshots and never initiates a remote usage
 request. Disabled or deleted keys return 404 and disappear from the

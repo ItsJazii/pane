@@ -204,8 +204,7 @@ const en: Dict = {
   "card.resetsAt": "Resets {when}",
   "card.expires": "Expires {when}",
   "card.available": "Available",
-  "card.use": "Use",
-  "card.useTip": "Spend this credit to reset your Codex rate limits now",
+  "card.nAvailable": "{n} available",
   "card.creditDying": "This credit expires in {time} — use it or lose it.",
   "card.pctUsed": "{n}% used",
   "card.pctLeft": "{n}% left",
@@ -307,9 +306,7 @@ const en: Dict = {
   "metric.bonus": "Bonus",
   "metric.extraUsage": "Extra usage",
   "metric.extraCredits": "Extra credits",
-  "metric.resetCredit": "Reset credit",
-  "metric.resetCreditNumbered": "Reset credit {n}",
-  "metric.resetCredits": "Reset credits",
+  "metric.rateLimitResets": "Rate Limit Resets",
   "metric.extraBalance": "Extra balance",
   "metric.kiloPass": "Kilo Pass",
   "metric.reqToday": "Requests today",
@@ -364,10 +361,20 @@ const en: Dict = {
     "Order, stars, and hidden rows go back to defaults, and installed AI tools are re-detected. Your usage limits are not affected.",
   "customize.resetConfirm": "Reset all",
 
-  "redeem.title": "Use a reset credit?",
-  "redeem.body":
-    "This resets your Codex rate-limit windows immediately and cannot be undone. The refreshed windows can take a couple of minutes to appear.",
-  "redeem.confirm": "Use credit",
+  "resets.expiringSoon": "Expiring soon",
+  "resets.use": "Use",
+  "resets.nothingToResetTip": "Nothing to reset right now",
+  "resets.confirmTitle": "Use this reset?",
+  "resets.confirmBody": "Immediately reset your usage limits. This can't be undone.",
+  "resets.reset": "Reset",
+  "resets.cancel": "Cancel",
+  "resets.resetting": "Resetting your usage…",
+  "resets.claimed": "Reset claimed. Enjoy!",
+  "resets.noNeed": "Your usage doesn't need a reset yet",
+  "resets.gone": "That reset is no longer available",
+  "resets.failed": "Couldn't reset usage. Please try again.",
+  "resets.none": "You have no rate limit resets",
+  "resets.expiryUnknown": "Expiry times unavailable",
 
   "share.tagline": "Monitor Your AI Subscriptions with Pane",
   "tray.left": "{label}: {n}% left",
@@ -579,8 +586,7 @@ const zh: Dict = {
   "card.resetsAt": "{when} 重置",
   "card.expires": "{when} 过期",
   "card.available": "可用",
-  "card.use": "使用",
-  "card.useTip": "立刻用掉这张额度，重置 Codex 速率限制",
+  "card.nAvailable": "{n} 张可用",
   "card.creditDying": "这张额度将在 {time}后过期 — 不用就作废。",
   "card.pctUsed": "已用 {n}%",
   "card.pctLeft": "剩余 {n}%",
@@ -675,9 +681,7 @@ const zh: Dict = {
   "metric.bonus": "赠送",
   "metric.extraUsage": "额外用量",
   "metric.extraCredits": "额外额度",
-  "metric.resetCredit": "重置额度",
-  "metric.resetCreditNumbered": "重置额度 {n}",
-  "metric.resetCredits": "重置额度",
+  "metric.rateLimitResets": "速率限制重置",
   "metric.extraBalance": "额外余额",
   "metric.kiloPass": "Kilo Pass",
   "metric.reqToday": "今日请求",
@@ -730,10 +734,20 @@ const zh: Dict = {
     "顺序、加星和隐藏的行会回到默认，并重新检测已安装的 AI 工具。你的用量上限不受影响。",
   "customize.resetConfirm": "全部重置",
 
-  "redeem.title": "使用一张重置额度？",
-  "redeem.body":
-    "这会立刻重置 Codex 的速率限制窗口，而且不能撤销。刷新后的窗口可能要一两分钟才显示出来。",
-  "redeem.confirm": "使用额度",
+  "resets.expiringSoon": "即将过期",
+  "resets.use": "使用",
+  "resets.nothingToResetTip": "目前没有可重置的用量",
+  "resets.confirmTitle": "使用这次重置？",
+  "resets.confirmBody": "立即重置你的用量限制。此操作无法撤销。",
+  "resets.reset": "重置",
+  "resets.cancel": "取消",
+  "resets.resetting": "正在重置用量…",
+  "resets.claimed": "重置成功，尽情使用！",
+  "resets.noNeed": "你的用量目前无需重置",
+  "resets.gone": "该重置已不可用",
+  "resets.failed": "重置失败，请重试。",
+  "resets.none": "你没有可用的速率限制重置",
+  "resets.expiryUnknown": "无法获取过期时间",
 
   "share.tagline": "用 Pane 盯紧你的 AI 订阅",
   "tray.left": "{label}：剩余 {n}%",
@@ -888,8 +902,7 @@ const ru: Dict = {
   "card.resetsAt": "Сброс {when}",
   "card.expires": "Истекает {when}",
   "card.available": "Доступно",
-  "card.use": "Использовать",
-  "card.useTip": "Потратить этот кредит, чтобы сразу сбросить лимиты Codex",
+  "card.nAvailable": "{n} доступно",
   "card.creditDying": "Этот кредит истечёт через {time} — используйте или пропадёт.",
   "card.pctUsed": "Использовано {n}%",
   "card.pctLeft": "Осталось {n}%",
@@ -991,9 +1004,7 @@ const ru: Dict = {
   "metric.bonus": "Бонус",
   "metric.extraUsage": "Дополнительно",
   "metric.extraCredits": "Доп. кредиты",
-  "metric.resetCredit": "Сброс лимита",
-  "metric.resetCreditNumbered": "Сброс лимита {n}",
-  "metric.resetCredits": "Сброс лимита",
+  "metric.rateLimitResets": "Сбросы лимитов",
   "metric.extraBalance": "Доп. баланс",
   "metric.kiloPass": "Kilo Pass",
   "metric.reqToday": "Запросы сегодня",
@@ -1047,10 +1058,20 @@ const ru: Dict = {
     "Порядок, звёзды и скрытые строки вернутся к значениям по умолчанию, установленные инструменты ИИ будут найдены заново. Лимиты использования не изменятся.",
   "customize.resetConfirm": "Сбросить всё",
 
-  "redeem.title": "Использовать сброс лимита?",
-  "redeem.body":
-    "Это сразу сбросит окна лимитов Codex и отменить нельзя. Обновлённые окна могут появиться через пару минут.",
-  "redeem.confirm": "Использовать",
+  "resets.expiringSoon": "Скоро истекает",
+  "resets.use": "Использовать",
+  "resets.nothingToResetTip": "Сейчас нечего сбрасывать",
+  "resets.confirmTitle": "Использовать этот сброс?",
+  "resets.confirmBody": "Немедленно сбросить лимиты использования. Это нельзя отменить.",
+  "resets.reset": "Сбросить",
+  "resets.cancel": "Отмена",
+  "resets.resetting": "Сбрасываем лимиты…",
+  "resets.claimed": "Сброс выполнен. Приятной работы!",
+  "resets.noNeed": "Ваши лимиты пока не нуждаются в сбросе",
+  "resets.gone": "Этот сброс больше недоступен",
+  "resets.failed": "Не удалось сбросить лимиты. Попробуйте ещё раз.",
+  "resets.none": "У вас нет сбросов лимитов",
+  "resets.expiryUnknown": "Время истечения недоступно",
 
   "share.tagline": "Следите за подписками ИИ с Pane",
   "tray.left": "{label}: осталось {n}%",
@@ -1100,7 +1121,7 @@ const METRIC_KEYS: Record<string, string> = {
   Bonus: "metric.bonus",
   "Extra usage": "metric.extraUsage",
   "Extra credits": "metric.extraCredits",
-  "Reset credits": "metric.resetCredits",
+  "Rate Limit Resets": "metric.rateLimitResets",
   "Extra balance": "metric.extraBalance",
   "Kilo Pass": "metric.kiloPass",
   "Requests today": "metric.reqToday",
@@ -1170,12 +1191,6 @@ export function t(key: string, vars?: Record<string, string | number>): string {
 export function displayMetricLabel(label: string): string {
   const key = METRIC_KEYS[label];
   if (key) return t(key);
-  const resetCredit = label.match(/^Reset credit(?: (\d+))?$/);
-  if (resetCredit) {
-    return resetCredit[1]
-      ? t("metric.resetCreditNumbered", { n: resetCredit[1] })
-      : t("metric.resetCredit");
-  }
   if (label.endsWith(" weekly")) {
     return t("metric.modelWeekly", { model: label.slice(0, -7) });
   }
