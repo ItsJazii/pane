@@ -37,7 +37,6 @@ const en: Dict = {
   "sidebar.theme": "Light / dark mode",
   "sidebar.themeToDark": "Switch to dark mode",
   "sidebar.themeToLight": "Switch to light mode",
-  "sidebar.minimal": "Minimal view",
   "sidebar.refresh": "Refresh now",
   "sidebar.customize": "Customize",
   "sidebar.settings": "Settings",
@@ -118,14 +117,6 @@ const en: Dict = {
   "settings.notifyAlmost": "Almost out (<10% left)",
   "settings.notifyClose": "Cutting it close",
   "settings.notifyRunout": "Will run out",
-
-  "settings.privacy": "Privacy",
-  "settings.privacyNote":
-    'One anonymous "alive today" ping and per-provider success/failure counts, once a day, under a random ID attached to nothing. No usage amounts, no spend, no IPs stored. Full details in docs/privacy.md.',
-  "settings.telemetry": "Share anonymous usage statistics",
-  "settings.hideSharing": "Hide tray numbers while screen sharing",
-  "settings.hideSharingTip":
-    "During Presentation Settings, exclusive fullscreen, or remote control, tray percentages hide. The Pane icon and starred provider logos stay. A Teams/Zoom window share is not detected. Off by default.",
 
   "settings.network": "Network",
   "settings.useProxy": "Use proxy",
@@ -422,7 +413,7 @@ const zh: Dict = {
   "sidebar.theme": "浅色 / 深色模式",
   "sidebar.themeToDark": "切换到深色模式",
   "sidebar.themeToLight": "切换到浅色模式",
-  "sidebar.minimal": "精简视图",
+
   "sidebar.refresh": "立即刷新",
   "sidebar.customize": "自定义",
   "sidebar.settings": "设置",
@@ -500,14 +491,6 @@ const zh: Dict = {
   "settings.notifyAlmost": "即将用完（剩余不足 10%）",
   "settings.notifyClose": "余量紧张",
   "settings.notifyRunout": "将会用完",
-
-  "settings.privacy": "隐私",
-  "settings.privacyNote":
-    "每天一次匿名的“今天还活着”心跳，以及各服务成功/失败次数，使用一个不绑定任何身份的随机 ID。不上传用量、花费或 IP。详情见 docs/privacy.md。",
-  "settings.telemetry": "分享匿名使用统计",
-  "settings.hideSharing": "共享屏幕时隐藏托盘数字",
-  "settings.hideSharingTip":
-    "演示设置、独占全屏或远程控制时，托盘百分比会隐藏。Pane 图标和已加星的服务标志仍在。检测不到 Teams/Zoom 的窗口共享。默认关闭。",
 
   "settings.network": "网络",
   "settings.useProxy": "使用代理",
@@ -769,7 +752,7 @@ const ru: Dict = {
   "sidebar.theme": "Светлая / тёмная тема",
   "sidebar.themeToDark": "Переключить на тёмную тему",
   "sidebar.themeToLight": "Переключить на светлую тему",
-  "sidebar.minimal": "Минимальный вид",
+
   "sidebar.refresh": "Обновить сейчас",
   "sidebar.customize": "Настройка",
   "sidebar.settings": "Настройки",
@@ -843,14 +826,6 @@ const ru: Dict = {
   "settings.notifyAlmost": "Почти кончилось (осталось <10%)",
   "settings.notifyClose": "Запас на исходе",
   "settings.notifyRunout": "Кончится до сброса",
-
-  "settings.privacy": "Конфиденциальность",
-  "settings.privacyNote":
-    'Один анонимный сигнал «сегодня жив» и счётчики успеха/сбоя по сервисам, раз в день, под случайным ID без привязки. Без объёмов, трат и IP. Подробности в docs/privacy.md.',
-  "settings.telemetry": "Делиться анонимной статистикой",
-  "settings.hideSharing": "Скрывать цифры в трее при демонстрации экрана",
-  "settings.hideSharingTip":
-    "В режиме презентации, полноэкранном режиме или удалённом управлении проценты в трее скрываются. Значок Pane и логотипы со звёздами остаются. Демонстрация окна в Teams/Zoom не определяется. По умолчанию выключено.",
 
   "settings.network": "Сеть",
   "settings.useProxy": "Использовать прокси",

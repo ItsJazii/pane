@@ -1,7 +1,7 @@
-//! Anonymous, opt-out usage telemetry — Pane's port of OpenUsage's
-//! leashed-PostHog design (daily rollups, IDs/counts/enums only, hard-stop
-//! opt-out). No SDK: events are plain documented POSTs to PostHog's batch
-//! API, so everything that can ever leave the machine is in this one file.
+//! Anonymous usage telemetry — Pane's port of OpenUsage's
+//! leashed-PostHog design (daily rollups, IDs/counts/enums only). No SDK:
+//! events are plain documented POSTs to PostHog's batch API, so everything
+//! that can ever leave the machine is in this one file.
 //!
 //! Exactly two event shapes, at most one of each per provider per UTC day:
 //!   - `app_daily_active` — "this install was alive today" + a config
@@ -17,10 +17,9 @@
 //! every event so PostHog never builds a person profile (the Mac app's
 //! `personProfiles = .never`).
 //!
-//! Opt-out (Settings → "Share anonymous usage statistics", config key
-//! `telemetry`) is a hard stop: nothing is counted, nothing is written,
-//! and the existing state file (UUID included) is deleted — turning it
-//! back on starts as a brand-new anonymous install.
+//! Always on — there is no in-app switch. `record` still takes an
+//! `enabled` flag as a hard stop: when false nothing is counted, nothing
+//! is written, and the existing state file (UUID included) is deleted.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

@@ -16,6 +16,11 @@
   borderless grouped metric panel, upstream type sizes and spacing in
   both densities. Share images put the header on the background with
   only the metrics in a panel and a tighter footer.
+- **Settings simplified.** The Privacy section is gone — the anonymous
+  once-a-day statistic is always on and the "hide tray numbers while
+  screen sharing" option was removed; the sidebar Minimal-view button is
+  gone (Settings → General keeps the toggle); One/New API and Sub2API
+  sites live under API keys.
 
 ### Fixed
 - **Using a Codex reset credit reported success even when nothing was

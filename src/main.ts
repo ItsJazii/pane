@@ -197,7 +197,6 @@ interface Config {
   pinned: { provider: string; label: string } | null;
   trayProviders: string[];
   pacingAlways: boolean;
-  telemetry: boolean;
   notifyAlmostOut: boolean;
   notifyCuttingClose: boolean;
   notifyWillRunOut: boolean;
@@ -217,7 +216,6 @@ interface Config {
   welcomeDismissed: boolean;
   lastSeenVersion: string;
   reduceAnimations: boolean;
-  hideUsageWhileSharing: boolean;
   locale: LocalePref;
 }
 
@@ -227,7 +225,6 @@ const FRONTEND_CONFIG_KEYS = [
   "pinned",
   "trayProviders",
   "pacingAlways",
-  "telemetry",
   "notifyAlmostOut",
   "notifyCuttingClose",
   "notifyWillRunOut",
@@ -247,7 +244,6 @@ const FRONTEND_CONFIG_KEYS = [
   "welcomeDismissed",
   "lastSeenVersion",
   "reduceAnimations",
-  "hideUsageWhileSharing",
   "locale",
 ] as const satisfies readonly (keyof Config)[];
 type _AssertAllConfigKeys = Exclude<keyof Config, (typeof FRONTEND_CONFIG_KEYS)[number]> extends never
@@ -412,7 +408,6 @@ let config: Config = {
   pinned: null,
   trayProviders: [],
   pacingAlways: false,
-  telemetry: true,
   notifyAlmostOut: false,
   notifyCuttingClose: false,
   notifyWillRunOut: false,
@@ -432,7 +427,6 @@ let config: Config = {
   welcomeDismissed: false,
   lastSeenVersion: "",
   reduceAnimations: false,
-  hideUsageWhileSharing: false,
   locale: "auto",
 };
 let lastFetch = 0;
@@ -2339,7 +2333,6 @@ function applyAppearance(): void {
   document.documentElement.dataset.theme = mode;
   document.documentElement.dataset.density = config.density;
   document.documentElement.dataset.minimal = config.minimal ? "true" : "false";
-  document.querySelector("#minimal-btn")?.classList.toggle("active", config.minimal);
   const minimal = document.querySelector<HTMLInputElement>("#minimal");
   if (minimal) minimal.checked = config.minimal === true;
   const btn = document.querySelector<HTMLElement>("#theme-btn");
@@ -4585,7 +4578,6 @@ async function initSettings(): Promise<void> {
     ["#notify-almost", "notifyAlmostOut"],
     ["#notify-close", "notifyCuttingClose"],
     ["#notify-runout", "notifyWillRunOut"],
-    ["#telemetry", "telemetry"],
   ];
   for (const [selector, key] of notifyToggles) {
     const box = document.querySelector<HTMLInputElement>(selector)!;
@@ -4644,13 +4636,6 @@ async function initSettings(): Promise<void> {
     void patchConfig({ reduceAnimations: reduceAnim.checked }).then(applyReduceMotion);
   });
   applyReduceMotion();
-
-  const hideShare = document.querySelector<HTMLInputElement>("#hide-while-sharing")!;
-  hideShare.checked = config.hideUsageWhileSharing === true;
-  hideShare.addEventListener("change", () => {
-    void patchConfig({ hideUsageWhileSharing: hideShare.checked }).catch(() => {});
-    requestTraySync();
-  });
 
   const shortcut = document.querySelector<HTMLInputElement>("#shortcut")!;
   shortcut.value = config.shortcut;
@@ -4715,7 +4700,6 @@ async function resetAllSettings(): Promise<void> {
     pinned: null,
     trayProviders: [],
     pacingAlways: true,
-    telemetry: true,
     notifyAlmostOut: true,
     notifyCuttingClose: true,
     notifyWillRunOut: true,
@@ -4733,7 +4717,6 @@ async function resetAllSettings(): Promise<void> {
     proxy: { enabled: false, url: "" },
     showTotalSpend: true,
     reduceAnimations: false,
-    hideUsageWhileSharing: false,
     locale: "auto",
   }).catch(() => {});
   spendTab = "today";
@@ -4768,8 +4751,6 @@ function syncSettingsControls(): void {
   setCheck("#notify-almost", config.notifyAlmostOut);
   setCheck("#notify-close", config.notifyCuttingClose);
   setCheck("#notify-runout", config.notifyWillRunOut);
-  setCheck("#telemetry", config.telemetry);
-  setCheck("#hide-while-sharing", config.hideUsageWhileSharing === true);
   setCheck("#show-total-spend", config.showTotalSpend);
   setSelect("#appearance", config.appearance);
   setCheck("#density", config.density === "compact");
@@ -4805,12 +4786,6 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
   document.querySelector("#theme-btn")!.addEventListener("click", toggleTheme);
-  document.querySelector("#minimal-btn")!.addEventListener("click", () => {
-    void patchConfig({ minimal: !config.minimal }).then(() => {
-      applyAppearance();
-      renderAll();
-    });
-  });
   setupTrailFisheye();
   setupTooltips();
   // No lens init here: applyGlass() (via initSettings, after the saved
@@ -5081,10 +5056,6 @@ window.addEventListener("DOMContentLoaded", () => {
   void listen<string>("update-available", (e) => {
     updateVersion = e.payload;
     renderBuildInfo();
-  });
-
-  void listen("tray-strip-restore", () => {
-    requestTraySync();
   });
 
   void listen("popover-shown", () => {

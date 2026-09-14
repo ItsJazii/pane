@@ -3,7 +3,7 @@
 Pane is built on one rule: **your data is nobody's business, including
 ours.** There is no Pane account, and no Pane backend receives your quotas,
 spend, keys, or provider data. The Pane-hosted update endpoint and the
-minimal, anonymous, opt-out daily statistic are described in full below.
+minimal, anonymous daily statistic are described in full below.
 
 ## Every network call Pane can make
 
@@ -16,7 +16,7 @@ This is the complete list. Anything not listed here does not happen.
 | User-configured Sub2API origins | Each enabled key's scheduled refresh; saving only validates local input | `GET /v1/usage` with that key as Bearer, only to its configured origin, without redirects or fallback endpoints. |
 | `raw.githubusercontent.com` (LiteLLM), `models.dev`, `robinebers.github.io` | ~Daily | Anonymous GET for public model price tables (no identifying data) |
 | `trypane.xyz/api/update` (the legacy `pane.jazii.dev/api/update` redirects there; GitHub Releases is the final fallback) | On launch, whenever the popover opens, and every 4 h in the background | Anonymous GET for the update manifest, carrying the app version. See "The update check" below for exactly what this counts. |
-| `us.i.posthog.com` | Once per day (unless switched off) | The two anonymous daily-statistic events described in "Anonymous usage statistics" below — a random ID, version, enabled-provider list, and per-provider success/failure counts. Never usage amounts, spend, keys, or error text. |
+| `us.i.posthog.com` | Once per day | The two anonymous daily-statistic events described in "Anonymous usage statistics" below — a random ID, version, enabled-provider list, and per-provider success/failure counts. Never usage amounts, spend, keys, or error text. |
 | `127.0.0.1:11434` (your own PC) | Every refresh, if Ollama is enabled | Local-only query of your Ollama server |
 
 Notably absent: session recording, event streams, A/B flags, autocapture
@@ -25,13 +25,9 @@ above is the entire analytics surface.
 
 ## Anonymous usage statistics
 
-Settings → Privacy → **"Share anonymous usage statistics"** (on by
-default; turning it off is a hard stop — nothing is counted, nothing is
-written, and the stored random ID is deleted so re-enabling starts over
-as a brand-new anonymous install).
-
-When on, Pane sends at most two kinds of event per day to PostHog (the
-same disclosed-and-toggleable approach as the Mac app Pane is a port of):
+This statistic is **always on — there is no in-app switch.** Pane sends
+at most two kinds of event per day to PostHog (the same disclosed
+approach as the Mac app Pane is a port of):
 
 - **`app_daily_active`** — once per day: "this install was alive today",
   the app version, which providers are enabled, which metrics you
@@ -56,7 +52,7 @@ Every event also instructs PostHog not to build a person profile, and the
 PostHog project is configured to **discard client IP addresses** at
 ingestion (country-level GeoIP resolves first, then the IP is dropped).
 
-What is *never* sent, with this toggle on or off: your quotas, usage
+What is *never* sent: your quotas, usage
 percentages, spend amounts, model names from your logs, tokens, keys,
 file paths, or any free-form text. The entire implementation is one
 auditable file: [`src-tauri/src/telemetry.rs`](../src-tauri/src/telemetry.rs)
