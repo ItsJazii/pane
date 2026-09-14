@@ -333,6 +333,55 @@ fn bonus_metric(plan_usage: &Value, total_pct: Option<f64>) -> Option<Metric> {
     })
 }
 
+/// Grok Bot is Cursor's "Sand" product, with its own weekly allowance and
+/// reset window. Pooled enterprise accounts and accounts without an
+/// included allowance have no separate personal meter.
+fn grok_bot_metric(usage: &Value) -> Option<Metric> {
+    if usage.get("usesPooledEnterpriseAllowance").and_then(Value::as_bool) == Some(true)
+        || usage.get("hasNonZeroIncludedLimit").and_then(Value::as_bool) == Some(false)
+        || usage.get("includedLimitZero").and_then(Value::as_bool) == Some(true)
+    {
+        return None;
+    }
+    let pct = num(usage.get("usagePercent")).filter(|p| *p >= 0.0)?;
+    let resets_at = iso_ms(usage.get("nextResetTimestampUtc"));
+    let start = iso_ms(usage.get("currentPeriodStart"));
+    const WEEK_MS: i64 = 7 * 24 * 3_600_000;
+    let period_ms = match (start, resets_at) {
+        (Some(s), Some(r)) if r > s => r - s,
+        _ => WEEK_MS,
+    };
+    Some(
+        Metric::progress("Grok Bot", pct.clamp(0.0, 100.0), None)
+            .with_reset(resets_at, Some(period_ms)),
+    )
+}
+
+/// Separate RPC, separate failure domain: Grok Bot must never cost the
+/// card its plan bars.
+async fn fetch_grok_bot(token: &str) -> Option<Metric> {
+    match connect_post("GetSandUsageStatus", token).await {
+        Ok(Some(usage)) => grok_bot_metric(&usage),
+        Ok(None) => None,
+        Err(e) => {
+            eprintln!("[pane] cursor grok bot: {e}");
+            None
+        }
+    }
+}
+
+/// Summary-path snapshots come back whole: slot the Grok Bot bar right
+/// after the "Other Models" bucket bar, or at the end without it.
+fn push_grok_bot(snap: &mut Snapshot, metric: Metric) {
+    let pos = snap
+        .metrics
+        .iter()
+        .position(|m| m.label == "Other Models")
+        .map(|i| i + 1)
+        .unwrap_or(snap.metrics.len());
+    snap.metrics.insert(pos, metric);
+}
+
 fn title_case(s: &str) -> String {
     s.split_whitespace()
         .map(|w| {
@@ -394,7 +443,10 @@ async fn fetch() -> Result<Snapshot, String> {
     let mut usage = match connect_post("GetCurrentPeriodUsage", &token).await {
         Ok(u) => u,
         Err(e) => {
-            if let Ok(s) = summary_fetch(&token).await {
+            if let Ok(mut s) = summary_fetch(&token).await {
+                if let Some(m) = fetch_grok_bot(&token).await {
+                    push_grok_bot(&mut s, m);
+                }
                 return Ok(s);
             }
             return match legacy_fetch(&token).await {
@@ -427,7 +479,10 @@ async fn fetch() -> Result<Snapshot, String> {
     // usage-summary goes first: Enterprise/team accounts that hide
     // planUsage from the RPC still report percentages there.
     if !enabled || plan_usage.is_none() || (limit.is_none() && total_pct.is_none()) {
-        if let Ok(s) = summary_fetch(&token).await {
+        if let Ok(mut s) = summary_fetch(&token).await {
+            if let Some(m) = fetch_grok_bot(&token).await {
+                push_grok_bot(&mut s, m);
+            }
             return Ok(s);
         }
         return legacy_fetch(&token).await;
@@ -534,6 +589,10 @@ async fn fetch() -> Result<Snapshot, String> {
             Metric::progress("Other Models", api.clamp(0.0, 100.0), None)
                 .with_reset(resets_at, Some(period_ms)),
         );
+    }
+
+    if let Some(m) = fetch_grok_bot(&token).await {
+        metrics.push(m);
     }
 
     if let Some(row) = bonus_metric(plan_usage, total_pct) {
@@ -1185,6 +1244,65 @@ mod tests {
         assert_eq!(access.as_deref(), Some("acc"));
         assert_eq!(refresh.as_deref(), Some("ref"));
         let _ = std::fs::remove_file(&src);
+    }
+
+    #[test]
+    fn grok_bot_full_shape_is_a_weekly_bar() {
+        let usage = json!({
+            "usagePercent": 2,
+            "nextResetTimestampUtc": "2026-09-17T00:00:00Z",
+            "currentPeriodStart": "2026-09-10T00:00:00Z",
+            "hasNonZeroIncludedLimit": true
+        });
+        let m = grok_bot_metric(&usage).expect("row");
+        assert_eq!(m.kind, "progress");
+        assert_eq!(m.label, "Grok Bot");
+        assert_eq!(m.used_percent, Some(2.0));
+        let reset = chrono::DateTime::parse_from_rfc3339("2026-09-17T00:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(m.resets_at, Some(reset));
+        assert_eq!(m.period_ms, Some(7 * 24 * 3_600_000));
+    }
+
+    #[test]
+    fn grok_bot_pooled_enterprise_hides() {
+        let usage = json!({
+            "usagePercent": 2,
+            "usesPooledEnterpriseAllowance": true
+        });
+        assert!(grok_bot_metric(&usage).is_none());
+    }
+
+    #[test]
+    fn grok_bot_zero_included_limit_hides() {
+        let usage = json!({
+            "usagePercent": 2,
+            "hasNonZeroIncludedLimit": false
+        });
+        assert!(grok_bot_metric(&usage).is_none());
+        let usage = json!({
+            "usagePercent": 2,
+            "includedLimitZero": true
+        });
+        assert!(grok_bot_metric(&usage).is_none());
+    }
+
+    #[test]
+    fn grok_bot_missing_percent_hides() {
+        assert!(grok_bot_metric(&json!({ "hasNonZeroIncludedLimit": true })).is_none());
+        assert!(grok_bot_metric(&json!({ "usagePercent": -1 })).is_none());
+    }
+
+    #[test]
+    fn grok_bot_without_period_start_defaults_to_a_week() {
+        let usage = json!({
+            "usagePercent": "2",
+            "nextResetTimestampUtc": "2026-09-17T00:00:00Z"
+        });
+        let m = grok_bot_metric(&usage).expect("row");
+        assert_eq!(m.used_percent, Some(2.0));
+        assert_eq!(m.period_ms, Some(7 * 24 * 3_600_000));
     }
 }
 

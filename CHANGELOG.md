@@ -16,6 +16,10 @@
   borderless grouped metric panel, upstream type sizes and spacing in
   both densities. Share images put the header on the background with
   only the metrics in a panel and a tighter footer.
+- **Cursor card shows the Grok Bot weekly allowance.** Ultra accounts
+  get a "Grok Bot" bar (percent used, weekly reset) from Cursor's
+  `GetSandUsageStatus` endpoint, between the bucket bars and the total.
+  Pooled-enterprise and no-allowance accounts show nothing extra.
 - **Settings simplified.** The Privacy section is gone — the anonymous
   once-a-day statistic is always on and the "hide tray numbers while
   screen sharing" option was removed; the sidebar Minimal-view button is
