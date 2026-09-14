@@ -228,14 +228,22 @@ Ground rules that apply to every provider:
   wallet key — that one goes in the **Kimi API** field.
 - **Calls:** `api.kimi.com/coding/v1/usages` (Session + Weekly request
   windows, sent the OAuth token or the pasted plan key as Bearer);
-  `auth.kimi.com/api/oauth/token` (refresh, login only); and, when a
-  Moonshot/Kimi API key is saved, `api.moonshot.ai|cn/v1/users/me/balance`
+  `api.kimi.com/coding/v1/me` (plan name — login (OAuth) token only,
+  requested alongside usages with a 4 s cap; the pasted plan key never
+  calls it); `auth.kimi.com/api/oauth/token` (refresh, login only); and,
+  when a Moonshot/Kimi API key is saved,
+  `api.moonshot.ai|cn/v1/users/me/balance`
   for the API bar. This is the Kimi Code *subscription* plus the
   pay-as-you-go wallet on the same card.
 - **Shows:** Session (5-hour) and Weekly bars with reset pacing, plus the
-  membership plan name from `user.membership.level`. Names match
+  plan name from `/me`'s `user_level_name`, shown verbatim — Kimi's own
+  pricing-page names at
   [kimi.ai/membership/pricing](https://www.kimi.ai/membership/pricing):
   Moderato ($19), Allegretto ($39), Allegro ($99), Vivace ($199).
+
+  Fallback when `/me` is unavailable and usages still carries
+  `user.membership.level` (Kimi dropped that field from usages in
+  Sep 2026):
 
   | API `user.membership.level` | Card name |
   |---|---|
