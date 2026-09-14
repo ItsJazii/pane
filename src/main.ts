@@ -886,7 +886,12 @@ function ensureLayout(): void {
         // Progress bars slot in above the Usage Trend (bars first, trend
         // after, like the Mac cards); everything else appends at the end.
         const trendAt = L.metricOrder.indexOf(TREND_KEY);
-        if (m.kind === "progress" && trendAt >= 0) {
+        const otherModelsAt = L.metricOrder.indexOf("Other Models");
+        if (m.label === "Grok Bot" && otherModelsAt >= 0) {
+          // One-off: Grok Bot belongs right after the "Other Models"
+          // bucket bar — the spot a fresh layout gives it.
+          L.metricOrder.splice(otherModelsAt + 1, 0, m.label);
+        } else if (m.kind === "progress" && trendAt >= 0) {
           L.metricOrder.splice(trendAt, 0, m.label);
         } else {
           L.metricOrder.push(m.label);
