@@ -64,9 +64,6 @@
 :root[data-density="compact"] .metric.trend {
   padding: 4px 0;
 }
-:root[data-density="compact"] .metric.trend .trend-chart {
-  height: 14px;
-}
 :root[data-density="compact"] .metric-label {
   font-size: 12px;
 }
@@ -78,13 +75,13 @@
   font-size: 11px;
 }
 :root[data-density="compact"] .metric-text {
-  padding: 4px 0;
+  padding: 4px 4px;
 }
 :root[data-density="compact"] .metric-text + .metric-text {
   padding-top: 1px;
 }
 :root[data-density="compact"] .bar {
-  height: 5px;
+  height: 4px;
 }
 :root[data-density="compact"] .provider-head {
   margin-bottom: 2px;
@@ -835,7 +832,7 @@ select:focus-visible {
 .metric.trend .trend-chart {
   flex: 1;
   min-width: 0;
-  height: 18px;
+  height: 22px;
 }
 
 .provider-head {
@@ -1021,7 +1018,10 @@ select:focus-visible {
   display: flex;
   justify-content: space-between;
   font-size: 12px;
-  padding: 6px 0;
+  /* Side inset matches the spend rows' hover chip so every text row's
+     label starts on the same x. */
+  margin: 0 -4px;
+  padding: 6px 4px;
 }
 
 /* Text rows: bold label left, full-contrast value right (upstream's
@@ -1309,8 +1309,6 @@ select:focus-visible {
 .spend-row {
   cursor: default;
   border-radius: 6px;
-  margin: 0 -4px;
-  padding: 3px 4px;
 }
 
 .spend-row:hover {
