@@ -24,11 +24,13 @@ const NAME: &str = "Kimi Code";
 /// Public OAuth client id the official CLI (and OpenUsage) uses.
 const CLIENT_ID: &str = "17e5f671-d194-4dfb-9706-5516cb48c098";
 const USAGES_URL: &str = "https://api.kimi.com/coding/v1/usages";
+const ME_URL: &str = "https://api.kimi.com/coding/v1/me";
 const TOKEN_URL: &str = "https://auth.kimi.com/api/oauth/token";
 const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 86_400_000;
 const MAX_CRED_BYTES: u64 = 64 * 1024;
 const MAX_USAGES_BYTES: usize = 256 * 1024;
+const MAX_ME_BYTES: usize = 64 * 1024;
 const MAX_TOKEN_BYTES: usize = 16 * 1024;
 
 pub async fn snapshot() -> Snapshot {
@@ -131,7 +133,13 @@ async fn fetch() -> Result<Snapshot, String> {
     } else {
         (load_usages(path.as_deref(), key.as_deref()).await, Ok(Vec::new()))
     };
-    let mut snap = parse_snapshot(&usages?)?;
+    let (doc, access) = usages?;
+    let mut snap = parse_snapshot(&doc)?;
+    // The plan name moved to /me when usages dropped membership.level —
+    // its answer wins over the doc's LEVEL_*/limit fallback.
+    if let Some(name) = fetch_plan_name(&access).await {
+        snap.plan = Some(name);
+    }
     match api {
         Ok(rows) => snap.metrics.extend(rows),
         Err(_) => {
@@ -151,10 +159,13 @@ enum UsagesError {
 /// CLI login first (with the refresh-and-retry dance); the pasted plan key
 /// only when there is no login or the login path failed. When both fail,
 /// the login error is the one shown — `kimi login` is the actionable fix.
-async fn load_usages(cred: Option<&Path>, plan_key: Option<&str>) -> Result<Value, String> {
+async fn load_usages(
+    cred: Option<&Path>,
+    plan_key: Option<&str>,
+) -> Result<(Value, String), String> {
     let login_err = match cred {
         Some(path) => match usages_via_login(path).await {
-            Ok(doc) => return Ok(doc),
+            Ok(pair) => return Ok(pair),
             Err(e) => Some(e),
         },
         None => None,
@@ -163,7 +174,7 @@ async fn load_usages(cred: Option<&Path>, plan_key: Option<&str>) -> Result<Valu
         return Err(login_err.unwrap_or_else(|| "no Kimi Code credentials".into()));
     };
     match fetch_usages(key).await {
-        Ok(doc) => Ok(doc),
+        Ok(doc) => Ok((doc, key.to_string())),
         Err(UsagesError::Unauthorized) => Err(login_err.unwrap_or_else(|| {
             "Kimi For Coding key was rejected — check it in Settings (gear icon)".into()
         })),
@@ -171,14 +182,14 @@ async fn load_usages(cred: Option<&Path>, plan_key: Option<&str>) -> Result<Valu
     }
 }
 
-async fn usages_via_login(path: &Path) -> Result<Value, String> {
+async fn usages_via_login(path: &Path) -> Result<(Value, String), String> {
     let access = load_access(path, false).await?;
     match fetch_usages(&access).await {
-        Ok(doc) => Ok(doc),
+        Ok(doc) => Ok((doc, access)),
         Err(UsagesError::Unauthorized) => {
             let access = load_access(path, true).await?;
             match fetch_usages(&access).await {
-                Ok(doc) => Ok(doc),
+                Ok(doc) => Ok((doc, access)),
                 Err(UsagesError::Unauthorized) => Err(
                     "Kimi Code sign-in was rotated — run `kimi login` in a terminal once and Pane recovers automatically"
                         .into(),
@@ -209,6 +220,48 @@ async fn fetch_usages(access: &str) -> Result<Value, UsagesError> {
     super::json_body(resp, MAX_USAGES_BYTES, "usage")
         .await
         .map_err(UsagesError::Other)
+}
+
+/// The plan display name now lives on /me (`user_level_name` — the
+/// pricing-page name verbatim, e.g. "Allegro") since usages dropped
+/// `user.membership.level`. Missing/blank → None, not an error.
+fn plan_from_me(doc: &Value) -> Option<String> {
+    doc.get("user_level_name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Best-effort sibling call after usages succeeded — a dead /me must
+/// never block the card; the usages doc stays the plan fallback. Same
+/// bearer token, same host.
+async fn fetch_plan_name(access: &str) -> Option<String> {
+    let resp = match http()
+        .get(ME_URL)
+        .bearer_auth(access)
+        .header("Accept", "application/json")
+        .timeout(Duration::from_secs(8))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[pane] kimi plan: {e}");
+            return None;
+        }
+    };
+    if !resp.status().is_success() {
+        eprintln!("[pane] kimi plan: HTTP {}", resp.status());
+        return None;
+    }
+    match super::json_body(resp, MAX_ME_BYTES, "plan").await {
+        Ok(doc) => plan_from_me(&doc),
+        Err(e) => {
+            eprintln!("[pane] kimi plan: {e}");
+            None
+        }
+    }
 }
 
 /// Load a usable access token, refreshing when expired (or when `force`).
@@ -623,6 +676,17 @@ mod tests {
         assert_eq!(parse_snapshot(&mid).unwrap().plan.as_deref(), Some("Moderato"));
         let high = json!({"usage": {"limit": "7168", "used": "0", "remaining": "7168"}});
         assert_eq!(parse_snapshot(&high).unwrap().plan.as_deref(), Some("Allegretto"));
+    }
+
+    #[test]
+    fn me_user_level_name_becomes_the_plan() {
+        assert_eq!(
+            plan_from_me(&json!({"user_level": 27, "user_level_name": "Allegro"}))
+                .as_deref(),
+            Some("Allegro")
+        );
+        assert!(plan_from_me(&json!({"user_level_name": "  "})).is_none());
+        assert!(plan_from_me(&json!({})).is_none());
     }
 
     #[test]
