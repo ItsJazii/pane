@@ -27,6 +27,9 @@
   sites live under API keys.
 
 ### Fixed
+- **Kimi Code card shows its plan name again.** Kimi's usage endpoint
+  stopped sending the membership level; the name (Moderato / Allegretto /
+  Allegro / Vivace) now comes from the account endpoint on the same login.
 - **Using a Codex reset credit reported success even when nothing was
   reset.** The consume endpoint's `nothing_to_reset` / `no_credit`
   answers are now shown as such; `already_redeemed` counts as done.
