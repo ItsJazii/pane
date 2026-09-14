@@ -90,7 +90,6 @@
           <nav id="trail" aria-label="Card navigation" data-i18n-aria="sidebar.cards"></nav>
           <div class="sidebar-buttons">
             <button id="theme-btn" title="Light / dark mode" data-i18n-title="sidebar.theme">&#9728;</button>
-            <button id="minimal-btn" title="Minimal view" data-i18n-title="sidebar.minimal">&#8211;</button>
             <button id="refresh" title="Refresh now" data-i18n-title="sidebar.refresh">&#10227;</button>
             <button id="customize-btn" title="Customize" data-i18n-title="sidebar.customize">&#9776;</button>
             <button id="settings-btn" title="Settings" data-i18n-title="sidebar.settings">&#9881;</button>
@@ -194,24 +193,6 @@
       </div>
 
       <div class="acc-group">
-        <button class="acc-head"><span data-i18n="settings.privacy">Privacy</span> <span class="chev">&#8964;</span></button>
-        <div class="acc-body"><div class="acc-inner">
-          <p class="settings-note" data-i18n="settings.privacyNote">
-            One anonymous "alive today" ping and per-provider success/failure
-            counts, once a day, under a random ID attached to nothing. No
-            usage amounts, no spend, no IPs stored. Full details in
-            docs/privacy.md.
-          </p>
-          <div class="setting-row">
-            <label class="toggle"><input id="telemetry" type="checkbox" /> <span data-i18n="settings.telemetry">Share anonymous usage statistics</span></label>
-          </div>
-          <div class="setting-row">
-            <label class="toggle" title="During Presentation Settings, exclusive fullscreen, or remote control, tray percentages hide. The Pane icon and starred provider logos stay. A Teams/Zoom window share is not detected. Off by default." data-i18n-title="settings.hideSharingTip"><input id="hide-while-sharing" type="checkbox" /> <span data-i18n="settings.hideSharing">Hide tray numbers while screen sharing</span></label>
-          </div>
-        </div></div>
-      </div>
-
-      <div class="acc-group">
         <button class="acc-head"><span data-i18n="settings.network">Network</span> <span class="chev">&#8964;</span></button>
         <div class="acc-body"><div class="acc-inner">
           <div class="setting-row">
@@ -289,12 +270,7 @@
             <input id="key-qwen" type="password" placeholder="sk-sp-… (auto-detected from env)" data-i18n-placeholder="settings.keyPhQwen" />
             <button data-save="qwen" data-i18n="settings.save">Save</button>
           </div>
-        </div></div>
-      </div>
-
-      <div class="acc-group">
-        <button class="acc-head"><span data-i18n="settings.onenewapi">One/New API sites</span> <span class="chev">&#8964;</span></button>
-        <div class="acc-body"><div class="acc-inner">
+          <h4 class="settings-sub" data-i18n="settings.onenewapi">One/New API sites</h4>
           <p class="settings-note" data-i18n="settings.onenewapiNote">
             Register OneAPI / NewAPI compatible sites. Keys stay on this PC and are sent only to that site. Empty sites stay here; cards appear after you add a key.
           </p>
@@ -313,12 +289,7 @@
               <button type="submit" data-i18n="settings.onenewapiAdd">Add site</button>
             </div>
           </form>
-        </div></div>
-      </div>
-
-      <div class="acc-group">
-        <button class="acc-head"><span data-i18n="settings.sub2api">Sub2API sites</span> <span class="chev">&#8964;</span></button>
-        <div class="acc-body"><div class="acc-inner">
+          <h4 class="settings-sub" data-i18n="settings.sub2api">Sub2API sites</h4>
           <p class="settings-note" data-i18n="settings.sub2apiNote">
             Register Sub2API sites. Usage is requested only from /v1/usage. Keys stay on this PC and are sent only to that site. Empty sites stay here; cards appear after you add a key.
           </p>

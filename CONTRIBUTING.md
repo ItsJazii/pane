@@ -32,9 +32,9 @@ vulnerability reporting).
   will be declined regardless of intent. Exactly two deliberate,
   maintainer-shipped exceptions exist, both documented field-by-field in
   [docs/privacy.md](docs/privacy.md): the update check (anonymous daily
-  install counting, country-level, no IPs stored) and the opt-out daily
+  install counting, country-level, no IPs stored) and the always-on daily
   usage statistic (`src-tauri/src/telemetry.rs` — random install ID,
-  daily rollups, error categories only, hard-stop toggle). Those
+  daily rollups, error categories only). Those
   exceptions are not a precedent: users' quotas, usage amounts, spend,
   and error text never leave their PC, and PRs widening what either
   channel carries — or adding any third-party analytics SDK — will be
