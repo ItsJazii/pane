@@ -443,10 +443,10 @@ async fn fetch() -> Result<Snapshot, String> {
     let mut usage = match connect_post("GetCurrentPeriodUsage", &token).await {
         Ok(u) => u,
         Err(e) => {
-            if let Ok(mut s) = summary_fetch(&token).await {
-                if let Some(m) = fetch_grok_bot(&token).await {
-                    push_grok_bot(&mut s, m);
-                }
+            // api2.cursor.sh just failed — GetSandUsageStatus rides the
+            // same host, so asking it here would only extend an
+            // already-degraded fetch. Grok Bot is skipped on this path.
+            if let Ok(s) = summary_fetch(&token).await {
                 return Ok(s);
             }
             return match legacy_fetch(&token).await {
@@ -479,8 +479,11 @@ async fn fetch() -> Result<Snapshot, String> {
     // usage-summary goes first: Enterprise/team accounts that hide
     // planUsage from the RPC still report percentages there.
     if !enabled || plan_usage.is_none() || (limit.is_none() && total_pct.is_none()) {
-        if let Ok(mut s) = summary_fetch(&token).await {
-            if let Some(m) = fetch_grok_bot(&token).await {
+        // The summary REST call and the Grok Bot RPC are independent —
+        // run them together so the optional bar adds no latency.
+        let (summary, grok) = tokio::join!(summary_fetch(&token), fetch_grok_bot(&token));
+        if let Ok(mut s) = summary {
+            if let Some(m) = grok {
                 push_grok_bot(&mut s, m);
             }
             return Ok(s);
@@ -491,7 +494,8 @@ async fn fetch() -> Result<Snapshot, String> {
 
     let plan_req = connect_post("GetPlanInfo", &token);
     let credits_req = connect_post("GetCreditGrantsBalance", &token);
-    let (plan_info, credit_grants) = tokio::join!(plan_req, credits_req);
+    let (plan_info, credit_grants, grok) =
+        tokio::join!(plan_req, credits_req, fetch_grok_bot(&token));
 
     let mut plan = plan_info
         .ok()
@@ -591,7 +595,7 @@ async fn fetch() -> Result<Snapshot, String> {
         );
     }
 
-    if let Some(m) = fetch_grok_bot(&token).await {
+    if let Some(m) = grok {
         metrics.push(m);
     }
 
