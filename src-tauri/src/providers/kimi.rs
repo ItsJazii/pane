@@ -133,11 +133,11 @@ async fn fetch() -> Result<Snapshot, String> {
     } else {
         (load_usages(path.as_deref(), key.as_deref()).await, Ok(Vec::new()))
     };
-    let (doc, access) = usages?;
+    let (doc, plan) = usages?;
     let mut snap = parse_snapshot(&doc)?;
     // The plan name moved to /me when usages dropped membership.level —
     // its answer wins over the doc's LEVEL_*/limit fallback.
-    if let Some(name) = fetch_plan_name(&access).await {
+    if let Some(name) = plan {
         snap.plan = Some(name);
     }
     match api {
@@ -159,10 +159,13 @@ enum UsagesError {
 /// CLI login first (with the refresh-and-retry dance); the pasted plan key
 /// only when there is no login or the login path failed. When both fail,
 /// the login error is the one shown — `kimi login` is the actionable fix.
+/// Returns the usages doc plus the /me plan name — the plan key path
+/// never calls /me (a pasted "Kimi For Coding" key is not verified to
+/// work there), so its plan stays `None` for the doc fallback.
 async fn load_usages(
     cred: Option<&Path>,
     plan_key: Option<&str>,
-) -> Result<(Value, String), String> {
+) -> Result<(Value, Option<String>), String> {
     let login_err = match cred {
         Some(path) => match usages_via_login(path).await {
             Ok(pair) => return Ok(pair),
@@ -174,7 +177,7 @@ async fn load_usages(
         return Err(login_err.unwrap_or_else(|| "no Kimi Code credentials".into()));
     };
     match fetch_usages(key).await {
-        Ok(doc) => Ok((doc, key.to_string())),
+        Ok(doc) => Ok((doc, None)),
         Err(UsagesError::Unauthorized) => Err(login_err.unwrap_or_else(|| {
             "Kimi For Coding key was rejected — check it in Settings (gear icon)".into()
         })),
@@ -182,14 +185,18 @@ async fn load_usages(
     }
 }
 
-async fn usages_via_login(path: &Path) -> Result<(Value, String), String> {
+async fn usages_via_login(path: &Path) -> Result<(Value, Option<String>), String> {
     let access = load_access(path, false).await?;
-    match fetch_usages(&access).await {
-        Ok(doc) => Ok((doc, access)),
+    // /me rides the same token and adds no latency to the card fetch.
+    let (usages, plan) = tokio::join!(fetch_usages(&access), fetch_plan_name(&access));
+    match usages {
+        Ok(doc) => Ok((doc, plan)),
         Err(UsagesError::Unauthorized) => {
             let access = load_access(path, true).await?;
-            match fetch_usages(&access).await {
-                Ok(doc) => Ok((doc, access)),
+            let (usages, plan) =
+                tokio::join!(fetch_usages(&access), fetch_plan_name(&access));
+            match usages {
+                Ok(doc) => Ok((doc, plan)),
                 Err(UsagesError::Unauthorized) => Err(
                     "Kimi Code sign-in was rotated — run `kimi login` in a terminal once and Pane recovers automatically"
                         .into(),
@@ -233,15 +240,15 @@ fn plan_from_me(doc: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Best-effort sibling call after usages succeeded — a dead /me must
-/// never block the card; the usages doc stays the plan fallback. Same
-/// bearer token, same host.
+/// Best-effort sibling call, joined with usages on the OAuth login
+/// token only — a dead /me must never block the card, and the usages
+/// doc stays the plan fallback. Same bearer token, same host.
 async fn fetch_plan_name(access: &str) -> Option<String> {
     let resp = match http()
         .get(ME_URL)
         .bearer_auth(access)
         .header("Accept", "application/json")
-        .timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(4))
         .send()
         .await
     {
