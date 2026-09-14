@@ -1,6 +1,7 @@
 use super::{http, Metric, Snapshot};
 use serde_json::Value;
 use std::path::PathBuf;
+use std::time::Duration;
 
 const ID: &str = "cursor";
 const NAME: &str = "Cursor";
@@ -409,6 +410,17 @@ fn push_grok_bot(snap: &mut Snapshot, metric: Metric) {
     snap.metrics.insert(pos, metric);
 }
 
+/// Optional bar: once the summary succeeded, wait briefly for the
+/// in-flight fetch — never long enough to matter — and abort it when
+/// it outlives the grace.
+async fn attach_grok(s: &mut Snapshot, mut grok: tokio::task::JoinHandle<Option<Metric>>) {
+    match tokio::time::timeout(Duration::from_secs(2), &mut grok).await {
+        Ok(Ok(Some(m))) => push_grok_bot(s, m),
+        Ok(_) => {}
+        Err(_) => grok.abort(),
+    }
+}
+
 fn title_case(s: &str) -> String {
     s.split_whitespace()
         .map(|w| {
@@ -474,16 +486,15 @@ async fn fetch() -> Result<Snapshot, String> {
                 // The host answered, so GetSandUsageStatus is still worth
                 // a shot — but the optional bar must never delay the
                 // summary→legacy fallback. Start it now, don't gate on
-                // it; abort it if the summary itself fails.
+                // it: a 2 s grace once the summary lands, abort if the
+                // summary itself fails.
                 let grok = tokio::spawn({
                     let token = token.clone();
                     async move { fetch_grok_bot(&token).await }
                 });
                 match summary_fetch(&token).await {
                     Ok(mut s) => {
-                        if let Ok(Some(m)) = grok.await {
-                            push_grok_bot(&mut s, m);
-                        }
+                        attach_grok(&mut s, grok).await;
                         return Ok(s);
                     }
                     Err(_) => grok.abort(),
@@ -524,17 +535,15 @@ async fn fetch() -> Result<Snapshot, String> {
     // planUsage from the RPC still report percentages there.
     if !enabled || plan_usage.is_none() || (limit.is_none() && total_pct.is_none()) {
         // The optional Grok Bot RPC must never delay the summary→legacy
-        // fallback: start it now, don't gate on it; abort it if the
-        // summary itself fails.
+        // fallback: start it now, don't gate on it — a 2 s grace once
+        // the summary lands, abort if the summary itself fails.
         let grok = tokio::spawn({
             let token = token.clone();
             async move { fetch_grok_bot(&token).await }
         });
         match summary_fetch(&token).await {
             Ok(mut s) => {
-                if let Ok(Some(m)) = grok.await {
-                    push_grok_bot(&mut s, m);
-                }
+                attach_grok(&mut s, grok).await;
                 return Ok(s);
             }
             Err(_) => grok.abort(),
