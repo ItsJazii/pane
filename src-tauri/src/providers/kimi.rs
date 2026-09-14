@@ -187,14 +187,12 @@ async fn load_usages(
 
 async fn usages_via_login(path: &Path) -> Result<(Value, Option<String>), String> {
     let access = load_access(path, false).await?;
-    // /me rides the same token and adds no latency to the card fetch.
-    let (usages, plan) = tokio::join!(fetch_usages(&access), fetch_plan_name(&access));
+    let (usages, plan) = usages_and_plan(&access).await;
     match usages {
         Ok(doc) => Ok((doc, plan)),
         Err(UsagesError::Unauthorized) => {
             let access = load_access(path, true).await?;
-            let (usages, plan) =
-                tokio::join!(fetch_usages(&access), fetch_plan_name(&access));
+            let (usages, plan) = usages_and_plan(&access).await;
             match usages {
                 Ok(doc) => Ok((doc, plan)),
                 Err(UsagesError::Unauthorized) => Err(
@@ -206,6 +204,26 @@ async fn usages_via_login(path: &Path) -> Result<(Value, Option<String>), String
         }
         Err(UsagesError::Other(e)) => Err(e),
     }
+}
+
+/// One usages attempt with the /me plan lookup alongside it: /me starts
+/// together with usages and gets at most 1.5 s after usages returns;
+/// the doc fallback covers the rest.
+async fn usages_and_plan(access: &str) -> (Result<Value, UsagesError>, Option<String>) {
+    let mut me = tokio::spawn({
+        let a = access.to_string();
+        async move { fetch_plan_name(&a).await }
+    });
+    let usages = fetch_usages(access).await;
+    let plan = match tokio::time::timeout(Duration::from_millis(1500), &mut me).await {
+        Ok(Ok(p)) => p,
+        Ok(Err(_)) => None,
+        Err(_) => {
+            me.abort();
+            None
+        }
+    };
+    (usages, plan)
 }
 
 async fn fetch_usages(access: &str) -> Result<Value, UsagesError> {
@@ -240,9 +258,10 @@ fn plan_from_me(doc: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Best-effort sibling call, joined with usages on the OAuth login
-/// token only — a dead /me must never block the card, and the usages
-/// doc stays the plan fallback. Same bearer token, same host.
+/// Best-effort sibling call on the OAuth login token only — spawned
+/// alongside usages with a short grace after it lands; a dead /me must
+/// never block the card, and the usages doc stays the plan fallback.
+/// Same bearer token, same host.
 async fn fetch_plan_name(access: &str) -> Option<String> {
     let resp = match http()
         .get(ME_URL)
