@@ -1,9 +1,12 @@
-//! MiniMax Coding/Token Plan (M2.7 / M3 models). Quota comes from the same
-//! endpoint the official `mmx quota` CLI command uses, with a Bearer API key.
-//! Key sources: our Settings pane, MINIMAX_API_KEY, or the MiniMax Agent
-//! CLI's ~/.minimax/config.yaml (provider.minimax.options.apiKey).
+//! MiniMax Coding/Token Plan (M2.7 / M3 models). Quota is read through the
+//! MiniMax Code (mcode) CLI's OAuth sign-in when present — same requests and
+//! request signing mcode itself makes — else through the key endpoint with a
+//! Bearer API key from Settings, MINIMAX_API_KEY, or the MiniMax Agent CLI's
+//! ~/.minimax/config.yaml (provider.minimax.options.apiKey).
 
 use serde_json::Value;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use super::{Metric, Snapshot};
 
@@ -81,14 +84,30 @@ pub async fn snapshot() -> Snapshot {
 }
 
 async fn fetch() -> Result<Snapshot, String> {
-    let Some(key) = find_api_key() else {
-        return Ok(Snapshot::no_credentials(
+    let key = find_api_key();
+    if let Some(login) = mcode_login() {
+        match fetch_via_mcode(&login).await {
+            Ok(s) => return Ok(s),
+            Err(e) => {
+                if let Some(key) = &key {
+                    eprintln!("[pane] minimax: mcode login: {e}");
+                    return fetch_via_key(key).await;
+                }
+                return Err(e);
+            }
+        }
+    }
+    match key {
+        Some(key) => fetch_via_key(&key).await,
+        None => Ok(Snapshot::no_credentials(
             ID,
             NAME,
-            "No MiniMax key found (Settings, MINIMAX_API_KEY, or the MiniMax CLI).",
-        ));
-    };
+            "Open MiniMax Code (mcode) to refresh its sign-in, or paste a MiniMax key in Settings.",
+        )),
+    }
+}
 
+async fn fetch_via_key(key: &str) -> Result<Snapshot, String> {
     let mut last_error = String::from("quota endpoint unreachable");
     for endpoint in ENDPOINTS {
         let resp = match super::http()
@@ -152,13 +171,27 @@ fn pick_row(rows: &[Value]) -> Option<&Value> {
 
 fn parse_remains(doc: &Value) -> Option<Snapshot> {
     let rows = doc.get("model_remains").and_then(Value::as_array)?;
-    let row = pick_row(rows)?;
+    let metrics = remains_metrics(rows);
+    if metrics.is_empty() {
+        return None;
+    }
+    Some(Snapshot::ok(ID, NAME, Some("Coding Plan".into()), metrics))
+}
+
+/// Quota rows from a `model_remains` response, in mcode's Settings → Usage
+/// order: 5 Hours, Weekly, Video.
+fn remains_metrics(rows: &[Value]) -> Vec<Metric> {
+    let row = match pick_row(rows) {
+        Some(r) => r,
+        None => return Vec::new(),
+    };
     let num = |key: &str| row.get(key).and_then(Value::as_f64);
 
     let mut metrics = Vec::new();
 
-    // 5-hour rolling window. Field-name trap (confirmed against the official
-    // CLI): *_usage_count actually holds the REMAINING count.
+    // 5-hour rolling window (mcode labels it "5 Hours"). Field-name trap
+    // (confirmed against the official CLI): *_usage_count actually holds
+    // the REMAINING count.
     {
         let total = num("current_interval_total_count").unwrap_or(0.0);
         let remaining_count = num("current_interval_usage_count");
@@ -175,7 +208,7 @@ fn parse_remains(doc: &Value) -> Option<Snapshot> {
                 .map(|rem| format!("{rem:.0} of {total:.0} left"));
             let resets_at = num("end_time").map(|v| v as i64).filter(|v| *v > 0);
             metrics.push(
-                Metric::progress("Session", used.clamp(0.0, 100.0), detail)
+                Metric::progress("5 Hours", used.clamp(0.0, 100.0), detail)
                     .with_reset(resets_at, Some(5 * 60 * 60 * 1000)),
             );
         }
@@ -202,17 +235,418 @@ fn parse_remains(doc: &Value) -> Option<Snapshot> {
         }
     }
 
-    if metrics.is_empty() {
-        return None;
+    // Video allowance — mcode's Usage screen shows it as "Video 0/5".
+    // Same remaining-in-usage_count trap; status 3 = unlimited.
+    if let Some(vrow) = rows.iter().find(|r| {
+        r.get("model_name")
+            .and_then(Value::as_str)
+            .map(|n| n.to_lowercase().contains("video"))
+            .unwrap_or(false)
+    }) {
+        let status = vrow
+            .get("current_interval_status")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let total = vrow
+            .get("current_interval_total_count")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        if status == 3 {
+            metrics.push(Metric::text("Video", "Unlimited".into()));
+        } else if total > 0.0 {
+            if let Some(rem) = vrow
+                .get("current_interval_usage_count")
+                .and_then(Value::as_f64)
+            {
+                let used = (100.0 * (1.0 - rem / total)).clamp(0.0, 100.0);
+                let start = vrow.get("start_time").and_then(Value::as_i64).unwrap_or(0);
+                let end = vrow.get("end_time").and_then(Value::as_i64).unwrap_or(0);
+                let period = (start > 0 && end > 0).then_some(end - start);
+                metrics.push(
+                    Metric::progress("Video", used, Some(format!("{rem:.0} of {total:.0} left")))
+                        .with_reset((end > 0).then_some(end), period),
+                );
+            }
+        }
     }
-    Some(Snapshot::ok(ID, NAME, Some("Coding Plan".into()), metrics))
+
+    metrics
 }
 
 // ---------------------------------------------------------------------------
-// Local spend: the MiniMax Agent CLI's ~/.minimax/sqlite.db keeps a
-// token_usage table with one row per turn — model, token buckets, and the
-// CLI's own cost_usd. Same snapshot/cache machinery as the Devin store:
-// the app writes to the WAL continuously, so raw file copies tear.
+// mcode OAuth login — the MiniMax Code CLI's own sign-in. The auth file is
+// mcode's (it refreshes and rewrites it under its own lock/generation
+// scheme); we only read it while the access token is still valid and never
+// refresh or write it — a rotation from here could sign the user out.
+// ---------------------------------------------------------------------------
+
+const MCODE_FILE_CAP: u64 = 64 * 1024;
+const MAX_MATRIX_BYTES: usize = 256 * 1024;
+const MCODE_RECORD_PREFIX: &str = "com.minimax.mcode.oauth.prod.";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum McodeRegion {
+    En,
+    Cn,
+}
+
+impl McodeRegion {
+    fn dir(self) -> &'static str {
+        match self {
+            Self::En => "en",
+            Self::Cn => "cn",
+        }
+    }
+    fn agent_host(self) -> &'static str {
+        match self {
+            Self::En => "https://agent.minimax.io",
+            Self::Cn => "https://agent.minimaxi.com",
+        }
+    }
+    fn platform_host(self) -> &'static str {
+        match self {
+            Self::En => "https://platform.minimax.io",
+            Self::Cn => "https://www.minimaxi.com",
+        }
+    }
+    fn lang(self) -> &'static str {
+        match self {
+            Self::En => "en",
+            Self::Cn => "zh",
+        }
+    }
+}
+
+struct McodeLogin {
+    access: String,
+    region: McodeRegion,
+    user_id: String,
+}
+
+/// The mcode sign-in, if a usable (unexpired) access token is on disk:
+/// ~/.minimax/auth/prod/<region>/mcode-public/auth.json, en first then cn.
+fn mcode_login() -> Option<McodeLogin> {
+    let home = dirs::home_dir()?;
+    for region in [McodeRegion::En, McodeRegion::Cn] {
+        let auth = home
+            .join(".minimax")
+            .join("auth")
+            .join("prod")
+            .join(region.dir())
+            .join("mcode-public")
+            .join("auth.json");
+        let Ok(raw) = super::read_small_text(&auth, MCODE_FILE_CAP, "mcode auth") else {
+            continue;
+        };
+        let Ok(doc) = serde_json::from_str::<Value>(&raw) else { continue };
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let Some(access) = mcode_access_token(&doc, now_ms) else {
+            continue;
+        };
+        let identity = home
+            .join(".minimax")
+            .join("cli-auth")
+            .join("prod")
+            .join(region.dir())
+            .join("account-identity.json");
+        let user_id = super::read_small_text(&identity, MCODE_FILE_CAP, "account identity")
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .and_then(|d| {
+                d.get("realUserID")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "0".into());
+        return Some(McodeLogin {
+            access,
+            region,
+            user_id,
+        });
+    }
+    None
+}
+
+/// The access token from mcode's auth.json: the first record under the
+/// prod prefix (first record as fallback), usable only while it has more
+/// than a minute of life left.
+fn mcode_access_token(doc: &Value, now_ms: i64) -> Option<String> {
+    let records = doc.get("records").and_then(Value::as_object)?;
+    let rec = records
+        .iter()
+        .find(|(k, _)| k.starts_with(MCODE_RECORD_PREFIX))
+        .or_else(|| records.iter().next())?
+        .1;
+    let expiry = rec.get("expiresAtMs").and_then(Value::as_i64)?;
+    if expiry <= now_ms + 60_000 {
+        return None;
+    }
+    let token = rec.get("accessToken").and_then(Value::as_str)?.trim();
+    (!token.is_empty()).then(|| token.to_string())
+}
+
+/// JS encodeURIComponent: every byte except A-Z a-z 0-9 - _ . ! ~ * ' ( )
+/// becomes %XX (uppercase hex, UTF-8 bytes).
+fn encode_uri_component(s: &str) -> String {
+    fn safe(b: u8) -> bool {
+        matches!(b,
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
+            | b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')')
+    }
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        if safe(b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn md5_hex(data: &str) -> String {
+    use md5::Digest;
+    let mut h = md5::Md5::new();
+    h.update(data.as_bytes());
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// mcode's agent-host query string, in URLSearchParams order. The tz
+/// offset is local UTC offset in seconds (chrono's local_minus_utc).
+fn mcode_query(now_ms: i64, tz_offset_secs: i64, region: McodeRegion, user_id: &str) -> String {
+    let lang = region.lang();
+    format!(
+        "device_platform=mcode&biz_id=3&app_id=3001&version_code=22201&unix={now_ms}&timezone_offset={tz_offset_secs}&sys_language={lang}&lang={lang}&device_id=0&os_name=win32&browser_name=mcode&user_id={user_id}&client=mcode"
+    )
+}
+
+/// mcode's two signing headers. Returns (yy, x-timestamp, x-signature).
+/// Note the asymmetry baked into mcode: `yy` always hashes the request
+/// body (a literal "{}" on GETs) while `x-signature` uses an empty body
+/// on GETs — POST callers pass the real body to both.
+fn mcode_sign(path: &str, query: &str, body: &str, now_ms: i64) -> (String, String, String) {
+    let secs = (now_ms / 1000).to_string();
+    let yy = md5_hex(&format!(
+        "{}_{}{}{}",
+        encode_uri_component(&format!("{path}?{query}")),
+        body,
+        md5_hex(&now_ms.to_string()),
+        "ooui"
+    ));
+    let x_signature = md5_hex(&format!("{secs}I*7Cf%WZ#S&%1RlZJ&C2{body}"));
+    (yy, secs, x_signature)
+}
+
+/// Matrix answers carry statusInfo.code (0 ok; 1000048 = sign-in expired)
+/// and/or base_resp.status_code (0 ok) — either non-zero is an error.
+fn matrix_check(doc: &Value, what: &str) -> Result<(), String> {
+    for code_ptr in ["/statusInfo/code", "/base_resp/status_code"] {
+        if let Some(code) = doc.pointer(code_ptr).and_then(Value::as_i64) {
+            if code != 0 {
+                let msg = [
+                    "/statusInfo/message",
+                    "/statusInfo/msg",
+                    "/base_resp/status_msg",
+                ]
+                .iter()
+                .find_map(|p| doc.pointer(p).and_then(Value::as_str))
+                .unwrap_or("unknown error");
+                return Err(format!("{what}: {msg} (code {code})"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Signed POST to mcode's agent host, bound at 4 s.
+async fn matrix_post(login: &McodeLogin, path: &str, body: &str) -> Result<Value, String> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let tz = chrono::Local::now().offset().local_minus_utc();
+    let query = mcode_query(now_ms, tz as i64, login.region, &login.user_id);
+    let (yy, secs, x_signature) = mcode_sign(path, &query, body, now_ms);
+    let url = format!("{}{}?{}", login.region.agent_host(), path, query);
+    let resp = super::http()
+        .post(url)
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/json")
+        .header("User-Agent", "MiniMaxCode")
+        .bearer_auth(&login.access)
+        .header("yy", yy)
+        .header("x-timestamp", secs)
+        .header("x-signature", x_signature)
+        .timeout(Duration::from_secs(4))
+        .body(body.to_string())
+        .send()
+        .await
+        .map_err(|e| format!("{path}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("{path}: HTTP {}", resp.status()));
+    }
+    let doc = super::json_body(resp, MAX_MATRIX_BYTES, path).await?;
+    matrix_check(&doc, path)?;
+    Ok(doc)
+}
+
+/// The token-plan remains endpoint on the platform host — same shape the
+/// key path parses. No mcode signing on this one; X-Group-Id only when
+/// the workspace lookup supplied one.
+async fn platform_remains(login: &McodeLogin, group_id: Option<&str>) -> Result<Value, String> {
+    let url = format!(
+        "{}/v1/api/openplatform/coding_plan/remains",
+        login.region.platform_host()
+    );
+    let mut req = super::http()
+        .get(url)
+        .header("Accept", "application/json")
+        .bearer_auth(&login.access)
+        .timeout(Duration::from_secs(4));
+    if let Some(g) = group_id {
+        req = req.header("X-Group-Id", g);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("remains: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("remains: HTTP {}", resp.status()));
+    }
+    let doc = super::json_body(resp, MAX_MATRIX_BYTES, "remains").await?;
+    matrix_check(&doc, "remains")?;
+    Ok(doc)
+}
+
+/// Thousands separators for the Credits row ("0 + 1,200").
+fn thousands(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::new();
+    if n < 0 {
+        out.push('-');
+    }
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn str_amount(v: Option<&Value>) -> i64 {
+    v.and_then(|v| {
+        v.as_str()
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .or_else(|| v.as_f64())
+    })
+    .unwrap_or(0.0) as i64
+}
+
+/// "0 + 1,200" — purchased + free remaining credits, comma-grouped.
+/// An empty summary object counts as absent (no Credits row).
+fn credits_text(cs: &Value) -> Option<String> {
+    if !cs.is_object() {
+        return None;
+    }
+    let purchased = cs.get("purchased_remaining_amount");
+    let free = cs.get("free_remaining_amount");
+    if purchased.is_none() && free.is_none() {
+        return None;
+    }
+    Some(format!(
+        "{} + {}",
+        thousands(str_amount(purchased)),
+        thousands(str_amount(free))
+    ))
+}
+
+/// "Sep 18, 2026" — plan expiry in local time, like mcode's Usage screen.
+fn plan_ends(expires_ms: i64) -> Option<String> {
+    chrono::DateTime::from_timestamp_millis(expires_ms)
+        .map(|d| d.with_timezone(&chrono::Local).format("%b %-d, %Y").to_string())
+}
+
+/// Plan/quota through the mcode login: workspace lookup, then membership
+/// and remains concurrently (remains needs the workspace's op_group_id).
+/// A failed workspace call just means the membership body is `{}` and the
+/// remains call goes without a group header. Only the remains call is
+/// fatal — a dead membership call costs the Credits row, nothing else.
+async fn fetch_via_mcode(login: &McodeLogin) -> Result<Snapshot, String> {
+    let extra = matrix_post(login, "/matrix/api/v1/user/get_user_extra_info", "{}")
+        .await
+        .ok();
+    let ws = extra
+        .as_ref()
+        .and_then(|d| d.get("workspaces").and_then(Value::as_array))
+        .and_then(|ws| {
+            ws.iter()
+                .find(|w| w.get("workspace_type").and_then(Value::as_i64) == Some(0))
+        });
+
+    let workspace_id = ws.and_then(|w| w.get("workspace_id")).cloned();
+    let ws_group = ws
+        .and_then(|w| w.get("op_group_id").and_then(Value::as_str))
+        .map(str::to_string);
+    let ws_tier = ws
+        .and_then(|w| w.get("token_plan_tier").and_then(Value::as_str))
+        .map(str::to_string);
+    let ws_expires = ws
+        .and_then(|w| w.get("token_plan_expires_at").and_then(Value::as_i64));
+
+    let member_body = workspace_id
+        .map(|id| serde_json::json!({ "workspace_id": id }).to_string())
+        .unwrap_or_else(|| "{}".into());
+    let member_req = matrix_post(login, "/matrix/api/v1/commerce/get_membership_info", &member_body);
+    let remains_req = platform_remains(login, ws_group.as_deref());
+    let (member, remains) = tokio::join!(member_req, remains_req);
+
+    // The remains call is the quota source — without it there is no card.
+    let remains = remains?;
+    let rows = remains
+        .get("model_remains")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut metrics = remains_metrics(&rows);
+    if metrics.is_empty() {
+        return Err("no recognizable quota rows in response".into());
+    }
+
+    let member = member.ok();
+    let pick = |ws: Option<String>, m: &str| {
+        ws.or_else(|| {
+            member
+                .as_ref()
+                .and_then(|d| d.get(m).and_then(Value::as_str))
+                .map(str::to_string)
+        })
+    };
+    let tier = pick(ws_tier, "token_plan_tier").filter(|s| !s.trim().is_empty());
+    let expires = ws_expires.or_else(|| {
+        member
+            .as_ref()
+            .and_then(|d| d.get("token_plan_expires_at").and_then(Value::as_i64))
+    });
+
+    if let Some(text) = member
+        .as_ref()
+        .and_then(|d| d.get("op_credit_summary"))
+        .and_then(credits_text)
+    {
+        metrics.push(Metric::text("Credits", text));
+    }
+    if let Some(label) = expires.filter(|e| *e > 0).and_then(plan_ends) {
+        metrics.push(Metric::text("Plan ends", label));
+    }
+
+    Ok(Snapshot::ok(ID, NAME, tier, metrics))
+}
+
+// ---------------------------------------------------------------------------
+// Local spend: two MiniMax ledgers — the Agent CLI's ~/.minimax/sqlite.db
+// token_usage table (frozen July 2026 but still the only source for that
+// history) and mcode's ~/.minimax/v2/sqlite/runtime-state.sqlite. Same
+// snapshot/cache machinery as the Devin store: the CLIs write to the WAL
+// continuously, so raw file copies tear.
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -227,49 +661,85 @@ pub struct UsageEvent {
     pub cost_usd: f64,
 }
 
-fn agent_db_path() -> Option<std::path::PathBuf> {
+fn agent_db_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".minimax").join("sqlite.db"))
+}
+
+/// mcode's newer store (it replaced the Agent CLI ledger in July): WAL-mode
+/// runtime-state.sqlite under v2/sqlite. Its token rows carry no model —
+/// that is joined from the turn's assistant message telemetry.
+fn runtime_db_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| {
+        h.join(".minimax")
+            .join("v2")
+            .join("sqlite")
+            .join("runtime-state.sqlite")
+    })
 }
 
 pub(crate) type FileStamp = (std::time::SystemTime, u64);
 
-pub(crate) fn file_stamp(path: &std::path::Path) -> FileStamp {
+pub(crate) fn file_stamp(path: &Path) -> FileStamp {
     std::fs::metadata(path)
         .map(|m| (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len()))
         .unwrap_or((std::time::UNIX_EPOCH, 0))
 }
 
-/// Per-turn token usage from the MiniMax Agent CLI's local store. Cached on
-/// the (db, WAL) stamps; a busy/locked db serves the last good events.
+fn wal_sidecar(db: &Path) -> PathBuf {
+    let mut p = db.as_os_str().to_os_string();
+    p.push("-wal");
+    PathBuf::from(p)
+}
+
+/// Per-turn token usage from both MiniMax stores — the old Agent CLI
+/// ledger (frozen since July but still the only source for its history)
+/// and mcode's v2 ledger. The two never overlap in time, so the events
+/// just concatenate. Each source is cached on its own (db, WAL) stamps;
+/// a busy/locked db serves its last good events, a missing file is
+/// skipped.
 pub fn collect_usage_events() -> Vec<UsageEvent> {
     use std::sync::Mutex;
-    static CACHE: Mutex<Option<(FileStamp, FileStamp, Vec<UsageEvent>)>> = Mutex::new(None);
+    static CACHES: [Mutex<Option<(FileStamp, FileStamp, Vec<UsageEvent>)>>; 2] =
+        [Mutex::new(None), Mutex::new(None)];
 
-    let Some(db_path) = agent_db_path() else { return Vec::new() };
-    if !db_path.exists() {
-        return Vec::new();
+    let mut out = Vec::new();
+    for (db, slot, read) in [
+        (agent_db_path(), 0usize, read_usage_events as fn(&Path) -> _),
+        (runtime_db_path(), 1, read_v2_usage_events as fn(&Path) -> _),
+    ] {
+        let Some(db_path) = db else { continue };
+        if !db_path.exists() {
+            continue;
+        }
+        out.extend(collect_cached(&db_path, &CACHES[slot], read));
     }
-    let db_stamp = file_stamp(&db_path);
-    let wal_stamp = file_stamp(&db_path.with_extension("db-wal"));
+    out
+}
 
-    if let Ok(cache) = CACHE.lock() {
-        if let Some((d, w, events)) = cache.as_ref() {
+fn collect_cached(
+    db_path: &Path,
+    cache: &std::sync::Mutex<Option<(FileStamp, FileStamp, Vec<UsageEvent>)>>,
+    read: fn(&Path) -> Result<Vec<UsageEvent>, String>,
+) -> Vec<UsageEvent> {
+    let db_stamp = file_stamp(db_path);
+    let wal_stamp = file_stamp(&wal_sidecar(db_path));
+
+    if let Ok(c) = cache.lock() {
+        if let Some((d, w, events)) = c.as_ref() {
             if *d == db_stamp && *w == wal_stamp {
                 return events.clone();
             }
         }
     }
 
-    let events = read_usage_events(&db_path);
-
-    match events {
+    match read(db_path) {
         Ok(events) => {
-            if let Ok(mut cache) = CACHE.lock() {
-                *cache = Some((db_stamp, wal_stamp, events.clone()));
+            if let Ok(mut c) = cache.lock() {
+                *c = Some((db_stamp, wal_stamp, events.clone()));
             }
             events
         }
-        Err(_) => CACHE
+        Err(_) => cache
             .lock()
             .ok()
             .and_then(|c| c.as_ref().map(|(_, _, e)| e.clone()))
@@ -310,7 +780,7 @@ pub(crate) fn snapshot_db(src_path: &std::path::Path, dst_path: &std::path::Path
     Ok(())
 }
 
-fn read_usage_events(db: &std::path::Path) -> Result<Vec<UsageEvent>, String> {
+fn read_usage_events(db: &Path) -> Result<Vec<UsageEvent>, String> {
     let conn = super::open_readonly_sqlite(db)?;
     let mut stmt = conn
         .prepare(&format!(
@@ -322,6 +792,38 @@ fn read_usage_events(db: &std::path::Path) -> Result<Vec<UsageEvent>, String> {
             super::MAX_LEDGER_ROWS
         ))
         .map_err(|e| format!("query token_usage: {e}"))?;
+    read_events_stmt(&mut stmt, "token_usage")
+}
+
+/// The v2 ledger's token rows have no model or cost — the model lives in
+/// the turn's assistant message telemetry (`context_usage_telemetry`).
+/// Rows it can't name stay "" and price as unpriced (⚠), never guessed.
+fn read_v2_usage_events(db: &Path) -> Result<Vec<UsageEvent>, String> {
+    let conn = super::open_readonly_sqlite(db)?;
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT u.ts, COALESCE(NULLIF(u.model,''), m.model, ''),
+                    u.input_tokens, u.output_tokens, u.reasoning_tokens,
+                    u.cache_read_tokens, u.cache_write_tokens, COALESCE(u.cost_usd, 0)
+             FROM local_runtime_token_usage u
+             LEFT JOIN (
+                 SELECT turn_id, MAX(json_extract(data_json,'$.context_usage_telemetry.model')) AS model
+                 FROM local_runtime_message_rows
+                 WHERE role='assistant' AND turn_id IS NOT NULL
+                 GROUP BY turn_id
+             ) m ON m.turn_id = u.turn_id
+             ORDER BY u.ts DESC
+             LIMIT {}",
+            super::MAX_LEDGER_ROWS
+        ))
+        .map_err(|e| format!("query local_runtime_token_usage: {e}"))?;
+    read_events_stmt(&mut stmt, "local_runtime_token_usage")
+}
+
+fn read_events_stmt(
+    stmt: &mut rusqlite::Statement<'_>,
+    what: &str,
+) -> Result<Vec<UsageEvent>, String> {
     let rows = stmt
         .query_map([], |row| {
             Ok(UsageEvent {
@@ -335,11 +837,11 @@ fn read_usage_events(db: &std::path::Path) -> Result<Vec<UsageEvent>, String> {
                 cost_usd: row.get::<_, f64>(7).unwrap_or(0.0),
             })
         })
-        .map_err(|e| format!("read token_usage: {e}"))?;
+        .map_err(|e| format!("read {what}: {e}"))?;
     let events: Vec<UsageEvent> = rows.flatten().collect();
     if events.len() as u64 >= super::MAX_LEDGER_ROWS {
         eprintln!(
-            "[pane] minimax: token_usage hit the {}-row read cap — keeping newest rows, oldest usage is dropped",
+            "[pane] minimax: {what} hit the {}-row read cap — keeping newest rows, oldest usage is dropped",
             super::MAX_LEDGER_ROWS
         );
     }
@@ -349,6 +851,7 @@ fn read_usage_events(db: &std::path::Path) -> Result<Vec<UsageEvent>, String> {
 #[cfg(test)]
 mod tests {
     use super::cli_config_key;
+    use serde_json::json;
 
     #[test]
     fn cli_key_requires_the_minimax_path() {
@@ -406,6 +909,261 @@ mod tests {
         crate::providers::remove_sqlite_files(&dst);
     }
 
+    #[test]
+    fn encode_uri_component_matches_js() {
+        assert_eq!(
+            super::encode_uri_component("/a b?c=1&d=/"),
+            "%2Fa%20b%3Fc%3D1%26d%3D%2F"
+        );
+        // Unreserved set passes through verbatim.
+        assert_eq!(
+            super::encode_uri_component("AZaz09-_.!~*'()"),
+            "AZaz09-_.!~*'()"
+        );
+        // UTF-8 bytes are percent-encoded per byte (é = C3 A9).
+        assert_eq!(super::encode_uri_component("é"), "%C3%A9");
+    }
+
+    #[test]
+    fn mcode_sign_matches_reference_vectors() {
+        // Vectors computed with hashlib against mcode's own formula.
+        let now_ms = 1_700_000_000_123;
+        let query = super::mcode_query(now_ms, -18_000, super::McodeRegion::En, "0");
+        assert_eq!(
+            query,
+            "device_platform=mcode&biz_id=3&app_id=3001&version_code=22201&unix=1700000000123&timezone_offset=-18000&sys_language=en&lang=en&device_id=0&os_name=win32&browser_name=mcode&user_id=0&client=mcode"
+        );
+        let (yy, secs, x_sig) = super::mcode_sign(
+            "/matrix/api/v1/user/get_user_extra_info",
+            &query,
+            "{}",
+            now_ms,
+        );
+        assert_eq!(secs, "1700000000");
+        assert_eq!(yy, "2d07386dfd2bcc75fbd93c6b09b2934d");
+        assert_eq!(x_sig, "b0c74b46e28053fb22e53239b1061505");
+    }
+
+    #[test]
+    fn mcode_auth_file_usable_and_expired() {
+        let now = 1_800_000_000_000;
+        let usable = json!({
+            "schemaVersion": 1,
+            "records": {
+                "com.minimax.mcode.oauth.prod.en\u{0}abcd": {
+                    "accessToken": "x".repeat(60),
+                    "tokenType": "Bearer",
+                    "clientId": "mcode-public",
+                    "expiresAtMs": now + 3_600_000,
+                }
+            }
+        });
+        assert_eq!(
+            super::mcode_access_token(&usable, now).map(|t| t.len()),
+            Some(60)
+        );
+
+        // Within a minute of expiry is not usable.
+        let dying = json!({
+            "records": {
+                "com.minimax.mcode.oauth.prod.en\u{0}abcd": {
+                    "accessToken": "x".repeat(60),
+                    "expiresAtMs": now + 30_000,
+                }
+            }
+        });
+        assert_eq!(super::mcode_access_token(&dying, now), None);
+
+        // No prod-prefixed record: the first record is the fallback.
+        let other = json!({
+            "records": {
+                "something.else": {
+                    "accessToken": "y".repeat(60),
+                    "expiresAtMs": now + 3_600_000,
+                }
+            }
+        });
+        assert_eq!(
+            super::mcode_access_token(&other, now).map(|t| t.len()),
+            Some(60)
+        );
+
+        // No records at all → nothing.
+        assert_eq!(super::mcode_access_token(&json!({"records": {}}), now), None);
+    }
+
+    #[test]
+    fn membership_json_yields_tier_expiry_and_credits() {
+        // token_plan_expires_at ≈ Sep 18, 2026 local (midday UTC).
+        let expiry = chrono::DateTime::parse_from_rfc3339("2026-09-18T12:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let member = json!({
+            "op_group_id": "g-1",
+            "has_token_plan": true,
+            "token_plan_tier": "Ultra Plan",
+            "token_plan_expires_at": expiry,
+            "op_credit_summary": {
+                "total_remaining_amount": "1200",
+                "purchased_remaining_amount": "0",
+                "free_remaining_amount": "1200"
+            },
+            "opcredit_balance": 0
+        });
+        assert_eq!(
+            member.get("token_plan_tier").and_then(serde_json::Value::as_str),
+            Some("Ultra Plan")
+        );
+        assert_eq!(
+            member
+                .get("token_plan_expires_at")
+                .and_then(serde_json::Value::as_i64)
+                .and_then(super::plan_ends)
+                .as_deref(),
+            Some("Sep 18, 2026")
+        );
+        assert_eq!(
+            super::credits_text(member.get("op_credit_summary").unwrap()).as_deref(),
+            Some("0 + 1,200")
+        );
+        // No credit summary → no Credits row.
+        assert!(super::credits_text(&json!({})).is_none());
+        // Thousands separator shape.
+        assert_eq!(super::thousands(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn remains_builds_5_hours_weekly_and_video_rows() {
+        let doc = json!({
+            "model_remains": [
+                {
+                    "model_name": "general",
+                    "current_interval_total_count": 100,
+                    "current_interval_usage_count": 96,
+                    "current_interval_remaining_percent": 96,
+                    "end_time": 1_800_018_000_000i64,
+                    "current_weekly_status": 1,
+                    "current_weekly_remaining_percent": 100,
+                    "current_weekly_total_count": 500,
+                    "current_weekly_usage_count": 500,
+                    "weekly_end_time": 1_800_600_000_000i64
+                },
+                {
+                    "model_name": "video",
+                    "current_interval_status": 1,
+                    "current_interval_total_count": 5,
+                    "current_interval_usage_count": 5,
+                    "start_time": 1_800_000_000_000i64,
+                    "end_time": 1_800_018_000_000i64
+                }
+            ]
+        });
+        let snap = super::parse_remains(&doc).expect("snapshot");
+        let labels: Vec<&str> = snap.metrics.iter().map(|m| m.label.as_str()).collect();
+        assert_eq!(labels, ["5 Hours", "Weekly", "Video"]);
+        assert_eq!(snap.plan.as_deref(), Some("Coding Plan"));
+
+        let five_h = &snap.metrics[0];
+        assert_eq!(five_h.used_percent, Some(4.0));
+        assert_eq!(five_h.detail.as_deref(), Some("96 of 100 left"));
+
+        let video = &snap.metrics[2];
+        assert_eq!(video.kind, "progress");
+        assert_eq!(video.used_percent, Some(0.0));
+        assert_eq!(video.detail.as_deref(), Some("5 of 5 left"));
+        assert_eq!(video.resets_at, Some(1_800_018_000_000));
+        assert_eq!(video.period_ms, Some(18_000_000));
+    }
+
+    #[test]
+    fn remains_video_unlimited_and_absent_cases() {
+        let mut doc = json!({
+            "model_remains": [
+                {
+                    "model_name": "general",
+                    "current_interval_total_count": 100,
+                    "current_interval_usage_count": 100,
+                    "current_weekly_status": 3
+                },
+                {
+                    "model_name": "video",
+                    "current_interval_status": 3,
+                    "current_interval_total_count": 0,
+                    "current_interval_usage_count": 0
+                }
+            ]
+        });
+        let snap = super::parse_remains(&doc).expect("snapshot");
+        let labels: Vec<&str> = snap.metrics.iter().map(|m| m.label.as_str()).collect();
+        assert_eq!(labels, ["5 Hours", "Weekly", "Video"]);
+        assert_eq!(snap.metrics[1].value.as_deref(), Some("Unlimited"));
+        assert_eq!(snap.metrics[2].value.as_deref(), Some("Unlimited"));
+
+        // total 0 without unlimited → no Video row at all.
+        doc["model_remains"][1]["current_interval_status"] = json!(1);
+        let snap = super::parse_remains(&doc).expect("snapshot");
+        let labels: Vec<&str> = snap.metrics.iter().map(|m| m.label.as_str()).collect();
+        assert_eq!(labels, ["5 Hours", "Weekly"]);
+    }
+
+    #[test]
+    fn v2_ledger_joins_model_from_message_telemetry() {
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("pane-mmx-v2-{pid}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("runtime-state.sqlite");
+        crate::providers::remove_sqlite_files(&db);
+
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE local_runtime_token_usage(
+                id INTEGER PRIMARY KEY, session_id TEXT, agent_name TEXT,
+                framework_type TEXT, turn_id TEXT, model TEXT, ts INTEGER,
+                input_tokens INTEGER, output_tokens INTEGER, reasoning_tokens INTEGER,
+                cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+                cost_usd REAL, raw TEXT);
+             CREATE TABLE local_runtime_message_rows(
+                session_id TEXT, msg_id TEXT, role TEXT, turn_id TEXT,
+                created_at_ms INTEGER, data_json TEXT);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO local_runtime_token_usage
+                (session_id,turn_id,model,ts,input_tokens,output_tokens,reasoning_tokens,cache_read_tokens,cache_write_tokens,cost_usd)
+             VALUES('s1','t1',NULL,1000,10,20,0,0,0,0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO local_runtime_token_usage
+                (session_id,turn_id,model,ts,input_tokens,output_tokens,reasoning_tokens,cache_read_tokens,cache_write_tokens,cost_usd)
+             VALUES('s1','t2',NULL,2000,5,6,0,0,0,0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO local_runtime_message_rows
+                (session_id,msg_id,role,turn_id,created_at_ms,data_json)
+             VALUES('s1','m1','assistant','t1',1001,
+                '{\"context_usage_telemetry\":{\"model\":\"MiniMax-M3\"}}')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let events = super::read_v2_usage_events(&db).expect("v2 read");
+        assert_eq!(events.len(), 2);
+        // Newest first: t2 has no assistant telemetry → model "".
+        assert_eq!(events[0].ts_ms, 2000);
+        assert_eq!(events[0].model, "");
+        assert_eq!(events[1].ts_ms, 1000);
+        assert_eq!(events[1].model, "MiniMax-M3");
+
+        drop(events);
+        crate::providers::remove_sqlite_files(&db);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
     /// Live probe with this machine's real key — run manually via
     /// `cargo test --lib minimax -- --ignored --nocapture`. Prints statuses
     /// and numbers only, never the key.
@@ -425,6 +1183,73 @@ mod tests {
                 "  {}: used={:?} detail={:?} value={:?} resets_at={:?}",
                 m.label, m.used_percent, m.detail, m.value, m.resets_at
             );
+        }
+    }
+
+    /// Live probe of the mcode OAuth path — run manually via
+    /// `cargo test --lib minimax::tests::live_probe_mcode -- --ignored
+    /// --nocapture`. Prints field names, lengths, labels, percentages —
+    /// never a token.
+    #[test]
+    #[ignore]
+    fn live_probe_mcode() {
+        tauri::async_runtime::block_on(async {
+            let Some(login) = super::mcode_login() else {
+                eprintln!("mcode login: none usable (auth.json missing or token expired)");
+                return;
+            };
+            eprintln!(
+                "mcode login: region={} access_len={} user_id_len={}",
+                login.region.dir(),
+                login.access.len(),
+                login.user_id.len()
+            );
+            match super::fetch_via_mcode(&login).await {
+                Ok(s) => {
+                    eprintln!(
+                        "mcode: status={} plan={:?} metrics={}",
+                        s.status,
+                        s.plan,
+                        s.metrics.len()
+                    );
+                    for m in &s.metrics {
+                        eprintln!(
+                            "  {}: kind={} used={:?} detail={:?} value={:?} resets_at={:?}",
+                            m.label, m.kind, m.used_percent, m.detail, m.value, m.resets_at
+                        );
+                    }
+                }
+                Err(e) => eprintln!("mcode fetch: {e}"),
+            }
+        });
+    }
+
+    /// Live probe of the spend path — run manually via
+    /// `cargo test --lib minimax::tests::live_probe_spend -- --ignored
+    /// --nocapture`. Prints event counts and priced/unpriced totals only.
+    #[test]
+    #[ignore]
+    fn live_probe_spend() {
+        let events = super::collect_usage_events();
+        let v2 = events.iter().filter(|e| e.model == "MiniMax-M3").count();
+        eprintln!(
+            "events: {} total, {v2} joined to MiniMax-M3; lookup(MiniMax-M3) priced={}",
+            events.len(),
+            crate::pricing::lookup("MiniMax-M3").is_some()
+        );
+        let spends = crate::spend::collect(None);
+        if let Some(sp) = spends.iter().find(|s| s.id == "minimax") {
+            eprintln!(
+                "spend: today=${:.2}/{}tok last30=${:.2}/{}tok unpriced={} models={:?}",
+                sp.today.cost,
+                sp.today.tokens,
+                sp.last30.cost,
+                sp.last30.tokens,
+                sp.unpriced,
+                sp.unpriced_models
+            );
+        } else {
+            eprintln!("spend: no minimax entry");
         }
     }
 }

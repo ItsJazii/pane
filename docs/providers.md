@@ -159,18 +159,36 @@ Ground rules that apply to every provider:
 
 ## MiniMax
 
-- **Reads:** pasted key (Settings), `MINIMAX_API_KEY`, or
+- **Reads:** the MiniMax Code (mcode) CLI's OAuth sign-in at
+  `%USERPROFILE%\.minimax\auth\prod\<en|cn>\mcode-public\auth.json` —
+  read-only, never refreshed or written (mcode owns that file under its
+  own lock/generation scheme); the token is used only while its
+  `expiresAtMs` is still in the future. The account id comes from
+  `%USERPROFILE%\.minimax\cli-auth\prod\<en|cn>\account-identity.json`
+  (`realUserID`). Without a usable mcode login: pasted key (Settings),
+  `MINIMAX_API_KEY`, or
   `%USERPROFILE%\.minimax\config.yaml` (exactly
   `provider.minimax.options.apiKey` — a same-named key under another
   provider's section is never used); local spend from
   `%USERPROFILE%\.minimax\sqlite.db` (the Agent CLI's per-turn
-  token_usage table, read live and read-only) and from Claude Code sessions that ran against MiniMax's
+  token_usage table, frozen July 2026 but still read for its history)
+  plus mcode's `%USERPROFILE%\.minimax\v2\sqlite\runtime-state.sqlite`
+  (`local_runtime_token_usage`, model joined from the turn's assistant
+  `context_usage_telemetry`) — and from Claude Code sessions that ran against MiniMax's
   Anthropic-compatible endpoint (those log MiniMax models into
   `~\.claude\projects\` and are re-routed here from the Claude card).
-- **Calls:** `api.minimax.io/v1/token_plan/remains` (+ regional fallbacks).
-- **Shows:** 5-hour Session + Weekly plan windows; Today / Yesterday /
-  30-day spend with per-model breakdown (the CLI's own cost_usd is
-  preferred; catalog pricing otherwise).
+- **Calls:** via the mcode login — `agent.minimax.io` matrix POSTs
+  `user/get_user_extra_info` and `commerce/get_membership_info` with
+  mcode's request signing (`yy`/`x-timestamp`/`x-signature`), then
+  `platform.minimax.io/v1/api/openplatform/coding_plan/remains` with the
+  workspace's `X-Group-Id` (CN hosts: `agent.minimaxi.com` /
+  `www.minimaxi.com`); via a key — `api.minimax.io/v1/token_plan/remains`
+  (+ regional fallbacks).
+- **Shows:** 5 Hours + Weekly plan windows, the Video allowance row,
+  Credits (purchased + free, mcode login only), Plan ends; the plan tier
+  verbatim (e.g. "Ultra Plan") on the mcode login or "Coding Plan" on a
+  key; Today / Yesterday / 30-day spend with per-model breakdown (the
+  CLI's own cost_usd is preferred; catalog pricing otherwise).
 
 ## OpenRouter
 

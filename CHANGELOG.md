@@ -20,6 +20,11 @@
   get a "Grok Bot" bar (percent used, weekly reset) from Cursor's
   `GetSandUsageStatus` endpoint, between the bucket bars and the total.
   Pooled-enterprise and no-allowance accounts show nothing extra.
+- **MiniMax card works through the MiniMax Code (mcode) login.** No key
+  needed when mcode is signed in — the card matches mcode's own Usage
+  screen: plan tier, 5 Hours and Weekly bars, a Video row, Credits, and
+  the plan's end date (the old "Session" label migrates to "5 Hours" in
+  saved layouts). A saved key still works and is the fallback.
 - **Settings simplified.** The Privacy section is gone — the anonymous
   once-a-day statistic is always on and the "hide tray numbers while
   screen sharing" option was removed; the sidebar Minimal-view button is
@@ -27,6 +32,10 @@
   sites live under API keys.
 
 ### Fixed
+- **MiniMax spend reads mcode's new ledger.** Usage since July lives in
+  `v2/sqlite/runtime-state.sqlite` (`local_runtime_token_usage`), not the
+  old `sqlite.db`; both are read, and the model comes from the turn's
+  assistant-message telemetry.
 - **Kimi Code card shows its plan name again.** Kimi's usage endpoint
   stopped sending the membership level; the name (Moderato / Allegretto /
   Allegro / Vivace) now comes from the account endpoint on the same login.

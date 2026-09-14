@@ -718,6 +718,22 @@ function ensureLayout(): void {
     }
   }
 
+  // MiniMax's rolling window is mcode's "5 Hours" row now. Same shape as
+  // CURSOR_RENAMES: rename in place, splice out a surviving duplicate.
+  const MINIMAX_RENAMES: Record<string, string> = { Session: "5 Hours" };
+  for (const [pid, L] of Object.entries(layout.providers)) {
+    if (providerFamily(pid) !== "minimax") continue;
+    for (const list of [L.metricOrder, L.hidden, L.starred, L.onDemand]) {
+      for (const [oldLabel, newLabel] of Object.entries(MINIMAX_RENAMES)) {
+        const at = list.indexOf(oldLabel);
+        if (at < 0) continue;
+        if (list.includes(newLabel)) list.splice(at, 1);
+        else list[at] = newLabel;
+        changed = true;
+      }
+    }
+  }
+
   // The per-credit "Reset credit"/"Reset credit N" rows collapsed into a
   // single "Rate Limit Resets" row. Same shape as CURSOR_RENAMES: the
   // first match is renamed in place (stars/order carry over), later
