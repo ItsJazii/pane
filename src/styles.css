@@ -84,7 +84,7 @@
   padding-top: 1px;
 }
 :root[data-density="compact"] .bar {
-  height: 4px;
+  height: 5px;
 }
 :root[data-density="compact"] .provider-head {
   margin-bottom: 2px;
@@ -974,7 +974,7 @@ select:focus-visible {
 
 .bar {
   position: relative;
-  height: 5px;
+  height: 6px;
   background: var(--muted);
   border-radius: 999px;
 }
@@ -999,7 +999,7 @@ select:focus-visible {
   position: absolute;
   top: -2px;
   width: 2px;
-  height: 9px;
+  height: 10px;
   border-radius: 1px;
   background: var(--foreground);
   opacity: 0.55;
