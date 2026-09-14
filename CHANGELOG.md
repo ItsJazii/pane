@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.52 — 2026-09-14
+
 ### Added
 - **Rate Limit Resets row.** Codex (and Grok, read-only) reset credits
   are one row — `● N available`, the dot blue / yellow within 7 days /
