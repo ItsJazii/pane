@@ -712,15 +712,15 @@ fn wal_sidecar(db: &Path) -> PathBuf {
     PathBuf::from(p)
 }
 
+/// One ledger source's last-good events, keyed by (db stamp, wal stamp).
+type SourceCache = std::sync::Mutex<Option<(FileStamp, FileStamp, Vec<UsageEvent>)>>;
+
 /// Per-turn token usage from both MiniMax stores — the old Agent CLI
 /// ledger (frozen since July but still the only source for its history)
 /// and mcode's v2 ledger. The two never overlap in time, so the events
 /// just concatenate. Each source is cached on its own (db, WAL) stamps;
 /// a busy/locked db serves its last good events, a missing file is
 /// skipped.
-/// One ledger source's last-good events, keyed by (db stamp, wal stamp).
-type SourceCache = std::sync::Mutex<Option<(FileStamp, FileStamp, Vec<UsageEvent>)>>;
-
 pub fn collect_usage_events() -> Vec<UsageEvent> {
     static CACHES: [SourceCache; 2] =
         [std::sync::Mutex::new(None), std::sync::Mutex::new(None)];
