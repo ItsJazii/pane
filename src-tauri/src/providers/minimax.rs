@@ -629,6 +629,8 @@ async fn fetch_via_mcode(login: &McodeLogin) -> Result<Snapshot, String> {
     let workspace_id = ws.and_then(|w| w.get("workspace_id")).cloned();
     let ws_tier = ws
         .and_then(|w| w.get("token_plan_tier").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
         .map(str::to_string);
 
     let member_req = async {
