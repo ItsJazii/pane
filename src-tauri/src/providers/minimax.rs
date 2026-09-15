@@ -563,6 +563,7 @@ fn remember_tier_if_unchanged(tier: &str, user_id: &str, generation: u64) {
 }
 
 fn remember_tier_if_unchanged_in(dir: &Path, tier: &str, user_id: &str, generation: u64) {
+    let _guard = tier_cache_guard();
     if tier_cache_generation() != generation {
         eprintln!("[pane] minimax: key changed during refresh — not remembering the plan tier");
         return;
@@ -617,6 +618,14 @@ fn plan_stash_path(dir: &Path) -> PathBuf {
 static TIER_CACHE_GENERATION: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+/// Serializes every plan-cache mutation with the check-then-write in the
+/// mcode path; never held across network calls.
+static TIER_CACHE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn tier_cache_guard() -> std::sync::MutexGuard<'static, ()> {
+    TIER_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn tier_cache_generation() -> u64 {
     TIER_CACHE_GENERATION.load(std::sync::atomic::Ordering::Acquire)
 }
@@ -629,6 +638,7 @@ fn bump_tier_cache_generation() {
 /// anything was stashed; a failure leaves the cache (and the old key) in
 /// place so the retry still sees a rotation.
 pub(crate) fn stash_remembered_tier_in(dir: &Path) -> Result<bool, String> {
+    let _guard = tier_cache_guard();
     bump_tier_cache_generation();
     // Clear litter from a crash between stash and discard/restore.
     let _ = std::fs::remove_file(plan_stash_path(dir));
@@ -641,6 +651,7 @@ pub(crate) fn stash_remembered_tier_in(dir: &Path) -> Result<bool, String> {
 
 /// The key write failed: put the stashed tier back (best effort, logged).
 pub(crate) fn restore_stashed_tier_in(dir: &Path) {
+    let _guard = tier_cache_guard();
     bump_tier_cache_generation();
     if let Err(e) = std::fs::rename(plan_stash_path(dir), plan_cache_path(dir)) {
         if e.kind() != std::io::ErrorKind::NotFound {
@@ -651,6 +662,7 @@ pub(crate) fn restore_stashed_tier_in(dir: &Path) {
 
 /// The key write succeeded: the old account's tier is gone for good.
 pub(crate) fn discard_stashed_tier_in(dir: &Path) {
+    let _guard = tier_cache_guard();
     bump_tier_cache_generation();
     match std::fs::remove_file(plan_stash_path(dir)) {
         Ok(()) => {}
@@ -665,6 +677,7 @@ pub(crate) fn discard_stashed_tier_in(dir: &Path) {
 /// cleared so a pasted key never inherits another account's tier. A
 /// leftover stash from a crashed change goes too.
 pub(crate) fn forget_remembered_tier_in(dir: &Path) -> Result<(), String> {
+    let _guard = tier_cache_guard();
     bump_tier_cache_generation();
     let stash_err = match std::fs::remove_file(plan_stash_path(dir)) {
         Ok(()) => None,
@@ -1394,6 +1407,29 @@ mod tests {
             }
         }
         assert!(wrote);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tier_cache_mutations_serialize_with_remember() {
+        let dir =
+            std::env::temp_dir().join(format!("pane-mmx-plan-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Key-change cleanups racing the mcode write path must not panic
+        // or poison the lock — the guard makes each step atomic.
+        let forget_dir = dir.clone();
+        let forgetter = std::thread::spawn(move || {
+            for _ in 0..200 {
+                super::forget_remembered_tier_in(&forget_dir).unwrap();
+            }
+        });
+        for _ in 0..200 {
+            let g = super::tier_cache_generation();
+            super::remember_tier_if_unchanged_in(&dir, "Ultra Plan", "1", g);
+        }
+        forgetter.join().unwrap();
 
         let _ = std::fs::remove_dir_all(&dir);
     }
