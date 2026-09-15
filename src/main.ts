@@ -718,6 +718,29 @@ function ensureLayout(): void {
     }
   }
 
+  // MiniMax's rolling window is mcode's "5 Hours" row now. Same shape as
+  // CURSOR_RENAMES: rename in place, splice out a surviving duplicate.
+  const MINIMAX_RENAMES: Record<string, string> = { Session: "5 Hours" };
+  for (const [pid, L] of Object.entries(layout.providers)) {
+    if (providerFamily(pid) !== "minimax") continue;
+    for (const list of [L.metricOrder, L.hidden, L.starred, L.onDemand]) {
+      for (const [oldLabel, newLabel] of Object.entries(MINIMAX_RENAMES)) {
+        const at = list.indexOf(oldLabel);
+        if (at < 0) continue;
+        if (list.includes(newLabel)) list.splice(at, 1);
+        else list[at] = newLabel;
+        changed = true;
+      }
+    }
+  }
+  if (config.pinned && providerFamily(config.pinned.provider) === "minimax") {
+    const to = MINIMAX_RENAMES[config.pinned.label];
+    if (to) {
+      config.pinned = { ...config.pinned, label: to };
+      void patchConfig({ pinned: config.pinned }).catch(() => {});
+    }
+  }
+
   // The per-credit "Reset credit"/"Reset credit N" rows collapsed into a
   // single "Rate Limit Resets" row. Same shape as CURSOR_RENAMES: the
   // first match is renamed in place (stars/order carry over), later
@@ -1311,7 +1334,7 @@ function renderCard(s: Snapshot): string {
       if (onDemandHtml.trim()) {
         const anim = L.expanded && animateExpandId === s.id ? " anim" : "";
         caret = `
-        <button class="card-caret" data-caret="${escapeHtml(s.id)}" title="${L.expanded ? t("card.showLess") : t("card.showMore")}">${L.expanded ? "⌃" : "⌄"}</button>
+        <button class="card-caret${L.expanded ? " expanded" : ""}" data-caret="${escapeHtml(s.id)}" title="${L.expanded ? t("card.showLess") : t("card.showMore")}"><svg class="caret-svg" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         ${L.expanded ? `<div class="on-demand${anim}">${onDemandHtml}</div>` : ""}`;
       }
     }

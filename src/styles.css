@@ -1158,15 +1158,28 @@ select:focus-visible {
 /* ---------------------------------------------------------------- customize */
 
 .card-caret {
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 100%;
+  height: 16px;
   background: none;
   border: none;
   color: var(--muted-foreground);
-  font-size: 12px;
   cursor: pointer;
-  padding: 2px 0 0;
+  padding: 0;
+  margin-top: 2px;
+  line-height: 1;
   border-radius: 6px;
+}
+
+.card-caret .caret-svg {
+  display: block;
+  transition: transform 0.15s ease;
+}
+
+.card-caret.expanded .caret-svg {
+  transform: rotate(180deg);
 }
 
 .card-caret:hover {

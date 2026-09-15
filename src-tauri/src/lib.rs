@@ -2428,11 +2428,20 @@ fn invalidate_api_key_context(dir: &Path, provider: &str) -> Result<(), String> 
     let base_err = providers::forget_credit_baselines_in(dir, &baseline_ids)
         .err()
         .map(context_cleanup_error);
-    match (snap_err, base_err) {
-        (None, None) => Ok(()),
-        (Some(error), None) | (None, Some(error)) => Err(error),
-        (Some(left), Some(right)) => Err(format!("{left}; {right}")),
-    }
+    // A MiniMax key change also forgets the remembered mcode plan tier —
+    // a pasted key must never inherit another account's tier.
+    let tier_err = if provider == "minimax" {
+        providers::minimax::forget_remembered_tier_in(dir)
+            .err()
+            .map(context_cleanup_error)
+    } else {
+        None
+    };
+    [snap_err, base_err, tier_err]
+        .into_iter()
+        .flatten()
+        .reduce(|left, right| format!("{left}; {right}"))
+        .map_or(Ok(()), Err)
 }
 
 fn set_api_key_in(dir: &Path, provider: &str, key: &str) -> Result<(), String> {
@@ -2449,14 +2458,33 @@ fn set_api_key_in(dir: &Path, provider: &str, key: &str) -> Result<(), String> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(format!("remove key file: {e}")),
         }
-        if previous_key.is_some() || api_key_context_is_dirty(dir, provider) {
+        if previous_key.is_some()
+            || api_key_context_is_dirty(dir, provider)
+            || (provider == "minimax" && providers::minimax::remembered_tier_exists_in(dir))
+        {
             invalidate_api_key_context(dir, provider)?;
         }
         return Ok(());
     }
+    // A MiniMax key change stashes the remembered mcode tier BEFORE the
+    // new key lands: if the stash fails the old key stays in place and a
+    // retry still sees a differing key; if the key write then fails the
+    // stash goes back so the old key keeps its tier. (The invalidation
+    // below retries the same delete — NotFound is Ok — so a succeeded
+    // change is idempotent.)
+    let stashed = provider == "minimax"
+        && previous_key.as_deref() != Some(key)
+        && providers::minimax::stash_remembered_tier_in(dir).map_err(context_cleanup_error)?;
     let raw = serde_json::json!({ "apiKey": key }).to_string();
-    providers::onenewapi::store::atomic_write(&path, &raw)
-        .map_err(|e| format!("write key file: {e}"))?;
+    if let Err(e) = providers::onenewapi::store::atomic_write(&path, &raw) {
+        if stashed {
+            providers::minimax::restore_stashed_tier_in(dir);
+        }
+        return Err(format!("write key file: {e}"));
+    }
+    if stashed {
+        providers::minimax::discard_stashed_tier_in(dir);
+    }
     // Same-key retries still invalidate when a previous cleanup left
     // snapshots, cooldowns, or credit baselines behind.
     if previous_key.as_deref() != Some(key) || api_key_context_is_dirty(dir, provider) {
@@ -3992,6 +4020,144 @@ mod tests {
         set_api_key_in(&tmp.dir, rotated, "key-b").unwrap();
         let after = key_card_snapshot_generations([rotated.to_string()]);
         assert_eq!(before.get(rotated), after.get(rotated));
+    }
+
+    #[test]
+    fn changing_minimax_key_forgets_remembered_tier() {
+        let tmp = TempConfig::new();
+        let _minimax = SnapCacheGuard::new("minimax");
+        std::fs::write(
+            tmp.dir.join("minimax-plan.json"),
+            serde_json::json!({
+                "tier": "Ultra Plan",
+                "seen_ms": chrono::Utc::now().timestamp_millis(),
+                "user_id": "1",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        set_api_key_in(&tmp.dir, "minimax", "sk-new-key-xxxxxxxx").unwrap();
+
+        assert!(
+            !tmp.dir.join("minimax-plan.json").exists(),
+            "a pasted key must not inherit another account's remembered tier"
+        );
+    }
+
+    #[test]
+    fn resaving_same_minimax_key_keeps_remembered_tier() {
+        let tmp = TempConfig::new();
+        let _minimax = SnapCacheGuard::new("minimax");
+        set_api_key_in(&tmp.dir, "minimax", "sk-same-key-xxxxxxxx").unwrap();
+        std::fs::write(
+            tmp.dir.join("minimax-plan.json"),
+            serde_json::json!({
+                "tier": "Ultra Plan",
+                "seen_ms": chrono::Utc::now().timestamp_millis(),
+                "user_id": "1",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        set_api_key_in(&tmp.dir, "minimax", "sk-same-key-xxxxxxxx").unwrap();
+
+        assert!(
+            tmp.dir.join("minimax-plan.json").exists(),
+            "re-saving an unchanged key must not drop the remembered tier"
+        );
+    }
+
+    #[test]
+    fn clearing_minimax_key_forgets_remembered_tier() {
+        let tmp = TempConfig::new();
+        let _minimax = SnapCacheGuard::new("minimax");
+        // No key file at all — the plan cache alone still triggers the
+        // cleanup when the user hits Save with an empty field.
+        std::fs::write(
+            tmp.dir.join("minimax-plan.json"),
+            serde_json::json!({
+                "tier": "Ultra Plan",
+                "seen_ms": chrono::Utc::now().timestamp_millis(),
+                "user_id": "1",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        set_api_key_in(&tmp.dir, "minimax", "").unwrap();
+
+        assert!(
+            !tmp.dir.join("minimax-plan.json").exists(),
+            "clearing the key must drop the remembered tier"
+        );
+    }
+
+    #[test]
+    fn minimax_key_change_is_refused_while_stale_tier_cannot_be_removed() {
+        let tmp = TempConfig::new();
+        let _minimax = SnapCacheGuard::new("minimax");
+        set_api_key_in(&tmp.dir, "minimax", "sk-a-xxxxxxxxxx").unwrap();
+
+        // A directory where the STASH file belongs: remove_file can't
+        // clear it, then the rename onto it fails — so the new key must
+        // not be saved while the old tier survives.
+        std::fs::write(
+            tmp.dir.join("minimax-plan.json"),
+            serde_json::json!({
+                "tier": "Ultra Plan",
+                "seen_ms": chrono::Utc::now().timestamp_millis(),
+                "user_id": "1",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::create_dir(tmp.dir.join("minimax-plan.json.old")).unwrap();
+        set_api_key_in(&tmp.dir, "minimax", "sk-b-xxxxxxxxxx")
+            .expect_err("a failed tier stash must refuse the key change");
+        assert_eq!(
+            stored_pane_api_key(&tmp.dir.join("minimax.json")).as_deref(),
+            Some("sk-a-xxxxxxxxxx"),
+            "the old key stays so the retry still sees a rotation"
+        );
+        assert!(tmp.dir.join("minimax-plan.json").exists());
+
+        std::fs::remove_dir(tmp.dir.join("minimax-plan.json.old")).unwrap();
+        set_api_key_in(&tmp.dir, "minimax", "sk-b-xxxxxxxxxx").unwrap();
+        assert_eq!(
+            stored_pane_api_key(&tmp.dir.join("minimax.json")).as_deref(),
+            Some("sk-b-xxxxxxxxxx")
+        );
+        assert!(!tmp.dir.join("minimax-plan.json").exists());
+        assert!(!tmp.dir.join("minimax-plan.json.old").exists());
+    }
+
+    #[test]
+    fn failed_minimax_key_write_restores_remembered_tier() {
+        let tmp = TempConfig::new();
+        let _minimax = SnapCacheGuard::new("minimax");
+        set_api_key_in(&tmp.dir, "minimax", "sk-a-xxxxxxxxxx").unwrap();
+        let plan_json = serde_json::json!({
+            "tier": "Ultra Plan",
+            "seen_ms": chrono::Utc::now().timestamp_millis(),
+            "user_id": "1",
+        })
+        .to_string();
+        std::fs::write(tmp.dir.join("minimax-plan.json"), &plan_json).unwrap();
+
+        // A directory where the key file belongs makes atomic_write fail —
+        // the stash must go back so the surviving old key keeps its tier.
+        std::fs::remove_file(tmp.dir.join("minimax.json")).unwrap();
+        std::fs::create_dir(tmp.dir.join("minimax.json")).unwrap();
+        set_api_key_in(&tmp.dir, "minimax", "sk-b-xxxxxxxxxx")
+            .expect_err("the key write must fail against a directory");
+        assert_eq!(
+            std::fs::read_to_string(tmp.dir.join("minimax-plan.json")).unwrap(),
+            plan_json,
+            "a failed key write restores the stashed tier"
+        );
+        assert!(!tmp.dir.join("minimax-plan.json.old").exists());
     }
 
     /// rotating_moonshot… and rotating_kimi… exercise the same two global
