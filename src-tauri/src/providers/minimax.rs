@@ -558,20 +558,30 @@ fn remember_tier(tier: &str, user_id: &str) {
     remember_tier_in(&super::config_dir(), tier, user_id);
 }
 
-/// Writes only when the stored tier or account differs — a steady-state
-/// refresh costs one small read, no write.
 fn remember_tier_in(dir: &Path, tier: &str, user_id: &str) {
-    let unchanged = read_tier_cache(dir).as_ref().is_some_and(|d| {
+    remember_tier_at(dir, tier, user_id, chrono::Utc::now().timestamp_millis());
+}
+
+/// Writes when the stored tier or account differs, or when the stored
+/// entry is past half its TTL — a still-active mcode login keeps
+/// refreshing `seen_ms`, so the 30-day expiry only bites after a month
+/// without a successful login. A steady-state refresh costs one small
+/// read, no write.
+fn remember_tier_at(dir: &Path, tier: &str, user_id: &str, now_ms: i64) {
+    let fresh = read_tier_cache(dir).as_ref().is_some_and(|d| {
         d.get("tier").and_then(Value::as_str) == Some(tier)
             && d.get("user_id").and_then(Value::as_str) == Some(user_id)
+            && d.get("seen_ms")
+                .and_then(Value::as_i64)
+                .is_some_and(|seen| now_ms - seen <= REMEMBERED_TIER_TTL_MS / 2)
     });
-    if unchanged {
+    if fresh {
         return;
     }
     let path = plan_cache_path(dir);
     let json = serde_json::json!({
         "tier": tier,
-        "seen_ms": chrono::Utc::now().timestamp_millis(),
+        "seen_ms": now_ms,
         "user_id": user_id,
     })
     .to_string();
@@ -830,11 +840,11 @@ fn read_v2_usage_events(db: &Path) -> Result<Vec<UsageEvent>, String> {
                     u.cache_read_tokens, u.cache_write_tokens, COALESCE(u.cost_usd, 0)
              FROM local_runtime_token_usage u
              LEFT JOIN (
-                 SELECT turn_id, MAX(json_extract(data_json,'$.context_usage_telemetry.model')) AS model
+                 SELECT session_id, turn_id, MAX(json_extract(data_json,'$.context_usage_telemetry.model')) AS model
                  FROM local_runtime_message_rows
-                 WHERE role='assistant' AND turn_id IS NOT NULL
-                 GROUP BY turn_id
-             ) m ON m.turn_id = u.turn_id
+                 WHERE role='assistant' AND turn_id IS NOT NULL AND json_valid(data_json)
+                 GROUP BY session_id, turn_id
+             ) m ON m.session_id = u.session_id AND m.turn_id = u.turn_id
              ORDER BY u.ts DESC
              LIMIT {}",
             super::MAX_LEDGER_ROWS
@@ -1128,6 +1138,50 @@ mod tests {
     }
 
     #[test]
+    fn remembered_tier_refreshes_seen_ms_before_ttl() {
+        let dir =
+            std::env::temp_dir().join(format!("pane-mmx-plan-refresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let now = chrono::Utc::now().timestamp_millis();
+        // 16 days old — past the half-TTL refresh point but still valid.
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            super::plan_cache_path(&dir),
+            serde_json::json!({
+                "tier": "Ultra Plan",
+                "seen_ms": now - 16 * 24 * 3600 * 1000,
+                "user_id": "1",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        super::remember_tier_at(&dir, "Ultra Plan", "1", now);
+        let doc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(super::plan_cache_path(&dir)).unwrap(),
+        )
+        .unwrap();
+        assert!(doc.get("seen_ms").and_then(serde_json::Value::as_i64).unwrap() >= now);
+
+        // Freshly written → same tier/user now takes the no-write path.
+        let mtime = std::fs::metadata(super::plan_cache_path(&dir))
+            .unwrap()
+            .modified()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        super::remember_tier_at(&dir, "Ultra Plan", "1", now + 60_000);
+        assert_eq!(
+            std::fs::metadata(super::plan_cache_path(&dir))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            mtime
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn forget_remembered_tier_removes_cache_and_is_idempotent() {
         let dir =
             std::env::temp_dir().join(format!("pane-mmx-plan-rm-{}", std::process::id()));
@@ -1253,6 +1307,13 @@ mod tests {
         )
         .unwrap();
         conn.execute(
+            "INSERT INTO local_runtime_token_usage
+                (session_id,turn_id,model,ts,input_tokens,output_tokens,reasoning_tokens,cache_read_tokens,cache_write_tokens,cost_usd)
+             VALUES('s1','t3',NULL,3000,7,8,0,0,0,0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
             "INSERT INTO local_runtime_message_rows
                 (session_id,msg_id,role,turn_id,created_at_ms,data_json)
              VALUES('s1','m1','assistant','t1',1001,
@@ -1260,15 +1321,26 @@ mod tests {
             [],
         )
         .unwrap();
+        // A half-written telemetry row must not break the join or leak a
+        // model into another turn — json_valid() filters it out.
+        conn.execute(
+            "INSERT INTO local_runtime_message_rows
+                (session_id,msg_id,role,turn_id,created_at_ms,data_json)
+             VALUES('s1','m3','assistant','t3',3001,'{\"context_usage')",
+            [],
+        )
+        .unwrap();
         drop(conn);
 
         let events = super::read_v2_usage_events(&db).expect("v2 read");
-        assert_eq!(events.len(), 2);
-        // Newest first: t2 has no assistant telemetry → model "".
-        assert_eq!(events[0].ts_ms, 2000);
+        assert_eq!(events.len(), 3);
+        // Newest first: t3's telemetry is corrupt, t2 has none → both "".
+        assert_eq!(events[0].ts_ms, 3000);
         assert_eq!(events[0].model, "");
-        assert_eq!(events[1].ts_ms, 1000);
-        assert_eq!(events[1].model, "MiniMax-M3");
+        assert_eq!(events[1].ts_ms, 2000);
+        assert_eq!(events[1].model, "");
+        assert_eq!(events[2].ts_ms, 1000);
+        assert_eq!(events[2].model, "MiniMax-M3");
 
         drop(events);
         crate::providers::remove_sqlite_files(&db);

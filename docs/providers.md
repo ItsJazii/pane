@@ -192,10 +192,11 @@ Ground rules that apply to every provider:
   (e.g. "Ultra Plan") on the mcode login. The last tier the login
   reported is remembered in `minimax-plan.json` so the chip survives the
   OAuth token lapsing while mcode isn't running — scoped to the mcode
-  account id, expired after 30 days, and dropped whenever the MiniMax
-  key is changed or cleared so a pasted key never inherits another
-  account's tier; a key with no remembered tier still shows
-  "Coding Plan". Today / Yesterday / 30-day spend with per-model
+  account id, refreshed while mcode keeps confirming it (the 30-day TTL
+  only bites after a month without an mcode login), and dropped when the
+  MiniMax key is changed or cleared — though not on re-saving an
+  unchanged key — so a pasted key never inherits another account's tier;
+  a key with no remembered tier still shows "Coding Plan". Today / Yesterday / 30-day spend with per-model
   breakdown (the CLI's own cost_usd is preferred; catalog
   pricing otherwise).
 

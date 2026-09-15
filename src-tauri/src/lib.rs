@@ -2406,9 +2406,6 @@ fn api_key_context_is_dirty(dir: &Path, provider: &str) -> bool {
             return true;
         }
     }
-    if provider == "minimax" && providers::minimax::remembered_tier_exists_in(dir) {
-        return true;
-    }
     providers::credit_baselines_contain(dir, &baseline_ids)
 }
 
@@ -2461,7 +2458,10 @@ fn set_api_key_in(dir: &Path, provider: &str, key: &str) -> Result<(), String> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(format!("remove key file: {e}")),
         }
-        if previous_key.is_some() || api_key_context_is_dirty(dir, provider) {
+        if previous_key.is_some()
+            || api_key_context_is_dirty(dir, provider)
+            || (provider == "minimax" && providers::minimax::remembered_tier_exists_in(dir))
+        {
             invalidate_api_key_context(dir, provider)?;
         }
         return Ok(());
@@ -4026,6 +4026,55 @@ mod tests {
         assert!(
             !tmp.dir.join("minimax-plan.json").exists(),
             "a pasted key must not inherit another account's remembered tier"
+        );
+    }
+
+    #[test]
+    fn resaving_same_minimax_key_keeps_remembered_tier() {
+        let tmp = TempConfig::new();
+        let _minimax = SnapCacheGuard::new("minimax");
+        set_api_key_in(&tmp.dir, "minimax", "sk-same-key-xxxxxxxx").unwrap();
+        std::fs::write(
+            tmp.dir.join("minimax-plan.json"),
+            serde_json::json!({
+                "tier": "Ultra Plan",
+                "seen_ms": chrono::Utc::now().timestamp_millis(),
+                "user_id": "1",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        set_api_key_in(&tmp.dir, "minimax", "sk-same-key-xxxxxxxx").unwrap();
+
+        assert!(
+            tmp.dir.join("minimax-plan.json").exists(),
+            "re-saving an unchanged key must not drop the remembered tier"
+        );
+    }
+
+    #[test]
+    fn clearing_minimax_key_forgets_remembered_tier() {
+        let tmp = TempConfig::new();
+        let _minimax = SnapCacheGuard::new("minimax");
+        // No key file at all — the plan cache alone still triggers the
+        // cleanup when the user hits Save with an empty field.
+        std::fs::write(
+            tmp.dir.join("minimax-plan.json"),
+            serde_json::json!({
+                "tier": "Ultra Plan",
+                "seen_ms": chrono::Utc::now().timestamp_millis(),
+                "user_id": "1",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        set_api_key_in(&tmp.dir, "minimax", "").unwrap();
+
+        assert!(
+            !tmp.dir.join("minimax-plan.json").exists(),
+            "clearing the key must drop the remembered tier"
         );
     }
 
