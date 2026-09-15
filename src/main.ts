@@ -733,6 +733,13 @@ function ensureLayout(): void {
       }
     }
   }
+  if (config.pinned && providerFamily(config.pinned.provider) === "minimax") {
+    const to = MINIMAX_RENAMES[config.pinned.label];
+    if (to) {
+      config.pinned = { ...config.pinned, label: to };
+      void patchConfig({ pinned: config.pinned }).catch(() => {});
+    }
+  }
 
   // The per-credit "Reset credit"/"Reset credit N" rows collapsed into a
   // single "Rate Limit Resets" row. Same shape as CURSOR_RENAMES: the

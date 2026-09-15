@@ -162,8 +162,9 @@ Ground rules that apply to every provider:
 - **Reads:** the MiniMax Code (mcode) CLI's OAuth sign-in at
   `%USERPROFILE%\.minimax\auth\prod\<en|cn>\mcode-public\auth.json` —
   read-only, never refreshed or written (mcode owns that file under its
-  own lock/generation scheme); the token is used only while its
-  `expiresAtMs` is still in the future. The account id comes from
+  own lock/generation scheme); only `com.minimax.mcode.oauth.prod.*`
+  records are read, and the token is used only while its `expiresAtMs`
+  is still in the future. The account id comes from
   `%USERPROFILE%\.minimax\cli-auth\prod\<en|cn>\account-identity.json`
   (`realUserID`). Without a usable mcode login: pasted key (Settings),
   `MINIMAX_API_KEY`, or
@@ -179,7 +180,8 @@ Ground rules that apply to every provider:
   `~\.claude\projects\` and are re-routed here from the Claude card).
 - **Calls:** via the mcode login — `agent.minimax.io` matrix POST
   `user/get_user_extra_info` with mcode's request signing
-  (`yy`/`x-timestamp`/`x-signature`), then
+  (`yy`/`x-timestamp`/`x-signature`; required — without a default
+  workspace's `op_group_id` the OAuth path fails over to the key), then
   `platform.minimax.io/v1/api/openplatform/coding_plan/remains` with the
   workspace's `X-Group-Id`; the matrix `commerce/get_membership_info`
   POST runs only when the workspace lookup didn't yield a plan tier
@@ -189,9 +191,12 @@ Ground rules that apply to every provider:
   the same three bars mcode's Usage screen draws; the plan tier verbatim
   (e.g. "Ultra Plan") on the mcode login. The last tier the login
   reported is remembered in `minimax-plan.json` so the chip survives the
-  OAuth token lapsing while mcode isn't running; a key with no remembered
-  tier still shows "Coding Plan". Today / Yesterday / 30-day spend with
-  per-model breakdown (the CLI's own cost_usd is preferred; catalog
+  OAuth token lapsing while mcode isn't running — scoped to the mcode
+  account id, expired after 30 days, and dropped whenever the MiniMax
+  key is changed or cleared so a pasted key never inherits another
+  account's tier; a key with no remembered tier still shows
+  "Coding Plan". Today / Yesterday / 30-day spend with per-model
+  breakdown (the CLI's own cost_usd is preferred; catalog
   pricing otherwise).
 
 ## OpenRouter

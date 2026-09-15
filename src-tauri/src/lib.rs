@@ -2406,6 +2406,9 @@ fn api_key_context_is_dirty(dir: &Path, provider: &str) -> bool {
             return true;
         }
     }
+    if provider == "minimax" && providers::minimax::remembered_tier_exists_in(dir) {
+        return true;
+    }
     providers::credit_baselines_contain(dir, &baseline_ids)
 }
 
@@ -2428,11 +2431,20 @@ fn invalidate_api_key_context(dir: &Path, provider: &str) -> Result<(), String> 
     let base_err = providers::forget_credit_baselines_in(dir, &baseline_ids)
         .err()
         .map(context_cleanup_error);
-    match (snap_err, base_err) {
-        (None, None) => Ok(()),
-        (Some(error), None) | (None, Some(error)) => Err(error),
-        (Some(left), Some(right)) => Err(format!("{left}; {right}")),
-    }
+    // A MiniMax key change also forgets the remembered mcode plan tier —
+    // a pasted key must never inherit another account's tier.
+    let tier_err = if provider == "minimax" {
+        providers::minimax::forget_remembered_tier_in(dir)
+            .err()
+            .map(context_cleanup_error)
+    } else {
+        None
+    };
+    [snap_err, base_err, tier_err]
+        .into_iter()
+        .flatten()
+        .reduce(|left, right| format!("{left}; {right}"))
+        .map_or(Ok(()), Err)
 }
 
 fn set_api_key_in(dir: &Path, provider: &str, key: &str) -> Result<(), String> {
@@ -3992,6 +4004,29 @@ mod tests {
         set_api_key_in(&tmp.dir, rotated, "key-b").unwrap();
         let after = key_card_snapshot_generations([rotated.to_string()]);
         assert_eq!(before.get(rotated), after.get(rotated));
+    }
+
+    #[test]
+    fn changing_minimax_key_forgets_remembered_tier() {
+        let tmp = TempConfig::new();
+        let _minimax = SnapCacheGuard::new("minimax");
+        std::fs::write(
+            tmp.dir.join("minimax-plan.json"),
+            serde_json::json!({
+                "tier": "Ultra Plan",
+                "seen_ms": chrono::Utc::now().timestamp_millis(),
+                "user_id": "1",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        set_api_key_in(&tmp.dir, "minimax", "sk-new-key-xxxxxxxx").unwrap();
+
+        assert!(
+            !tmp.dir.join("minimax-plan.json").exists(),
+            "a pasted key must not inherit another account's remembered tier"
+        );
     }
 
     /// rotating_moonshot… and rotating_kimi… exercise the same two global

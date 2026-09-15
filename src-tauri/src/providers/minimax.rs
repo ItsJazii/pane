@@ -371,15 +371,15 @@ fn mcode_login() -> Option<McodeLogin> {
     None
 }
 
-/// The access token from mcode's auth.json: the first record under the
-/// prod prefix (first record as fallback), usable only while it has more
-/// than a minute of life left.
+/// The access token from mcode's auth.json: the first record whose key
+/// starts with the prod OAuth prefix — unrelated records in the same
+/// file are never touched — usable only while it has more than a minute
+/// of life left.
 fn mcode_access_token(doc: &Value, now_ms: i64) -> Option<String> {
     let records = doc.get("records").and_then(Value::as_object)?;
     let rec = records
         .iter()
-        .find(|(k, _)| k.starts_with(MCODE_RECORD_PREFIX))
-        .or_else(|| records.iter().next())?
+        .find(|(k, _)| k.starts_with(MCODE_RECORD_PREFIX))?
         .1;
     let expiry = rec.get("expiresAtMs").and_then(Value::as_i64)?;
     if expiry <= now_ms + 60_000 {
@@ -492,22 +492,19 @@ async fn matrix_post(login: &McodeLogin, path: &str, body: &str) -> Result<Value
 }
 
 /// The token-plan remains endpoint on the platform host — same shape the
-/// key path parses. No mcode signing on this one; X-Group-Id only when
-/// the workspace lookup supplied one.
-async fn platform_remains(login: &McodeLogin, group_id: Option<&str>) -> Result<Value, String> {
+/// key path parses. No mcode signing on this one; X-Group-Id always
+/// carries the workspace's op_group_id.
+async fn platform_remains(login: &McodeLogin, group_id: &str) -> Result<Value, String> {
     let url = format!(
         "{}/v1/api/openplatform/coding_plan/remains",
         login.region.platform_host()
     );
-    let mut req = super::http()
+    let resp = super::http()
         .get(url)
         .header("Accept", "application/json")
+        .header("X-Group-Id", group_id)
         .bearer_auth(&login.access)
-        .timeout(Duration::from_secs(4));
-    if let Some(g) = group_id {
-        req = req.header("X-Group-Id", g);
-    }
-    let resp = req
+        .timeout(Duration::from_secs(4))
         .send()
         .await
         .map_err(|e| format!("remains: {e}"))?;
@@ -523,75 +520,103 @@ async fn platform_remains(login: &McodeLogin, group_id: Option<&str>) -> Result<
 /// <config_dir>/minimax-plan.json. mcode's access token lapses after
 /// about an hour whenever the CLI isn't running to refresh it; the key
 /// path then takes over and would otherwise flip the chip back to the
-/// generic "Coding Plan".
+/// generic "Coding Plan". The cache is scoped to the mcode account id
+/// and dropped whenever the MiniMax key is changed or cleared, so a
+/// pasted key never inherits another account's tier.
 fn plan_cache_path(dir: &Path) -> PathBuf {
     dir.join("minimax-plan.json")
 }
+
+const REMEMBERED_TIER_TTL_MS: i64 = 30 * 24 * 3600 * 1000;
 
 fn remembered_tier() -> Option<String> {
     remembered_tier_in(&super::config_dir())
 }
 
 fn remembered_tier_in(dir: &Path) -> Option<String> {
-    let raw = super::read_small_text(&plan_cache_path(dir), 4096, "minimax plan cache").ok()?;
-    let doc: Value = serde_json::from_str(&raw).ok()?;
+    remembered_tier_at(dir, chrono::Utc::now().timestamp_millis())
+}
+
+/// The stored tier when it was seen within the TTL — entries older than
+/// 30 days or missing `seen_ms` count as expired.
+fn remembered_tier_at(dir: &Path, now_ms: i64) -> Option<String> {
+    let doc = read_tier_cache(dir)?;
+    let seen = doc.get("seen_ms").and_then(Value::as_i64)?;
+    if now_ms - seen > REMEMBERED_TIER_TTL_MS {
+        return None;
+    }
     let tier = doc.get("tier").and_then(Value::as_str)?.trim();
     (!tier.is_empty()).then(|| tier.to_string())
 }
 
-fn remember_tier(tier: &str) {
-    remember_tier_in(&super::config_dir(), tier);
+fn read_tier_cache(dir: &Path) -> Option<Value> {
+    let raw = super::read_small_text(&plan_cache_path(dir), 4096, "minimax plan cache").ok()?;
+    serde_json::from_str(&raw).ok()
 }
 
-/// Atomic temp-write + rename, same pattern as the Devin spend cache.
-/// Writes only when the tier on disk differs — a steady-state refresh
-/// costs one small read, no write.
-fn remember_tier_in(dir: &Path, tier: &str) {
-    if remembered_tier_in(dir).as_deref() == Some(tier) {
-        return;
-    }
-    if let Err(e) = std::fs::create_dir_all(dir) {
-        eprintln!("[pane] minimax: could not create {}: {e}", dir.display());
+fn remember_tier(tier: &str, user_id: &str) {
+    remember_tier_in(&super::config_dir(), tier, user_id);
+}
+
+/// Writes only when the stored tier or account differs — a steady-state
+/// refresh costs one small read, no write.
+fn remember_tier_in(dir: &Path, tier: &str, user_id: &str) {
+    let unchanged = read_tier_cache(dir).as_ref().is_some_and(|d| {
+        d.get("tier").and_then(Value::as_str) == Some(tier)
+            && d.get("user_id").and_then(Value::as_str) == Some(user_id)
+    });
+    if unchanged {
         return;
     }
     let path = plan_cache_path(dir);
     let json = serde_json::json!({
         "tier": tier,
         "seen_ms": chrono::Utc::now().timestamp_millis(),
+        "user_id": user_id,
     })
     .to_string();
-    let tmp = path.with_extension("json.tmp");
-    if let Err(e) = std::fs::write(&tmp, json) {
-        eprintln!("[pane] minimax: could not write {}: {e}", tmp.display());
-        return;
-    }
-    if let Err(e) = std::fs::rename(&tmp, &path) {
-        eprintln!("[pane] minimax: could not replace {}: {e}", path.display());
-        let _ = std::fs::remove_file(&tmp);
+    if let Err(e) = super::onenewapi::store::atomic_write(&path, &json) {
+        eprintln!("[pane] minimax: could not save {}: {e}", path.display());
     }
 }
 
-/// Plan/quota through the mcode login: workspace lookup, then the
-/// remains call (it needs the workspace's op_group_id). The membership
+/// Drops the remembered tier — called when the MiniMax key is changed or
+/// cleared so a pasted key never inherits another account's tier.
+pub(crate) fn forget_remembered_tier_in(dir: &Path) -> Result<(), String> {
+    match std::fs::remove_file(plan_cache_path(dir)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("remove minimax plan cache: {e}")),
+    }
+}
+
+pub(crate) fn remembered_tier_exists_in(dir: &Path) -> bool {
+    plan_cache_path(dir).exists()
+}
+
+/// Plan/quota through the mcode login: workspace lookup first — the
+/// remains call is meaningless without the workspace's op_group_id as
+/// X-Group-Id, so a failed lookup or a missing default workspace fails
+/// the whole path (the caller falls back to the key). The membership
 /// call only runs when the workspace lookup didn't yield a plan tier —
-/// it is the fallback tier source, nothing else. Only the remains call
-/// is fatal.
+/// it is the fallback tier source, nothing else.
 async fn fetch_via_mcode(login: &McodeLogin) -> Result<Snapshot, String> {
     let extra = matrix_post(login, "/matrix/api/v1/user/get_user_extra_info", "{}")
         .await
-        .ok();
+        .map_err(|e| format!("workspace lookup: {e}"))?;
     let ws = extra
-        .as_ref()
-        .and_then(|d| d.get("workspaces").and_then(Value::as_array))
+        .get("workspaces")
+        .and_then(Value::as_array)
         .and_then(|ws| {
             ws.iter()
                 .find(|w| w.get("workspace_type").and_then(Value::as_i64) == Some(0))
         });
-
-    let workspace_id = ws.and_then(|w| w.get("workspace_id")).cloned();
     let ws_group = ws
         .and_then(|w| w.get("op_group_id").and_then(Value::as_str))
-        .map(str::to_string);
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "workspace lookup: no default workspace".to_string())?;
+    let workspace_id = ws.and_then(|w| w.get("workspace_id")).cloned();
     let ws_tier = ws
         .and_then(|w| w.get("token_plan_tier").and_then(Value::as_str))
         .map(str::to_string);
@@ -607,7 +632,7 @@ async fn fetch_via_mcode(login: &McodeLogin) -> Result<Snapshot, String> {
             .await
             .ok()
     };
-    let remains_req = platform_remains(login, ws_group.as_deref());
+    let remains_req = platform_remains(login, &ws_group);
     let (member, remains) = tokio::join!(member_req, remains_req);
 
     // The remains call is the quota source — without it there is no card.
@@ -631,7 +656,7 @@ async fn fetch_via_mcode(login: &McodeLogin) -> Result<Snapshot, String> {
         })
         .filter(|s| !s.trim().is_empty());
     if let Some(t) = &tier {
-        remember_tier(t);
+        remember_tier(t, &login.user_id);
     }
 
     Ok(Snapshot::ok(ID, NAME, tier, metrics))
@@ -693,10 +718,12 @@ fn wal_sidecar(db: &Path) -> PathBuf {
 /// just concatenate. Each source is cached on its own (db, WAL) stamps;
 /// a busy/locked db serves its last good events, a missing file is
 /// skipped.
+/// One ledger source's last-good events, keyed by (db stamp, wal stamp).
+type SourceCache = std::sync::Mutex<Option<(FileStamp, FileStamp, Vec<UsageEvent>)>>;
+
 pub fn collect_usage_events() -> Vec<UsageEvent> {
-    use std::sync::Mutex;
-    static CACHES: [Mutex<Option<(FileStamp, FileStamp, Vec<UsageEvent>)>>; 2] =
-        [Mutex::new(None), Mutex::new(None)];
+    static CACHES: [SourceCache; 2] =
+        [std::sync::Mutex::new(None), std::sync::Mutex::new(None)];
 
     let mut out = Vec::new();
     for (db, slot, read) in [
@@ -714,7 +741,7 @@ pub fn collect_usage_events() -> Vec<UsageEvent> {
 
 fn collect_cached(
     db_path: &Path,
-    cache: &std::sync::Mutex<Option<(FileStamp, FileStamp, Vec<UsageEvent>)>>,
+    cache: &SourceCache,
     read: fn(&Path) -> Result<Vec<UsageEvent>, String>,
 ) -> Vec<UsageEvent> {
     let db_stamp = file_stamp(db_path);
@@ -834,7 +861,17 @@ fn read_events_stmt(
             })
         })
         .map_err(|e| format!("read {what}: {e}"))?;
-    let events: Vec<UsageEvent> = rows.flatten().collect();
+    let mut events = Vec::new();
+    let mut dropped = 0u64;
+    for row in rows {
+        match row {
+            Ok(ev) => events.push(ev),
+            Err(_) => dropped += 1,
+        }
+    }
+    if dropped > 0 {
+        eprintln!("[pane] minimax: {what}: {dropped} row(s) skipped (unreadable ts/model)");
+    }
     if events.len() as u64 >= super::MAX_LEDGER_ROWS {
         eprintln!(
             "[pane] minimax: {what} hit the {}-row read cap — keeping newest rows, oldest usage is dropped",
@@ -970,7 +1007,7 @@ mod tests {
         });
         assert_eq!(super::mcode_access_token(&dying, now), None);
 
-        // No prod-prefixed record: the first record is the fallback.
+        // No prod-prefixed record: unrelated records are never used.
         let other = json!({
             "records": {
                 "something.else": {
@@ -979,10 +1016,7 @@ mod tests {
                 }
             }
         });
-        assert_eq!(
-            super::mcode_access_token(&other, now).map(|t| t.len()),
-            Some(60)
-        );
+        assert_eq!(super::mcode_access_token(&other, now), None);
 
         // No records at all → nothing.
         assert_eq!(super::mcode_access_token(&json!({"records": {}}), now), None);
@@ -1009,16 +1043,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(super::remembered_tier_in(&dir), None);
 
-        super::remember_tier_in(&dir, "Ultra Plan");
+        super::remember_tier_in(&dir, "Ultra Plan", "1");
         assert_eq!(super::remembered_tier_in(&dir).as_deref(), Some("Ultra Plan"));
 
-        // Re-saving the same tier is a no-op (no rewrite per refresh).
+        // Re-saving the same tier for the same account is a no-op (no
+        // rewrite per refresh).
         let mtime = std::fs::metadata(super::plan_cache_path(&dir))
             .unwrap()
             .modified()
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
-        super::remember_tier_in(&dir, "Ultra Plan");
+        super::remember_tier_in(&dir, "Ultra Plan", "1");
         assert_eq!(
             std::fs::metadata(super::plan_cache_path(&dir))
                 .unwrap()
@@ -1028,8 +1063,81 @@ mod tests {
         );
 
         // A different tier replaces it; the key path would pick it up.
-        super::remember_tier_in(&dir, "Starter");
+        super::remember_tier_in(&dir, "Starter", "1");
         assert_eq!(super::remembered_tier_in(&dir).as_deref(), Some("Starter"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remembered_tier_expires_after_ttl() {
+        let dir =
+            std::env::temp_dir().join(format!("pane-mmx-plan-ttl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        super::remember_tier_in(&dir, "Ultra Plan", "42");
+        let now = chrono::Utc::now().timestamp_millis();
+        assert_eq!(
+            super::remembered_tier_at(&dir, now).as_deref(),
+            Some("Ultra Plan")
+        );
+        assert_eq!(
+            super::remembered_tier_at(&dir, now + super::REMEMBERED_TIER_TTL_MS + 1),
+            None
+        );
+
+        // A cache entry with no seen_ms is treated as expired.
+        std::fs::write(
+            super::plan_cache_path(&dir),
+            r#"{"tier":"Ultra Plan","user_id":"42"}"#,
+        )
+        .unwrap();
+        assert_eq!(super::remembered_tier_at(&dir, now), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remembered_tier_rewrites_when_user_changes() {
+        let dir =
+            std::env::temp_dir().join(format!("pane-mmx-plan-usr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        super::remember_tier_in(&dir, "Ultra Plan", "1");
+        let mtime = std::fs::metadata(super::plan_cache_path(&dir))
+            .unwrap()
+            .modified()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        // Same tier under a different mcode account must rewrite — the
+        // cache is scoped to the account, not just the label.
+        super::remember_tier_in(&dir, "Ultra Plan", "2");
+        assert_ne!(
+            std::fs::metadata(super::plan_cache_path(&dir))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            mtime
+        );
+        let doc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(super::plan_cache_path(&dir)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(doc.get("user_id").and_then(serde_json::Value::as_str), Some("2"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn forget_remembered_tier_removes_cache_and_is_idempotent() {
+        let dir =
+            std::env::temp_dir().join(format!("pane-mmx-plan-rm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        super::remember_tier_in(&dir, "Ultra Plan", "1");
+        assert!(super::remembered_tier_exists_in(&dir));
+        super::forget_remembered_tier_in(&dir).unwrap();
+        assert!(!super::remembered_tier_exists_in(&dir));
+        // Forgetting twice is fine — nothing to remove.
+        super::forget_remembered_tier_in(&dir).unwrap();
 
         let _ = std::fs::remove_dir_all(&dir);
     }
