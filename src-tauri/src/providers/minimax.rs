@@ -594,13 +594,61 @@ fn remember_tier_at(dir: &Path, tier: &str, user_id: &str, now_ms: i64) {
     }
 }
 
+fn plan_stash_path(dir: &Path) -> PathBuf {
+    dir.join("minimax-plan.json.old")
+}
+
+/// Moves the remembered tier aside ahead of a key change. Returns whether
+/// anything was stashed; a failure leaves the cache (and the old key) in
+/// place so the retry still sees a rotation.
+pub(crate) fn stash_remembered_tier_in(dir: &Path) -> Result<bool, String> {
+    // Clear litter from a crash between stash and discard/restore.
+    let _ = std::fs::remove_file(plan_stash_path(dir));
+    match std::fs::rename(plan_cache_path(dir), plan_stash_path(dir)) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("stash minimax plan cache: {e}")),
+    }
+}
+
+/// The key write failed: put the stashed tier back (best effort, logged).
+pub(crate) fn restore_stashed_tier_in(dir: &Path) {
+    if let Err(e) = std::fs::rename(plan_stash_path(dir), plan_cache_path(dir)) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("[pane] minimax: could not restore {}: {e}", plan_stash_path(dir).display());
+        }
+    }
+}
+
+/// The key write succeeded: the old account's tier is gone for good.
+pub(crate) fn discard_stashed_tier_in(dir: &Path) {
+    match std::fs::remove_file(plan_stash_path(dir)) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            eprintln!("[pane] minimax: could not remove {}: {e}", plan_stash_path(dir).display());
+        }
+    }
+}
+
 /// Drops the remembered tier — called when the MiniMax key is changed or
-/// cleared so a pasted key never inherits another account's tier.
+/// cleared so a pasted key never inherits another account's tier. A
+/// leftover stash from a crashed change goes too.
 pub(crate) fn forget_remembered_tier_in(dir: &Path) -> Result<(), String> {
-    match std::fs::remove_file(plan_cache_path(dir)) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("remove minimax plan cache: {e}")),
+    let stash_err = match std::fs::remove_file(plan_stash_path(dir)) {
+        Ok(()) => None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => Some(format!("remove minimax plan stash: {e}")),
+    };
+    let cache_err = match std::fs::remove_file(plan_cache_path(dir)) {
+        Ok(()) => None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => Some(format!("remove minimax plan cache: {e}")),
+    };
+    match (stash_err, cache_err) {
+        (None, None) => Ok(()),
+        (Some(e), None) | (None, Some(e)) => Err(e),
+        (Some(a), Some(b)) => Err(format!("{a}; {b}")),
     }
 }
 
@@ -1220,6 +1268,34 @@ mod tests {
         assert!(!super::remembered_tier_exists_in(&dir));
         // Forgetting twice is fine — nothing to remove.
         super::forget_remembered_tier_in(&dir).unwrap();
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stash_restore_discard_round_trip() {
+        let dir =
+            std::env::temp_dir().join(format!("pane-mmx-plan-stash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cache = super::plan_cache_path(&dir);
+        let stash = dir.join("minimax-plan.json.old");
+
+        super::remember_tier_in(&dir, "Ultra Plan", "1");
+        assert!(cache.exists());
+
+        assert_eq!(super::stash_remembered_tier_in(&dir), Ok(true));
+        assert!(!cache.exists() && stash.exists());
+
+        super::restore_stashed_tier_in(&dir);
+        assert!(cache.exists() && !stash.exists());
+        assert_eq!(super::remembered_tier_in(&dir).as_deref(), Some("Ultra Plan"));
+
+        assert_eq!(super::stash_remembered_tier_in(&dir), Ok(true));
+        super::discard_stashed_tier_in(&dir);
+        assert!(!cache.exists() && !stash.exists());
+
+        // Nothing to stash in an empty dir.
+        assert_eq!(super::stash_remembered_tier_in(&dir), Ok(false));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
