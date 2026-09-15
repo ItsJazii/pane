@@ -162,9 +162,10 @@ Ground rules that apply to every provider:
 - **Reads:** the MiniMax Code (mcode) CLI's OAuth sign-in at
   `%USERPROFILE%\.minimax\auth\prod\<en|cn>\mcode-public\auth.json` —
   read-only, never refreshed or written (mcode owns that file under its
-  own lock/generation scheme); only `com.minimax.mcode.oauth.prod.*`
-  records are read, and the token is used only while its `expiresAtMs`
-  is still in the future. The account id comes from
+  own lock/generation scheme); the `com.minimax.mcode.oauth.prod.*`
+  record with the latest expiry is used (expired and unrelated records
+  are skipped), and only while its `expiresAtMs` is still in the
+  future. The account id comes from
   `%USERPROFILE%\.minimax\cli-auth\prod\<en|cn>\account-identity.json`
   (`realUserID`). Without a usable mcode login: pasted key (Settings),
   `MINIMAX_API_KEY`, or

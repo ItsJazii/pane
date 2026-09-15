@@ -371,22 +371,22 @@ fn mcode_login() -> Option<McodeLogin> {
     None
 }
 
-/// The access token from mcode's auth.json: the first record whose key
-/// starts with the prod OAuth prefix — unrelated records in the same
-/// file are never touched — usable only while it has more than a minute
-/// of life left.
+/// The access token from mcode's auth.json: the live prod record with
+/// the latest expiry — expired records, unrelated records in the same
+/// file, and tokens within a minute of lapsing are all skipped.
 fn mcode_access_token(doc: &Value, now_ms: i64) -> Option<String> {
-    let records = doc.get("records").and_then(Value::as_object)?;
-    let rec = records
+    doc.get("records")
+        .and_then(Value::as_object)?
         .iter()
-        .find(|(k, _)| k.starts_with(MCODE_RECORD_PREFIX))?
-        .1;
-    let expiry = rec.get("expiresAtMs").and_then(Value::as_i64)?;
-    if expiry <= now_ms + 60_000 {
-        return None;
-    }
-    let token = rec.get("accessToken").and_then(Value::as_str)?.trim();
-    (!token.is_empty()).then(|| token.to_string())
+        .filter(|(k, _)| k.starts_with(MCODE_RECORD_PREFIX))
+        .filter_map(|(_, rec)| {
+            let expiry = rec.get("expiresAtMs").and_then(Value::as_i64)?;
+            let token = rec.get("accessToken").and_then(Value::as_str)?.trim();
+            (expiry > now_ms + 60_000 && !token.is_empty())
+                .then(|| (expiry, token.to_string()))
+        })
+        .max_by_key(|(expiry, _)| *expiry)
+        .map(|(_, token)| token)
 }
 
 /// JS encodeURIComponent: every byte except A-Z a-z 0-9 - _ . ! ~ * ' ( )
@@ -555,8 +555,19 @@ fn read_tier_cache(dir: &Path) -> Option<Value> {
     serde_json::from_str(&raw).ok()
 }
 
-fn remember_tier(tier: &str, user_id: &str) {
-    remember_tier_in(&super::config_dir(), tier, user_id);
+/// The mcode refresh's write path: skips the write when a key-driven
+/// cleanup bumped the generation while the request was in flight — that
+/// refresh answered for the previous account.
+fn remember_tier_if_unchanged(tier: &str, user_id: &str, generation: u64) {
+    remember_tier_if_unchanged_in(&super::config_dir(), tier, user_id, generation)
+}
+
+fn remember_tier_if_unchanged_in(dir: &Path, tier: &str, user_id: &str, generation: u64) {
+    if tier_cache_generation() != generation {
+        eprintln!("[pane] minimax: key changed during refresh — not remembering the plan tier");
+        return;
+    }
+    remember_tier_in(dir, tier, user_id);
 }
 
 fn remember_tier_in(dir: &Path, tier: &str, user_id: &str) {
@@ -598,10 +609,27 @@ fn plan_stash_path(dir: &Path) -> PathBuf {
     dir.join("minimax-plan.json.old")
 }
 
+/// Bumped by every local mutation of the plan cache driven by a key
+/// change (stash/restore/discard/forget). An mcode refresh captures it
+/// before its network calls and only writes the tier if it is unchanged,
+/// so a request that was in flight for the previous account can't
+/// recreate that account's tier after cleanup.
+static TIER_CACHE_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn tier_cache_generation() -> u64 {
+    TIER_CACHE_GENERATION.load(std::sync::atomic::Ordering::Acquire)
+}
+
+fn bump_tier_cache_generation() {
+    TIER_CACHE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+}
+
 /// Moves the remembered tier aside ahead of a key change. Returns whether
 /// anything was stashed; a failure leaves the cache (and the old key) in
 /// place so the retry still sees a rotation.
 pub(crate) fn stash_remembered_tier_in(dir: &Path) -> Result<bool, String> {
+    bump_tier_cache_generation();
     // Clear litter from a crash between stash and discard/restore.
     let _ = std::fs::remove_file(plan_stash_path(dir));
     match std::fs::rename(plan_cache_path(dir), plan_stash_path(dir)) {
@@ -613,6 +641,7 @@ pub(crate) fn stash_remembered_tier_in(dir: &Path) -> Result<bool, String> {
 
 /// The key write failed: put the stashed tier back (best effort, logged).
 pub(crate) fn restore_stashed_tier_in(dir: &Path) {
+    bump_tier_cache_generation();
     if let Err(e) = std::fs::rename(plan_stash_path(dir), plan_cache_path(dir)) {
         if e.kind() != std::io::ErrorKind::NotFound {
             eprintln!("[pane] minimax: could not restore {}: {e}", plan_stash_path(dir).display());
@@ -622,6 +651,7 @@ pub(crate) fn restore_stashed_tier_in(dir: &Path) {
 
 /// The key write succeeded: the old account's tier is gone for good.
 pub(crate) fn discard_stashed_tier_in(dir: &Path) {
+    bump_tier_cache_generation();
     match std::fs::remove_file(plan_stash_path(dir)) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -635,6 +665,7 @@ pub(crate) fn discard_stashed_tier_in(dir: &Path) {
 /// cleared so a pasted key never inherits another account's tier. A
 /// leftover stash from a crashed change goes too.
 pub(crate) fn forget_remembered_tier_in(dir: &Path) -> Result<(), String> {
+    bump_tier_cache_generation();
     let stash_err = match std::fs::remove_file(plan_stash_path(dir)) {
         Ok(()) => None,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -663,6 +694,7 @@ pub(crate) fn remembered_tier_exists_in(dir: &Path) -> bool {
 /// call only runs when the workspace lookup didn't yield a plan tier —
 /// it is the fallback tier source, nothing else.
 async fn fetch_via_mcode(login: &McodeLogin) -> Result<Snapshot, String> {
+    let generation = tier_cache_generation();
     let extra = matrix_post(login, "/matrix/api/v1/user/get_user_extra_info", "{}")
         .await
         .map_err(|e| format!("workspace lookup: {e}"))?;
@@ -720,7 +752,7 @@ async fn fetch_via_mcode(login: &McodeLogin) -> Result<Snapshot, String> {
         })
         .filter(|s| !s.trim().is_empty());
     if let Some(t) = &tier {
-        remember_tier(t, &login.user_id);
+        remember_tier_if_unchanged(t, &login.user_id, generation);
     }
 
     Ok(Snapshot::ok(ID, NAME, tier, metrics))
@@ -1084,6 +1116,42 @@ mod tests {
         });
         assert_eq!(super::mcode_access_token(&other, now), None);
 
+        // An expired prod record must not win over a live one.
+        let mixed = json!({
+            "records": {
+                "com.minimax.mcode.oauth.prod.en\u{0}dead": {
+                    "accessToken": "x".repeat(60),
+                    "expiresAtMs": now - 1,
+                },
+                "com.minimax.mcode.oauth.prod.en\u{0}live": {
+                    "accessToken": "z".repeat(48),
+                    "expiresAtMs": now + 3_600_000,
+                }
+            }
+        });
+        assert_eq!(
+            super::mcode_access_token(&mixed, now).map(|t| t.len()),
+            Some(48)
+        );
+
+        // Two live records: the one with the later expiry wins.
+        let two = json!({
+            "records": {
+                "com.minimax.mcode.oauth.prod.en\u{0}old": {
+                    "accessToken": "x".repeat(60),
+                    "expiresAtMs": now + 3_600_000,
+                },
+                "com.minimax.mcode.oauth.prod.en\u{0}new": {
+                    "accessToken": "z".repeat(48),
+                    "expiresAtMs": now + 7_200_000,
+                }
+            }
+        });
+        assert_eq!(
+            super::mcode_access_token(&two, now).map(|t| t.len()),
+            Some(48)
+        );
+
         // No records at all → nothing.
         assert_eq!(super::mcode_access_token(&json!({"records": {}}), now), None);
     }
@@ -1296,6 +1364,36 @@ mod tests {
 
         // Nothing to stash in an empty dir.
         assert_eq!(super::stash_remembered_tier_in(&dir), Ok(false));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_refresh_does_not_rewrite_tier_after_key_change() {
+        let dir =
+            std::env::temp_dir().join(format!("pane-mmx-plan-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A generation captured before a key-driven cleanup is stale: the
+        // in-flight refresh must not resurrect the deleted tier.
+        let g = super::tier_cache_generation();
+        super::forget_remembered_tier_in(&dir).unwrap();
+        super::remember_tier_if_unchanged_in(&dir, "Ultra Plan", "1", g);
+        assert!(!super::plan_cache_path(&dir).exists());
+
+        // A refresh under the CURRENT generation writes normally. Another
+        // test's bump could land in the tiny gap between the load and the
+        // write check, so retry that pair rather than assert on one shot.
+        let mut wrote = false;
+        for _ in 0..10 {
+            let g2 = super::tier_cache_generation();
+            super::remember_tier_if_unchanged_in(&dir, "Ultra Plan", "1", g2);
+            if super::plan_cache_path(&dir).exists() {
+                wrote = true;
+                break;
+            }
+        }
+        assert!(wrote);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
