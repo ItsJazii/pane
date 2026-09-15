@@ -538,11 +538,12 @@ fn remembered_tier_in(dir: &Path) -> Option<String> {
 }
 
 /// The stored tier when it was seen within the TTL — entries older than
-/// 30 days or missing `seen_ms` count as expired.
+/// 30 days, missing `seen_ms`, or stamped in the future (clock skew or a
+/// tampered file) all count as expired.
 fn remembered_tier_at(dir: &Path, now_ms: i64) -> Option<String> {
     let doc = read_tier_cache(dir)?;
     let seen = doc.get("seen_ms").and_then(Value::as_i64)?;
-    if now_ms - seen > REMEMBERED_TIER_TTL_MS {
+    if !(0..=REMEMBERED_TIER_TTL_MS).contains(&(now_ms - seen)) {
         return None;
     }
     let tier = doc.get("tier").and_then(Value::as_str)?.trim();
@@ -573,7 +574,10 @@ fn remember_tier_at(dir: &Path, tier: &str, user_id: &str, now_ms: i64) {
             && d.get("user_id").and_then(Value::as_str) == Some(user_id)
             && d.get("seen_ms")
                 .and_then(Value::as_i64)
-                .is_some_and(|seen| now_ms - seen <= REMEMBERED_TIER_TTL_MS / 2)
+                .is_some_and(|seen| {
+                    // A future stamp forces a rewrite with the real time.
+                    (0..=REMEMBERED_TIER_TTL_MS / 2).contains(&(now_ms - seen))
+                })
     });
     if fresh {
         return;
@@ -831,22 +835,24 @@ fn read_usage_events(db: &Path) -> Result<Vec<UsageEvent>, String> {
 }
 
 /// The v2 ledger's token rows have no model or cost — the model lives in
-/// the turn's assistant message telemetry (`context_usage_telemetry`).
-/// Rows it can't name stay "" and price as unpriced (⚠), never guessed.
+/// the turn's assistant message telemetry (`context_usage_telemetry`),
+/// looked up per surviving row via the (session_id, turn_id, role)
+/// index so the message table is searched, not scanned. Rows it can't
+/// name stay "" and price as unpriced (⚠), never guessed.
 fn read_v2_usage_events(db: &Path) -> Result<Vec<UsageEvent>, String> {
     let conn = super::open_readonly_sqlite(db)?;
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT u.ts, COALESCE(NULLIF(u.model,''), m.model, ''),
+            "SELECT u.ts,
+                    COALESCE(NULLIF(u.model,''),
+                             (SELECT MAX(json_extract(m.data_json,'$.context_usage_telemetry.model'))
+                              FROM local_runtime_message_rows m
+                              WHERE m.session_id = u.session_id AND m.turn_id = u.turn_id
+                                AND m.role = 'assistant' AND json_valid(m.data_json)),
+                             ''),
                     u.input_tokens, u.output_tokens, u.reasoning_tokens,
                     u.cache_read_tokens, u.cache_write_tokens, COALESCE(u.cost_usd, 0)
              FROM local_runtime_token_usage u
-             LEFT JOIN (
-                 SELECT session_id, turn_id, MAX(json_extract(data_json,'$.context_usage_telemetry.model')) AS model
-                 FROM local_runtime_message_rows
-                 WHERE role='assistant' AND turn_id IS NOT NULL AND json_valid(data_json)
-                 GROUP BY session_id, turn_id
-             ) m ON m.session_id = u.session_id AND m.turn_id = u.turn_id
              ORDER BY u.ts DESC
              LIMIT {}",
             super::MAX_LEDGER_ROWS
@@ -1104,6 +1110,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(super::remembered_tier_at(&dir, now), None);
+
+        // A future stamp is expired too, and a re-remember rewrites it
+        // with the real time rather than trusting it.
+        std::fs::write(
+            super::plan_cache_path(&dir),
+            serde_json::json!({
+                "tier": "Ultra Plan",
+                "seen_ms": now + 86_400_000,
+                "user_id": "42",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(super::remembered_tier_at(&dir, now), None);
+        super::remember_tier_at(&dir, "Ultra Plan", "42", now);
+        let doc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(super::plan_cache_path(&dir)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(doc.get("seen_ms").and_then(serde_json::Value::as_i64), Some(now));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

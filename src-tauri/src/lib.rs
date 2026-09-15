@@ -2466,6 +2466,13 @@ fn set_api_key_in(dir: &Path, provider: &str, key: &str) -> Result<(), String> {
         }
         return Ok(());
     }
+    // A MiniMax key change must drop the remembered mcode tier BEFORE the
+    // new key lands: if the delete fails here the old key stays in place
+    // and a retry still sees a differing key. (The invalidation below
+    // retries the same delete — NotFound is Ok — so success is idempotent.)
+    if provider == "minimax" && previous_key.as_deref() != Some(key) {
+        providers::minimax::forget_remembered_tier_in(dir).map_err(context_cleanup_error)?;
+    }
     let raw = serde_json::json!({ "apiKey": key }).to_string();
     providers::onenewapi::store::atomic_write(&path, &raw)
         .map_err(|e| format!("write key file: {e}"))?;
@@ -4076,6 +4083,32 @@ mod tests {
             !tmp.dir.join("minimax-plan.json").exists(),
             "clearing the key must drop the remembered tier"
         );
+    }
+
+    #[test]
+    fn minimax_key_change_is_refused_while_stale_tier_cannot_be_removed() {
+        let tmp = TempConfig::new();
+        let _minimax = SnapCacheGuard::new("minimax");
+        set_api_key_in(&tmp.dir, "minimax", "sk-a-xxxxxxxxxx").unwrap();
+
+        // A directory where the plan file belongs makes remove_file fail —
+        // the new key must not be saved while the old tier survives.
+        std::fs::create_dir(tmp.dir.join("minimax-plan.json")).unwrap();
+        set_api_key_in(&tmp.dir, "minimax", "sk-b-xxxxxxxxxx")
+            .expect_err("a failed tier cleanup must refuse the key change");
+        assert_eq!(
+            stored_pane_api_key(&tmp.dir.join("minimax.json")).as_deref(),
+            Some("sk-a-xxxxxxxxxx"),
+            "the old key stays so the retry still sees a rotation"
+        );
+
+        std::fs::remove_dir(tmp.dir.join("minimax-plan.json")).unwrap();
+        set_api_key_in(&tmp.dir, "minimax", "sk-b-xxxxxxxxxx").unwrap();
+        assert_eq!(
+            stored_pane_api_key(&tmp.dir.join("minimax.json")).as_deref(),
+            Some("sk-b-xxxxxxxxxx")
+        );
+        assert!(!tmp.dir.join("minimax-plan.json").exists());
     }
 
     /// rotating_moonshot… and rotating_kimi… exercise the same two global
