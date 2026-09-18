@@ -7,6 +7,9 @@
   monthly window rolling over posts a Windows notification within about
   a minute — "Codex Weekly is back to 100%. Next reset in 6d 23h." Pane
   must be running (tray). Settings → Notifications, on by default.
+- **Star prompt.** Once the install is a few days old, Pane occasionally
+  (at most twice a day) asks for a GitHub star when the popover opens;
+  Star or "Don't ask again" retires it for good.
 
 ## 0.4.52 — 2026-09-16
 

@@ -183,6 +183,12 @@ const en: Dict = {
   "dialog.changelog": "Changelog",
   "dialog.whatsNew": "What's new in v{version}",
 
+  "star.title": "Enjoying Pane?",
+  "star.body": "If Pane saves you time, a star on GitHub helps this open-source project get found. It takes two seconds.",
+  "star.go": "Star on GitHub",
+  "star.later": "Maybe later",
+  "star.never": "Don't ask again",
+
   "card.notConnected": "Not connected",
   "card.outdated": "⚠ Outdated",
   "card.showMore": "Show more",
@@ -561,6 +567,12 @@ const zh: Dict = {
   "dialog.changelog": "更新日志",
   "dialog.whatsNew": "v{version} 有什么新内容",
 
+  "star.title": "喜欢 Pane 吗？",
+  "star.body": "如果 Pane 帮你省了时间，在 GitHub 上点个 Star 能让这个开源项目被更多人看到。只需两秒。",
+  "star.go": "去 GitHub 点 Star",
+  "star.later": "以后再说",
+  "star.never": "不再提醒",
+
   "card.notConnected": "未连接",
   "card.outdated": "⚠ 数据过时",
   "card.showMore": "显示更多",
@@ -872,6 +884,12 @@ const ru: Dict = {
   "dialog.gotIt": "Понятно",
   "dialog.changelog": "Журнал изменений",
   "dialog.whatsNew": "Что нового в v{version}",
+
+  "star.title": "Нравится Pane?",
+  "star.body": "Если Pane экономит вам время, звезда на GitHub помогает этому открытому проекту. Это займёт две секунды.",
+  "star.go": "Поставить звезду",
+  "star.later": "Позже",
+  "star.never": "Больше не спрашивать",
 
   "card.notConnected": "Не подключено",
   "card.outdated": "⚠ Данные устарели",
