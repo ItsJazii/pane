@@ -124,7 +124,8 @@ a blank card.
 **3. Pacing the burn.** Every metric with a reset window gets a projection:
 if you keep burning at this rate, will you make it to the reset? Bars turn
 amber/red as the math worsens and optional Windows toasts fire once per
-reset window ("Almost out", "Will run out").
+reset window ("Almost out", "Will run out") or when a window resets
+("Limit reset").
 
 **4. Counting the money.** Your CLIs already log every request locally.
 Pane scans those logs (Claude, Codex, Grok, OpenCode, Devin CLI, Cursor

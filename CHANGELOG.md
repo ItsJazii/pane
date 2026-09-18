@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+- **Toast when a limit resets.** Any provider's quota window rolling
+  over (5-hour, daily, weekly, monthly) posts a Windows notification —
+  "Codex Weekly is back to 100%. Next reset in 6d 23h." Settings →
+  Notifications → Limit reset, on by default.
+
 ## 0.4.52 — 2026-09-16
 
 ### Added

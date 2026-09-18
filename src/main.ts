@@ -200,6 +200,7 @@ interface Config {
   notifyAlmostOut: boolean;
   notifyCuttingClose: boolean;
   notifyWillRunOut: boolean;
+  notifyReset: boolean;
   spendTab: SpendTab;
   spendMetric: "cost" | "tokens" | "mtok";
   showUsed: boolean;
@@ -228,6 +229,7 @@ const FRONTEND_CONFIG_KEYS = [
   "notifyAlmostOut",
   "notifyCuttingClose",
   "notifyWillRunOut",
+  "notifyReset",
   "spendTab",
   "spendMetric",
   "showUsed",
@@ -411,6 +413,7 @@ let config: Config = {
   notifyAlmostOut: false,
   notifyCuttingClose: false,
   notifyWillRunOut: false,
+  notifyReset: false,
   spendTab: "today",
   spendMetric: "cost",
   showUsed: false,
@@ -4603,6 +4606,7 @@ async function initSettings(): Promise<void> {
   });
 
   const notifyToggles: [string, keyof Config][] = [
+    ["#notify-reset", "notifyReset"],
     ["#notify-almost", "notifyAlmostOut"],
     ["#notify-close", "notifyCuttingClose"],
     ["#notify-runout", "notifyWillRunOut"],
@@ -4731,6 +4735,7 @@ async function resetAllSettings(): Promise<void> {
     notifyAlmostOut: true,
     notifyCuttingClose: true,
     notifyWillRunOut: true,
+    notifyReset: true,
     spendTab: "today",
     spendMetric: "cost",
     showUsed: false,
@@ -4776,6 +4781,7 @@ function syncSettingsControls(): void {
   setCheck("#pacing", config.pacingAlways);
   setSelect("#timeformat", config.timeFormat);
   setSelect("#locale", config.locale);
+  setCheck("#notify-reset", config.notifyReset);
   setCheck("#notify-almost", config.notifyAlmostOut);
   setCheck("#notify-close", config.notifyCuttingClose);
   setCheck("#notify-runout", config.notifyWillRunOut);
