@@ -204,17 +204,32 @@ pub fn evaluate(snapshots: &[Snapshot], cfg: &Value) -> Vec<Alert> {
                     },
                     body: match loc {
                         "zh" => format!(
-                            "{name} 已恢复到 100%。{}",
+                            "{}{}",
+                            if used < 2.0 {
+                                format!("{name} 已恢复到 100%。")
+                            } else {
+                                format!("{name} 已重置 — 可用 {left:.0}%。")
+                            },
                             next.map_or(String::new(), |rel| format!(" 下次重置：{rel} 后。"))
                         ),
                         "ru" => format!(
-                            "{name} снова 100%.{}",
+                            "{}{}",
+                            if used < 2.0 {
+                                format!("{name} снова 100%.")
+                            } else {
+                                format!("{name} сброшен — доступно {left:.0}%.")
+                            },
                             next.map_or(String::new(), |rel| {
                                 format!(" Следующий сброс через {rel}.")
                             })
                         ),
                         _ => format!(
-                            "{name} is back to 100%.{}",
+                            "{}{}",
+                            if used < 2.0 {
+                                format!("{name} is back to 100%.")
+                            } else {
+                                format!("{name} has reset — {left:.0}% available.")
+                            },
                             next.map_or(String::new(), |rel| format!(" Next reset in {rel}."))
                         ),
                     },
@@ -395,6 +410,27 @@ mod tests {
         assert!(alerts[0].body.contains("Codex Weekly is back to 100%"));
         assert!(alerts[0].body.contains("Next reset in"));
         assert!(evaluate(&[make(0.0, t + period)], &cfg).is_empty());
+        forget_snapshot(id);
+    }
+
+    #[test]
+    fn reset_after_usage_resumed_reports_remaining() {
+        let id = "codex@reset-resumed";
+        let cfg = serde_json::json!({"notifyReset": true, "locale": "en"});
+        let period = 7 * 86_400_000_i64;
+        let t = chrono::Utc::now().timestamp_millis() + 2 * 3_600_000;
+        let make = |used, resets| Snapshot::ok(id, "Codex", None, vec![
+            crate::providers::Metric::progress("Weekly", used, None)
+                .with_reset(Some(resets), Some(period)),
+        ]);
+        forget_snapshot(id);
+        assert!(evaluate(&[make(80.0, t)], &cfg).is_empty());
+        // Usage already resumed (20% burned in the new window): report
+        // what's left, not a full quota.
+        let alerts = evaluate(&[make(20.0, t + period)], &cfg);
+        assert_eq!(alerts.len(), 1);
+        assert!(alerts[0].body.contains("has reset — 80% available"));
+        assert!(!alerts[0].body.contains("100%"));
         forget_snapshot(id);
     }
 

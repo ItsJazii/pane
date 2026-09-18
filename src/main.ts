@@ -3362,9 +3362,13 @@ function scheduleResetRefresh(): void {
   for (const s of lastSnapshots) {
     if (s.status !== "ok" || s.stale) continue;
     for (const m of s.metrics) {
-      // Unknown period → we can't tell the window length — skip it.
-      if (m.kind !== "progress" || m.resets_at === null || m.period_ms === null) continue;
-      if (m.period_ms < RESET_LONG_WINDOW_MS) continue;
+      if (m.kind !== "progress" || m.resets_at === null) continue;
+      // A declared period decides the window length; when the provider
+      // reports none, a reset ≥6 days out implies a ≥6-day window.
+      const long = m.period_ms !== null
+        ? m.period_ms >= RESET_LONG_WINDOW_MS
+        : m.resets_at - now >= RESET_LONG_WINDOW_MS;
+      if (!long) continue;
       if (m.resets_at > now) {
         if (soonest === null || m.resets_at < soonest) soonest = m.resets_at;
       } else if (m.resets_at === resetRetryFor && now - m.resets_at < 3 * 60_000) {
@@ -3372,19 +3376,22 @@ function scheduleResetRefresh(): void {
       }
     }
   }
-  if (soonest !== null) {
+  // The next reset moment and a provider-lag retry are both candidates —
+  // keep exactly one pending timer, whichever lands first. Forced
+  // usage-only refresh: the 60 s lastFetch guard would drop a plain one.
+  const candidates: { at: number; kind: "moment" | "retry" }[] = [];
+  if (soonest !== null) candidates.push({ at: soonest + 30_000, kind: "moment" });
+  if (providerLagging) candidates.push({ at: now + 90_000, kind: "retry" });
+  const pick = candidates.sort((a, b) => a.at - b.at)[0];
+  if (pick) {
     const t = soonest;
     resetRefreshTimer = window.setTimeout(() => {
       resetRefreshTimer = undefined;
-      resetRetryFor = t;
-      void refresh();
-    }, Math.min(t + 30_000 - now, 2_147_000_000));
-  } else if (providerLagging) {
-    resetRetryFor = null;
-    resetRefreshTimer = window.setTimeout(() => {
-      resetRefreshTimer = undefined;
-      void refresh();
-    }, 90_000);
+      // providerLagging only matches resets_at === resetRetryFor and the
+      // retry clears it, so a lagging provider can retry exactly once.
+      resetRetryFor = pick.kind === "moment" ? t : null;
+      void refresh(true, true);
+    }, Math.min(pick.at - now, 2_147_000_000));
   }
 }
 
