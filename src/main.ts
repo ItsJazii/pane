@@ -2051,10 +2051,14 @@ function starPromptToday(): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
+/// A roll that won but hasn't presented yet — the popover may hide
+/// before the timer fires, so nothing is recorded until it does.
+let starPromptTimer: number | undefined;
+
 /// Eligibility + the random roll: the install must be a few days old, at
-/// most twice a day, never within four hours of the last show. On a hit
-/// the counters persist immediately so a crash can't re-roll. The caller
-/// guarantees nothing else is presenting.
+/// most twice a day, never within four hours of the last show. The
+/// counters commit only when the dialog actually presents — a prompt
+/// inserted into a hidden webview would burn the budget unseen.
 function maybeShowStarPrompt(): void {
   const now = Date.now();
   const today = starPromptToday();
@@ -2068,23 +2072,28 @@ function maybeShowStarPrompt(): void {
     return;
   }
   if (Math.random() >= 0.25) return;
-  void patchConfig({
-    starPromptLastMs: now,
-    starPromptDay: today,
-    starPromptDayCount:
-      config.starPromptDay === today ? config.starPromptDayCount + 1 : 1,
-  }).catch(() => {});
+  if (starPromptTimer !== undefined) return; // a roll is already pending
   // After the reveal animation; the guards are re-checked inside.
-  setTimeout(showStarPrompt, 450);
+  starPromptTimer = window.setTimeout(() => {
+    starPromptTimer = undefined;
+    presentStarPrompt();
+  }, 450);
 }
 
 /// Small glass dialog: Star on GitHub retires it forever (and opens the
 /// repo), "Don't ask again" retires it, Maybe later / Esc / backdrop just
 /// close.
-function showStarPrompt(): void {
+function presentStarPrompt(): void {
   // A dialog (or a second prompt) may have presented while the reveal
-  // played — never stack.
-  if (dismissConfirm || dismissWhatsNew || dismissStarPrompt) return;
+  // played — never stack. And a hidden window can't see it at all.
+  if (document.hidden || dismissConfirm || dismissWhatsNew || dismissStarPrompt) return;
+  const today = starPromptToday();
+  void patchConfig({
+    starPromptLastMs: Date.now(),
+    starPromptDay: today,
+    starPromptDayCount:
+      config.starPromptDay === today ? config.starPromptDayCount + 1 : 1,
+  }).catch(() => {});
   const overlay = document.createElement("div");
   overlay.id = "star-overlay";
   overlay.innerHTML = `
@@ -5287,6 +5296,14 @@ window.addEventListener("DOMContentLoaded", () => {
     renderBuildInfo();
   });
 
+  // A pending star roll must not present into a hidden window.
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden && starPromptTimer !== undefined) {
+      window.clearTimeout(starPromptTimer);
+      starPromptTimer = undefined;
+    }
+  });
+
   void listen("popover-shown", () => {
     void checkForUpdate();
     // Always reopen on the main page, at the top — leftover Customize/
@@ -5297,6 +5314,10 @@ window.addEventListener("DOMContentLoaded", () => {
     dismissConfirm?.();
     dismissWhatsNew?.();
     dismissStarPrompt?.();
+    if (starPromptTimer !== undefined) {
+      window.clearTimeout(starPromptTimer);
+      starPromptTimer = undefined;
+    }
     resetsPopover.dismiss();
     // A fresh update's notes present on the first open after launch.
     if (pendingWhatsNew) {

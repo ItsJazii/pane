@@ -135,7 +135,10 @@ fn config_with_defaults(mut cfg: Value) -> Value {
     obj.entry("lastSeenVersion").or_insert(json!(""));
     // Star-prompt bookkeeping: firstSeenMs is stamped by the frontend on
     // the first config load that finds it 0, so it doubles as the install
-    // age; the rest rate-limit and retire the prompt.
+    // age; on upgrades it stamps at the first launch of the version that
+    // introduced it, so the first ask lands a few days after updating —
+    // intended, since a just-installed build should earn the ask. The
+    // rest rate-limit and retire the prompt.
     obj.entry("firstSeenMs").or_insert(json!(0));
     obj.entry("starPromptDone").or_insert(json!(false));
     obj.entry("starPromptDay").or_insert(json!(""));
