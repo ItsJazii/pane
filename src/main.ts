@@ -2051,14 +2051,15 @@ function starPromptToday(): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-/// A roll that won but hasn't presented yet — the popover may hide
-/// before the timer fires, so nothing is recorded until it does.
+/// A roll that won but hasn't presented yet. An interrupted winning roll
+/// records nothing — hiding before the timer fires just wastes the roll.
 let starPromptTimer: number | undefined;
 
 /// Eligibility + the random roll: the install must be a few days old, at
-/// most twice a day, never within four hours of the last show. The
-/// counters commit only when the dialog actually presents — a prompt
-/// inserted into a hidden webview would burn the budget unseen.
+/// most twice a day, never within four hours of the last show. Winning
+/// only arms the timer — the counters commit in presentStarPrompt, when
+/// the dialog is actually appended (a prompt inserted into a hidden
+/// webview would burn the budget unseen).
 function maybeShowStarPrompt(): void {
   const now = Date.now();
   const today = starPromptToday();
