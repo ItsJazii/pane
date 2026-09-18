@@ -2479,7 +2479,9 @@ body.no-glass .cust-dock {
 
 @media (prefers-reduced-motion: reduce) {
   #confirm-overlay,
-  #confirm-box {
+  #confirm-box,
+  #star-overlay,
+  #star-box {
     animation: none;
   }
 }
@@ -2672,9 +2674,124 @@ body.no-glass .cust-dock {
   background: color-mix(in srgb, var(--destructive, #ef4444) 12%, transparent);
 }
 
+/* ---------------------------------------------------------------------------
+   Star prompt — same liquid-glass material as the confirm dialog
+--------------------------------------------------------------------------- */
+
+#star-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgb(0 0 0 / 0.45);
+  backdrop-filter: blur(6px) saturate(1.2);
+  -webkit-backdrop-filter: blur(6px) saturate(1.2);
+  animation: confirm-fade 0.16s ease;
+}
+
+#star-box {
+  width: min(88%, 300px);
+  text-align: center;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0) 38%),
+    rgba(24, 24, 27, 0.55);
+  backdrop-filter: blur(24px) saturate(1.5) brightness(1.04);
+  -webkit-backdrop-filter: blur(24px) saturate(1.5) brightness(1.04);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 18px;
+  padding: 18px 18px 14px;
+  box-shadow:
+    0 24px 60px rgb(0 0 0 / 0.5),
+    inset 0 1px 1.5px rgba(255, 255, 255, 0.35),
+    inset 0 -1px 1px rgba(255, 255, 255, 0.08),
+    inset 1.5px 0 1.5px rgba(255, 255, 255, 0.06),
+    inset -1.5px 0 1.5px rgba(255, 255, 255, 0.06);
+  animation: confirm-pop 0.18s cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+#star-box .star-glyph {
+  font-size: 36px;
+  line-height: 1.2;
+  color: #f5c451;
+  text-shadow: 0 0 18px rgba(245, 196, 81, 0.45);
+}
+
+#star-box h3 {
+  font-size: 14px;
+  font-weight: 650;
+  margin: 4px 0 6px;
+}
+
+#star-box p {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted-foreground);
+  margin: 0 0 14px;
+}
+
+#star-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+}
+
+#star-actions button {
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 5px 14px;
+  cursor: pointer;
+  transition: opacity 0.15s ease, transform 0.1s ease;
+}
+
+#star-actions button:active {
+  transform: scale(0.95);
+}
+
+#star-go {
+  background: var(--primary);
+  border: 1px solid transparent;
+  color: var(--primary-foreground);
+}
+
+#star-go:hover {
+  opacity: 0.85;
+}
+
+#star-later {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--secondary-foreground);
+}
+
+#star-later:hover {
+  background: var(--accent);
+}
+
+/* Borderless quiet button — "Don't ask again". */
+.linkish {
+  display: block;
+  margin: 10px auto 0;
+  font-family: inherit;
+  font-size: 11.5px;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--muted-foreground);
+}
+
+.linkish:hover {
+  text-decoration: underline;
+}
+
 /* Light theme: white glass, same as the sidebar's light recipe. */
 :root[data-theme="light"] #whatsnew-box,
-:root[data-theme="light"] #confirm-box {
+:root[data-theme="light"] #confirm-box,
+:root[data-theme="light"] #star-box {
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0) 38%),
     rgba(255, 255, 255, 0.6);
@@ -2690,7 +2807,8 @@ body.no-glass .cust-dock {
 
 /* Glass effects off: flat opaque surfaces, like every other glass layer. */
 body.no-glass #whatsnew-box,
-body.no-glass #confirm-box {
+body.no-glass #confirm-box,
+body.no-glass #star-box {
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
   background: var(--card) !important;

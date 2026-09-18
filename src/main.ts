@@ -216,6 +216,11 @@ interface Config {
   showTotalSpend: boolean;
   welcomeDismissed: boolean;
   lastSeenVersion: string;
+  firstSeenMs: number;
+  starPromptDone: boolean;
+  starPromptDay: string;
+  starPromptDayCount: number;
+  starPromptLastMs: number;
   reduceAnimations: boolean;
   locale: LocalePref;
 }
@@ -245,6 +250,11 @@ const FRONTEND_CONFIG_KEYS = [
   "showTotalSpend",
   "welcomeDismissed",
   "lastSeenVersion",
+  "firstSeenMs",
+  "starPromptDone",
+  "starPromptDay",
+  "starPromptDayCount",
+  "starPromptLastMs",
   "reduceAnimations",
   "locale",
 ] as const satisfies readonly (keyof Config)[];
@@ -429,6 +439,11 @@ let config: Config = {
   showTotalSpend: true,
   welcomeDismissed: false,
   lastSeenVersion: "",
+  firstSeenMs: 0,
+  starPromptDone: false,
+  starPromptDay: "",
+  starPromptDayCount: 0,
+  starPromptLastMs: 0,
   reduceAnimations: false,
   locale: "auto",
 };
@@ -2018,6 +2033,112 @@ function computeWhatsNew(version: string): ChangelogSection[] | null {
     out.push(s);
   }
   return out.length ? out : null;
+}
+
+// ---------------------------------------------------------------------------
+// Star prompt — asks for a GitHub star, at most twice a day
+// ---------------------------------------------------------------------------
+
+/// Same lifecycle as dismissConfirm/dismissWhatsNew: the popover reopen
+/// routine clears a stale prompt left behind by hide-on-focus-loss.
+let dismissStarPrompt: (() => void) | null = null;
+
+/// Local YYYY-MM-DD for the "twice a day" cap — day boundaries follow the
+/// user's clock, not UTC.
+function starPromptToday(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/// A roll that won but hasn't presented yet. An interrupted winning roll
+/// records nothing — hiding before the timer fires just wastes the roll.
+let starPromptTimer: number | undefined;
+
+/// Eligibility + the random roll: the install must be a few days old, at
+/// most twice a day, never within four hours of the last show. Winning
+/// only arms the timer — the counters commit in presentStarPrompt, when
+/// the dialog is actually appended (a prompt inserted into a hidden
+/// webview would burn the budget unseen).
+function maybeShowStarPrompt(): void {
+  const now = Date.now();
+  const today = starPromptToday();
+  if (
+    config.starPromptDone ||
+    !config.firstSeenMs ||
+    now - config.firstSeenMs < 3 * 86_400_000 ||
+    now - config.starPromptLastMs < 4 * 3_600_000 ||
+    (config.starPromptDay === today && config.starPromptDayCount >= 2)
+  ) {
+    return;
+  }
+  if (Math.random() >= 0.25) return;
+  if (starPromptTimer !== undefined) return; // a roll is already pending
+  // After the reveal animation; the guards are re-checked inside.
+  starPromptTimer = window.setTimeout(() => {
+    starPromptTimer = undefined;
+    presentStarPrompt();
+  }, 450);
+}
+
+/// Small glass dialog: Star on GitHub retires it forever (and opens the
+/// repo), "Don't ask again" retires it, Maybe later / Esc / backdrop just
+/// close.
+function presentStarPrompt(): void {
+  // A dialog (or a second prompt) may have presented while the reveal
+  // played — never stack. And a hidden window can't see it at all.
+  if (document.hidden || dismissConfirm || dismissWhatsNew || dismissStarPrompt) return;
+  const today = starPromptToday();
+  void patchConfig({
+    starPromptLastMs: Date.now(),
+    starPromptDay: today,
+    starPromptDayCount:
+      config.starPromptDay === today ? config.starPromptDayCount + 1 : 1,
+  }).catch(() => {});
+  const overlay = document.createElement("div");
+  overlay.id = "star-overlay";
+  overlay.innerHTML = `
+    <div id="star-box" role="dialog" aria-modal="true">
+      <div class="star-glyph">★</div>
+      <h3>${escapeHtml(t("star.title"))}</h3>
+      <p>${escapeHtml(t("star.body"))}</p>
+      <div id="star-actions">
+        <button id="star-go" type="button" class="primary">${escapeHtml(t("star.go"))}</button>
+        <button id="star-later" type="button">${escapeHtml(t("star.later"))}</button>
+      </div>
+      <button id="star-never" type="button" class="linkish">${escapeHtml(t("star.never"))}</button>
+    </div>`;
+  const done = () => {
+    dismissStarPrompt = null;
+    document.removeEventListener("keydown", onKey, true);
+    overlay.remove();
+  };
+  dismissStarPrompt = done;
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      done();
+    }
+  };
+  const retire = () => {
+    void patchConfig({ starPromptDone: true }).catch(() => {});
+    done();
+  };
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) done();
+  });
+  overlay.querySelector("#star-later")!.addEventListener("click", done);
+  overlay.querySelector("#star-never")!.addEventListener("click", retire);
+  overlay.querySelector("#star-go")!.addEventListener("click", () => {
+    void patchConfig({ starPromptDone: true }).catch(() => {});
+    void invoke("open_link", { url: "https://github.com/ItsJazii/pane" }).catch((err) => {
+      document.querySelector("#status")!.textContent = t("footer.openLinkFailed", { err: String(err) });
+    });
+    done();
+  });
+  document.addEventListener("keydown", onKey, true);
+  document.body.appendChild(overlay);
 }
 
 async function shareCard(id: string): Promise<void> {
@@ -4629,6 +4750,11 @@ function applyLocale(): void {
 
 async function initSettings(): Promise<void> {
   config = await invoke<Config>("get_config");
+  // First launch timestamp — backs the star prompt's "a few days old"
+  // eligibility. Recorded once, on the first config load that finds it 0.
+  if (!config.firstSeenMs) {
+    void patchConfig({ firstSeenMs: Date.now() }).catch(() => {});
+  }
   config.locale = normalizeLocalePref(config.locale);
   try {
     const sys = await invoke<string>("system_ui_locale");
@@ -5171,6 +5297,14 @@ window.addEventListener("DOMContentLoaded", () => {
     renderBuildInfo();
   });
 
+  // A pending star roll must not present into a hidden window.
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden && starPromptTimer !== undefined) {
+      window.clearTimeout(starPromptTimer);
+      starPromptTimer = undefined;
+    }
+  });
+
   void listen("popover-shown", () => {
     void checkForUpdate();
     // Always reopen on the main page, at the top — leftover Customize/
@@ -5180,11 +5314,26 @@ window.addEventListener("DOMContentLoaded", () => {
     setSettings(false);
     dismissConfirm?.();
     dismissWhatsNew?.();
+    dismissStarPrompt?.();
+    if (starPromptTimer !== undefined) {
+      window.clearTimeout(starPromptTimer);
+      starPromptTimer = undefined;
+    }
     resetsPopover.dismiss();
     // A fresh update's notes present on the first open after launch.
     if (pendingWhatsNew) {
       showChangelogDialog(t("dialog.whatsNew", { version: appVersion }), pendingWhatsNew);
       pendingWhatsNew = null;
+    }
+    // The star prompt only rolls when nothing else is presenting and the
+    // welcome card is gone.
+    if (
+      config.welcomeDismissed &&
+      !pendingWhatsNew &&
+      !dismissWhatsNew &&
+      !dismissConfirm
+    ) {
+      maybeShowStarPrompt();
     }
     // Replay any renders skipped while hidden, before the reveal plays.
     if (pendingRender) {
