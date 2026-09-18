@@ -113,8 +113,8 @@ const en: Dict = {
 
   "settings.notifications": "Notifications",
   "settings.notifyNote":
-    "Windows toasts when a quota window resets, or worsens — once per metric per reset period.",
-  "settings.notifyReset": "Limit reset (window back to 100%)",
+    "Windows toasts when a weekly or monthly window resets, or when a quota worsens — once per metric per reset period.",
+  "settings.notifyReset": "Weekly limit reset (window back to 100%)",
   "settings.notifyAlmost": "Almost out (<10% left)",
   "settings.notifyClose": "Cutting it close",
   "settings.notifyRunout": "Will run out",
@@ -491,8 +491,8 @@ const zh: Dict = {
   "settings.shortcutPh": "例如 Ctrl+Shift+U",
 
   "settings.notifications": "通知",
-  "settings.notifyNote": "额度窗口重置或变差时弹出 Windows 提醒 — 每个指标在每个重置周期只提醒一次。",
-  "settings.notifyReset": "额度重置（窗口恢复 100%）",
+  "settings.notifyNote": "每周或每月额度窗口重置，或额度变差时弹出 Windows 提醒 — 每个指标在每个重置周期只提醒一次。",
+  "settings.notifyReset": "周额度重置（窗口恢复 100%）",
   "settings.notifyAlmost": "即将用完（剩余不足 10%）",
   "settings.notifyClose": "余量紧张",
   "settings.notifyRunout": "将会用完",
@@ -830,8 +830,8 @@ const ru: Dict = {
 
   "settings.notifications": "Уведомления",
   "settings.notifyNote":
-    "Всплывающие уведомления Windows, когда окно квоты сбрасывается или ухудшается — один раз на показатель за период сброса.",
-  "settings.notifyReset": "Сброс лимита (окно снова 100%)",
+    "Всплывающие уведомления Windows, когда недельное или месячное окно квоты сбрасывается или квота ухудшается — один раз на показатель за период сброса.",
+  "settings.notifyReset": "Сброс недельного лимита (окно снова 100%)",
   "settings.notifyAlmost": "Почти кончилось (осталось <10%)",
   "settings.notifyClose": "Запас на исходе",
   "settings.notifyRunout": "Кончится до сброса",

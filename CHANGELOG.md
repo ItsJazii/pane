@@ -3,10 +3,10 @@
 ## Unreleased
 
 ### Added
-- **Toast when a limit resets.** Any provider's quota window rolling
-  over (5-hour, daily, weekly, monthly) posts a Windows notification —
-  "Codex Weekly is back to 100%. Next reset in 6d 23h." Settings →
-  Notifications → Limit reset, on by default.
+- **Toast when a weekly limit resets.** Any provider's weekly or
+  monthly window rolling over posts a Windows notification within about
+  a minute — "Codex Weekly is back to 100%. Next reset in 6d 23h." Pane
+  must be running (tray). Settings → Notifications, on by default.
 
 ## 0.4.52 — 2026-09-16
 

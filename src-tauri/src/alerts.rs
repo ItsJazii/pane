@@ -2,7 +2,8 @@
 //! - "Almost Out" — a metric drops under 10% remaining.
 //! - "Cutting It Close" — projected to finish the period with <10% spare.
 //! - "Will Run Out" — projected to hit the limit before the reset.
-//! - "Limit Reset" — the reset window rolled over and the quota is full.
+//! - "Limit Reset" — a weekly-or-longer reset window rolled over and the
+//!   quota is full (short windows reset too often to be worth a toast).
 //!
 //! Anti-spam: an alert fires only when a quota *worsens while the app is
 //! running* (the first reading after launch is a silent baseline), fires
@@ -82,6 +83,23 @@ fn period_changed(old: Option<i64>, new: Option<i64>) -> bool {
     }
 }
 
+/// Reset toasts only cover weekly-and-longer windows — 5-hour and daily
+/// windows roll too often to be worth a notification.
+const LONG_WINDOW_MS: i64 = 6 * 24 * 3_600_000;
+
+/// Is this metric's window long enough to toast about? The declared
+/// `period_ms` wins; when a provider reports no period, the jump between
+/// consecutive reset times IS the period.
+fn long_window(
+    period_ms: Option<i64>,
+    old_reset: Option<i64>,
+    new_reset: Option<i64>,
+) -> bool {
+    period_ms.is_some_and(|p| p >= LONG_WINDOW_MS)
+        || (period_ms.is_none()
+            && matches!((old_reset, new_reset), (Some(o), Some(n)) if n - o >= LONG_WINDOW_MS))
+}
+
 /// Compact duration for toast text: `6d 23h`, `4h 58m`, `12m`. Negative
 /// durations clamp to `0m`.
 fn compact_duration(ms: i64) -> String {
@@ -155,6 +173,7 @@ pub fn evaluate(snapshots: &[Snapshot], cfg: &Value) -> Vec<Alert> {
             );
             let rolled_over = entry.seen
                 && advanced
+                && long_window(metric.period_ms, entry.resets_at, metric.resets_at)
                 && (used < 2.0 || entry.prev_used.is_some_and(|p| used + 10.0 < p));
 
             if period_changed(entry.resets_at, metric.resets_at) {
@@ -361,7 +380,7 @@ mod tests {
     fn reset_fires_once_when_period_advances() {
         let id = "codex@reset-advance";
         let cfg = serde_json::json!({"notifyReset": true, "locale": "en"});
-        let period = 5 * 3_600_000_i64;
+        let period = 7 * 86_400_000_i64;
         let t = chrono::Utc::now().timestamp_millis() + 2 * 3_600_000;
         let make = |used, resets| Snapshot::ok(id, "Codex", None, vec![
             crate::providers::Metric::progress("Weekly", used, None)
@@ -383,7 +402,7 @@ mod tests {
     fn reset_fires_for_untouched_window() {
         let id = "codex@reset-untouched";
         let cfg = serde_json::json!({"notifyReset": true, "locale": "en"});
-        let period = 5 * 3_600_000_i64;
+        let period = 7 * 86_400_000_i64;
         let t = chrono::Utc::now().timestamp_millis() + 3_600_000;
         let make = |used, resets| Snapshot::ok(id, "Codex", None, vec![
             crate::providers::Metric::progress("Weekly", used, None)
@@ -401,8 +420,8 @@ mod tests {
         let cfg = serde_json::json!({"notifyReset": true, "locale": "en"});
         let t = chrono::Utc::now().timestamp_millis() + 3_600_000;
         let make = |used, resets| Snapshot::ok(id, "Codex", None, vec![
-            crate::providers::Metric::progress("5 Hours", used, None)
-                .with_reset(Some(resets), Some(5 * 3_600_000)),
+            crate::providers::Metric::progress("Weekly", used, None)
+                .with_reset(Some(resets), Some(7 * 86_400_000)),
         ]);
         forget_snapshot(id);
         assert!(evaluate(&[make(60.0, t)], &cfg).is_empty());
@@ -413,13 +432,46 @@ mod tests {
     }
 
     #[test]
+    fn short_window_reset_is_silent() {
+        let id = "codex@reset-short";
+        let cfg = serde_json::json!({"notifyReset": true, "locale": "en"});
+        let period = 5 * 3_600_000_i64;
+        let t = chrono::Utc::now().timestamp_millis() + 3_600_000;
+        let make = |used, resets| Snapshot::ok(id, "Codex", None, vec![
+            crate::providers::Metric::progress("5 Hours", used, None)
+                .with_reset(Some(resets), Some(period)),
+        ]);
+        forget_snapshot(id);
+        assert!(evaluate(&[make(80.0, t)], &cfg).is_empty());
+        // A real rollover — but 5-hour windows don't toast.
+        assert!(evaluate(&[make(0.0, t + period)], &cfg).is_empty());
+        forget_snapshot(id);
+    }
+
+    #[test]
+    fn long_window_inferred_from_reset_jump_when_period_missing() {
+        let id = "codex@reset-noperiod";
+        let cfg = serde_json::json!({"notifyReset": true, "locale": "en"});
+        let t = chrono::Utc::now().timestamp_millis() + 3_600_000;
+        let make = |used, resets| Snapshot::ok(id, "Codex", None, vec![
+            crate::providers::Metric::progress("Weekly", used, None)
+                .with_reset(Some(resets), None),
+        ]);
+        forget_snapshot(id);
+        assert!(evaluate(&[make(80.0, t)], &cfg).is_empty());
+        // No declared period: a 7-day jump between resets IS the window.
+        assert_eq!(evaluate(&[make(0.0, t + 7 * 86_400_000)], &cfg).len(), 1);
+        forget_snapshot(id);
+    }
+
+    #[test]
     fn reset_needs_baseline() {
         let id = "codex@reset-baseline";
         let cfg = serde_json::json!({"notifyReset": true, "locale": "en"});
         let t = chrono::Utc::now().timestamp_millis() + 3_600_000;
         let make = |used, resets| Snapshot::ok(id, "Codex", None, vec![
             crate::providers::Metric::progress("Weekly", used, None)
-                .with_reset(Some(resets), Some(5 * 3_600_000)),
+                .with_reset(Some(resets), Some(7 * 86_400_000)),
         ]);
         forget_snapshot(id);
         // The first reading after launch is a silent baseline.

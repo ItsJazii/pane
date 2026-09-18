@@ -3156,6 +3156,7 @@ async function paintCachedSnapshots(): Promise<void> {
     // The live fetch may have already landed — never paint over it.
     if (!cached.length || lastSnapshots.length) return;
     lastSnapshots = cached;
+    scheduleResetRefresh();
     ensureLayout();
     renderIfVisible();
     requestTraySync();
@@ -3295,6 +3296,7 @@ async function refresh(force = false, usageOnly = false): Promise<void> {
     const firstData = lastSnapshots.length === 0;
     lastFetch = Date.now();
     lastSnapshots = snapshots;
+    scheduleResetRefresh();
     ensureLayout();
     if (!lastLayoutSnapshot && config.layout) {
       lastLayoutSnapshot = JSON.stringify(config.layout);
@@ -3338,6 +3340,52 @@ function scheduleAutoRefresh(): void {
   if (refreshTimer !== undefined) window.clearInterval(refreshTimer);
   const minutes = Math.max(1, config.refreshMinutes || 5);
   refreshTimer = window.setInterval(() => void refresh(), minutes * 60 * 1000);
+}
+
+// One-shot refresh ~30 s after the soonest upcoming long-window reset,
+// so the reset toast lands within ~a minute of the rollover instead of
+// waiting for the auto-refresh interval. A provider that hasn't rolled
+// the window yet gets ONE retry 90 s later, then we stop guessing.
+let resetRefreshTimer: number | undefined;
+let resetRetryFor: number | null = null;
+const RESET_LONG_WINDOW_MS = 6 * 24 * 3_600_000;
+
+function scheduleResetRefresh(): void {
+  if (resetRefreshTimer !== undefined) {
+    window.clearTimeout(resetRefreshTimer);
+    resetRefreshTimer = undefined;
+  }
+  if (!config.notifyReset) return;
+  const now = Date.now();
+  let soonest: number | null = null;
+  let providerLagging = false;
+  for (const s of lastSnapshots) {
+    if (s.status !== "ok" || s.stale) continue;
+    for (const m of s.metrics) {
+      // Unknown period → we can't tell the window length — skip it.
+      if (m.kind !== "progress" || m.resets_at === null || m.period_ms === null) continue;
+      if (m.period_ms < RESET_LONG_WINDOW_MS) continue;
+      if (m.resets_at > now) {
+        if (soonest === null || m.resets_at < soonest) soonest = m.resets_at;
+      } else if (m.resets_at === resetRetryFor && now - m.resets_at < 3 * 60_000) {
+        providerLagging = true;
+      }
+    }
+  }
+  if (soonest !== null) {
+    const t = soonest;
+    resetRefreshTimer = window.setTimeout(() => {
+      resetRefreshTimer = undefined;
+      resetRetryFor = t;
+      void refresh();
+    }, Math.min(t + 30_000 - now, 2_147_000_000));
+  } else if (providerLagging) {
+    resetRetryFor = null;
+    resetRefreshTimer = window.setTimeout(() => {
+      resetRefreshTimer = undefined;
+      void refresh();
+    }, 90_000);
+  }
 }
 
 const logoPixels = new Map<string, number[]>();
@@ -4616,6 +4664,8 @@ async function initSettings(): Promise<void> {
     box.checked = Boolean(config[key]);
     box.addEventListener("change", () => {
       void patchConfig({ [key]: box.checked } as Partial<Config>);
+      // notifyReset also arms/clears the reset-moment refresh timer.
+      if (key === "notifyReset") scheduleResetRefresh();
     });
   }
 
@@ -4797,6 +4847,9 @@ function syncSettingsControls(): void {
   const autostart = document.querySelector<HTMLInputElement>("#autostart");
   if (autostart) autostart.checked = true;
   populatePinnedOptions();
+  // Resetting toggles programmatically fires no change events — re-arm
+  // (or clear) the reset-moment timer against the restored values.
+  scheduleResetRefresh();
 }
 
 // ---------------------------------------------------------------------------
