@@ -3350,6 +3350,13 @@ let resetRefreshTimer: number | undefined;
 let resetRetryFor: number | null = null;
 const RESET_LONG_WINDOW_MS = 6 * 24 * 3_600_000;
 
+/// Long-window verdicts for metrics that report no period, keyed by
+/// "<snapshot id>:<label>". Decided once per observed resets_at (a reset
+/// ≥6 days out, or a ≥6-day jump from the previous reset) and kept until
+/// resets_at changes — never re-derived from the shrinking countdown.
+/// One entry per metric keeps the map tiny; no eviction needed.
+const inferredLongWindow = new Map<string, { resetsAt: number; long: boolean }>();
+
 function scheduleResetRefresh(): void {
   if (resetRefreshTimer !== undefined) {
     window.clearTimeout(resetRefreshTimer);
@@ -3363,11 +3370,23 @@ function scheduleResetRefresh(): void {
     if (s.status !== "ok" || s.stale) continue;
     for (const m of s.metrics) {
       if (m.kind !== "progress" || m.resets_at === null) continue;
-      // A declared period decides the window length; when the provider
-      // reports none, a reset ≥6 days out implies a ≥6-day window.
-      const long = m.period_ms !== null
-        ? m.period_ms >= RESET_LONG_WINDOW_MS
-        : m.resets_at - now >= RESET_LONG_WINDOW_MS;
+      let long: boolean;
+      if (m.period_ms !== null) {
+        long = m.period_ms >= RESET_LONG_WINDOW_MS;
+      } else {
+        // No declared period: decide once per resets_at and keep the
+        // verdict — re-deriving it from the countdown would flip a real
+        // weekly to short as the reset approaches.
+        const key = `${s.id}:${m.label}`;
+        const prev = inferredLongWindow.get(key);
+        if (prev && prev.resetsAt === m.resets_at) {
+          long = prev.long;
+        } else {
+          long = m.resets_at - now >= RESET_LONG_WINDOW_MS
+            || (prev !== undefined && m.resets_at - prev.resetsAt >= RESET_LONG_WINDOW_MS);
+          inferredLongWindow.set(key, { resetsAt: m.resets_at, long });
+        }
+      }
       if (!long) continue;
       if (m.resets_at > now) {
         if (soonest === null || m.resets_at < soonest) soonest = m.resets_at;
