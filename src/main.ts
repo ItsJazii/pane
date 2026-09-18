@@ -200,6 +200,7 @@ interface Config {
   notifyAlmostOut: boolean;
   notifyCuttingClose: boolean;
   notifyWillRunOut: boolean;
+  notifyReset: boolean;
   spendTab: SpendTab;
   spendMetric: "cost" | "tokens" | "mtok";
   showUsed: boolean;
@@ -228,6 +229,7 @@ const FRONTEND_CONFIG_KEYS = [
   "notifyAlmostOut",
   "notifyCuttingClose",
   "notifyWillRunOut",
+  "notifyReset",
   "spendTab",
   "spendMetric",
   "showUsed",
@@ -411,6 +413,7 @@ let config: Config = {
   notifyAlmostOut: false,
   notifyCuttingClose: false,
   notifyWillRunOut: false,
+  notifyReset: false,
   spendTab: "today",
   spendMetric: "cost",
   showUsed: false,
@@ -3153,6 +3156,7 @@ async function paintCachedSnapshots(): Promise<void> {
     // The live fetch may have already landed — never paint over it.
     if (!cached.length || lastSnapshots.length) return;
     lastSnapshots = cached;
+    scheduleResetRefresh();
     ensureLayout();
     renderIfVisible();
     requestTraySync();
@@ -3292,6 +3296,7 @@ async function refresh(force = false, usageOnly = false): Promise<void> {
     const firstData = lastSnapshots.length === 0;
     lastFetch = Date.now();
     lastSnapshots = snapshots;
+    scheduleResetRefresh();
     ensureLayout();
     if (!lastLayoutSnapshot && config.layout) {
       lastLayoutSnapshot = JSON.stringify(config.layout);
@@ -3335,6 +3340,78 @@ function scheduleAutoRefresh(): void {
   if (refreshTimer !== undefined) window.clearInterval(refreshTimer);
   const minutes = Math.max(1, config.refreshMinutes || 5);
   refreshTimer = window.setInterval(() => void refresh(), minutes * 60 * 1000);
+}
+
+// One-shot refresh ~30 s after the soonest upcoming long-window reset,
+// so the reset toast lands within ~a minute of the rollover instead of
+// waiting for the auto-refresh interval. A provider that hasn't rolled
+// the window yet gets ONE retry 90 s later, then we stop guessing.
+let resetRefreshTimer: number | undefined;
+let resetRetryFor: number | null = null;
+const RESET_LONG_WINDOW_MS = 6 * 24 * 3_600_000;
+
+/// Long-window verdicts for metrics that report no period, keyed by
+/// "<snapshot id>:<label>". Decided once per observed resets_at (a reset
+/// ≥6 days out, or a ≥6-day jump from the previous reset) and kept until
+/// resets_at changes — never re-derived from the shrinking countdown.
+/// One entry per metric keeps the map tiny; no eviction needed.
+const inferredLongWindow = new Map<string, { resetsAt: number; long: boolean }>();
+
+function scheduleResetRefresh(): void {
+  if (resetRefreshTimer !== undefined) {
+    window.clearTimeout(resetRefreshTimer);
+    resetRefreshTimer = undefined;
+  }
+  if (!config.notifyReset) return;
+  const now = Date.now();
+  let soonest: number | null = null;
+  let providerLagging = false;
+  for (const s of lastSnapshots) {
+    if (s.status !== "ok" || s.stale) continue;
+    for (const m of s.metrics) {
+      if (m.kind !== "progress" || m.resets_at === null) continue;
+      let long: boolean;
+      if (m.period_ms !== null) {
+        long = m.period_ms >= RESET_LONG_WINDOW_MS;
+      } else {
+        // No declared period: decide once per resets_at and keep the
+        // verdict — re-deriving it from the countdown would flip a real
+        // weekly to short as the reset approaches.
+        const key = `${s.id}:${m.label}`;
+        const prev = inferredLongWindow.get(key);
+        if (prev && prev.resetsAt === m.resets_at) {
+          long = prev.long;
+        } else {
+          long = m.resets_at - now >= RESET_LONG_WINDOW_MS
+            || (prev !== undefined && m.resets_at - prev.resetsAt >= RESET_LONG_WINDOW_MS);
+          inferredLongWindow.set(key, { resetsAt: m.resets_at, long });
+        }
+      }
+      if (!long) continue;
+      if (m.resets_at > now) {
+        if (soonest === null || m.resets_at < soonest) soonest = m.resets_at;
+      } else if (m.resets_at === resetRetryFor && now - m.resets_at < 3 * 60_000) {
+        providerLagging = true;
+      }
+    }
+  }
+  // The next reset moment and a provider-lag retry are both candidates —
+  // keep exactly one pending timer, whichever lands first. Forced
+  // usage-only refresh: the 60 s lastFetch guard would drop a plain one.
+  const candidates: { at: number; kind: "moment" | "retry" }[] = [];
+  if (soonest !== null) candidates.push({ at: soonest + 30_000, kind: "moment" });
+  if (providerLagging) candidates.push({ at: now + 90_000, kind: "retry" });
+  const pick = candidates.sort((a, b) => a.at - b.at)[0];
+  if (pick) {
+    const t = soonest;
+    resetRefreshTimer = window.setTimeout(() => {
+      resetRefreshTimer = undefined;
+      // providerLagging only matches resets_at === resetRetryFor and the
+      // retry clears it, so a lagging provider can retry exactly once.
+      resetRetryFor = pick.kind === "moment" ? t : null;
+      void refresh(true, true);
+    }, Math.min(pick.at - now, 2_147_000_000));
+  }
 }
 
 const logoPixels = new Map<string, number[]>();
@@ -4603,6 +4680,7 @@ async function initSettings(): Promise<void> {
   });
 
   const notifyToggles: [string, keyof Config][] = [
+    ["#notify-reset", "notifyReset"],
     ["#notify-almost", "notifyAlmostOut"],
     ["#notify-close", "notifyCuttingClose"],
     ["#notify-runout", "notifyWillRunOut"],
@@ -4612,6 +4690,8 @@ async function initSettings(): Promise<void> {
     box.checked = Boolean(config[key]);
     box.addEventListener("change", () => {
       void patchConfig({ [key]: box.checked } as Partial<Config>);
+      // notifyReset also arms/clears the reset-moment refresh timer.
+      if (key === "notifyReset") scheduleResetRefresh();
     });
   }
 
@@ -4731,6 +4811,7 @@ async function resetAllSettings(): Promise<void> {
     notifyAlmostOut: true,
     notifyCuttingClose: true,
     notifyWillRunOut: true,
+    notifyReset: true,
     spendTab: "today",
     spendMetric: "cost",
     showUsed: false,
@@ -4776,6 +4857,7 @@ function syncSettingsControls(): void {
   setCheck("#pacing", config.pacingAlways);
   setSelect("#timeformat", config.timeFormat);
   setSelect("#locale", config.locale);
+  setCheck("#notify-reset", config.notifyReset);
   setCheck("#notify-almost", config.notifyAlmostOut);
   setCheck("#notify-close", config.notifyCuttingClose);
   setCheck("#notify-runout", config.notifyWillRunOut);
@@ -4791,6 +4873,9 @@ function syncSettingsControls(): void {
   const autostart = document.querySelector<HTMLInputElement>("#autostart");
   if (autostart) autostart.checked = true;
   populatePinnedOptions();
+  // Resetting toggles programmatically fires no change events — re-arm
+  // (or clear) the reset-moment timer against the restored values.
+  scheduleResetRefresh();
 }
 
 // ---------------------------------------------------------------------------

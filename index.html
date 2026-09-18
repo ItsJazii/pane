@@ -178,8 +178,11 @@
         <button class="acc-head"><span data-i18n="settings.notifications">Notifications</span> <span class="chev">&#8964;</span></button>
         <div class="acc-body"><div class="acc-inner">
           <p class="settings-note" data-i18n="settings.notifyNote">
-            Windows toasts when a quota worsens — once per metric per reset period.
+            Windows toasts when a weekly or monthly window resets, or when a quota worsens — once per metric per reset period.
           </p>
+          <div class="setting-row">
+            <label class="toggle"><input id="notify-reset" type="checkbox" /> <span data-i18n="settings.notifyReset">Weekly limit reset (window back to 100%)</span></label>
+          </div>
           <div class="setting-row">
             <label class="toggle"><input id="notify-almost" type="checkbox" /> <span data-i18n="settings.notifyAlmost">Almost out (&lt;10% left)</span></label>
           </div>

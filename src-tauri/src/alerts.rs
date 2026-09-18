@@ -2,6 +2,8 @@
 //! - "Almost Out" — a metric drops under 10% remaining.
 //! - "Cutting It Close" — projected to finish the period with <10% spare.
 //! - "Will Run Out" — projected to hit the limit before the reset.
+//! - "Limit Reset" — a weekly-or-longer reset window rolled over and the
+//!   quota is full (short windows reset too often to be worth a toast).
 //!
 //! Anti-spam: an alert fires only when a quota *worsens while the app is
 //! running* (the first reading after launch is a silent baseline), fires
@@ -17,6 +19,7 @@ use std::sync::{Mutex, OnceLock};
 #[derive(Default, Clone)]
 struct MetricState {
     resets_at: Option<i64>,
+    prev_used: Option<f64>,
     seen: bool,
     almost_out: bool,
     close: bool,
@@ -80,12 +83,46 @@ fn period_changed(old: Option<i64>, new: Option<i64>) -> bool {
     }
 }
 
+/// Reset toasts only cover weekly-and-longer windows — 5-hour and daily
+/// windows roll too often to be worth a notification.
+const LONG_WINDOW_MS: i64 = 6 * 24 * 3_600_000;
+
+/// Is this metric's window long enough to toast about? The declared
+/// `period_ms` wins; when a provider reports no period, the jump between
+/// consecutive reset times IS the period.
+fn long_window(
+    period_ms: Option<i64>,
+    old_reset: Option<i64>,
+    new_reset: Option<i64>,
+) -> bool {
+    period_ms.is_some_and(|p| p >= LONG_WINDOW_MS)
+        || (period_ms.is_none()
+            && matches!((old_reset, new_reset), (Some(o), Some(n)) if n - o >= LONG_WINDOW_MS))
+}
+
+/// Compact duration for toast text: `6d 23h`, `4h 58m`, `12m`. Negative
+/// durations clamp to `0m`.
+fn compact_duration(ms: i64) -> String {
+    let ms = ms.max(0);
+    const MIN: i64 = 60_000;
+    const HOUR: i64 = 60 * MIN;
+    const DAY: i64 = 24 * HOUR;
+    if ms >= DAY {
+        format!("{}d {}h", ms / DAY, (ms % DAY) / HOUR)
+    } else if ms >= HOUR {
+        format!("{}h {}m", ms / HOUR, (ms % HOUR) / MIN)
+    } else {
+        format!("{}m", ms / MIN)
+    }
+}
+
 pub fn evaluate(snapshots: &[Snapshot], cfg: &Value) -> Vec<Alert> {
     let want = |key: &str| cfg.get(key).and_then(Value::as_bool).unwrap_or(false);
     let want_almost = want("notifyAlmostOut");
     let want_close = want("notifyCuttingClose");
     let want_runout = want("notifyWillRunOut");
-    if !(want_almost || want_close || want_runout) {
+    let want_reset = want("notifyReset");
+    if !(want_almost || want_close || want_runout || want_reset) {
         return Vec::new();
     }
 
@@ -125,6 +162,20 @@ pub fn evaluate(snapshots: &[Snapshot], cfg: &Value) -> Vec<Alert> {
             let key = format!("{}:{}", snapshot.id, metric.label);
             let entry = map.entry(key).or_default();
 
+            // A reset time that jumped forward means the quota window
+            // rolled over. The usage guard blocks sliding-window providers
+            // whose resets_at creeps forward every refresh while usage
+            // stays put: only a near-empty (or sharply dropped) reading
+            // counts as a real reset.
+            let advanced = matches!(
+                (entry.resets_at, metric.resets_at),
+                (Some(old), Some(new)) if new - old > 10 * 60_000
+            );
+            let rolled_over = entry.seen
+                && advanced
+                && long_window(metric.period_ms, entry.resets_at, metric.resets_at)
+                && (used < 2.0 || entry.prev_used.is_some_and(|p| used + 10.0 < p));
+
             if period_changed(entry.resets_at, metric.resets_at) {
                 *entry = MetricState::default();
             }
@@ -137,6 +188,53 @@ pub fn evaluate(snapshots: &[Snapshot], cfg: &Value) -> Vec<Alert> {
             let run_out_now = v == Verdict::RunOut;
             let baseline = !entry.seen;
             entry.seen = true;
+
+            if want_reset && rolled_over {
+                let shown = crate::i18n::metric_label(cfg, &metric.label);
+                let name = format!("{} {}", snapshot.name, shown);
+                let loc = crate::i18n::resolved_locale(cfg);
+                let next = metric.resets_at.map(|resets| {
+                    compact_duration(resets - chrono::Utc::now().timestamp_millis())
+                });
+                alerts.push(Alert {
+                    title: match loc {
+                        "zh" => "额度已重置".into(),
+                        "ru" => "Лимит сброшен".into(),
+                        _ => "Limit reset".into(),
+                    },
+                    body: match loc {
+                        "zh" => format!(
+                            "{}{}",
+                            if used < 2.0 {
+                                format!("{name} 已恢复到 100%。")
+                            } else {
+                                format!("{name} 已重置 — 可用 {left:.0}%。")
+                            },
+                            next.map_or(String::new(), |rel| format!(" 下次重置：{rel} 后。"))
+                        ),
+                        "ru" => format!(
+                            "{}{}",
+                            if used < 2.0 {
+                                format!("{name} снова 100%.")
+                            } else {
+                                format!("{name} сброшен — доступно {left:.0}%.")
+                            },
+                            next.map_or(String::new(), |rel| {
+                                format!(" Следующий сброс через {rel}.")
+                            })
+                        ),
+                        _ => format!(
+                            "{}{}",
+                            if used < 2.0 {
+                                format!("{name} is back to 100%.")
+                            } else {
+                                format!("{name} has reset — {left:.0}% available.")
+                            },
+                            next.map_or(String::new(), |rel| format!(" Next reset in {rel}."))
+                        ),
+                    },
+                });
+            }
 
             if !baseline {
                 let shown = crate::i18n::metric_label(cfg, &metric.label);
@@ -190,6 +288,8 @@ pub fn evaluate(snapshots: &[Snapshot], cfg: &Value) -> Vec<Alert> {
             entry.almost_out = almost_now;
             entry.close = close_now;
             entry.run_out = run_out_now;
+            // After the wipe, so a rollover restarts the usage history.
+            entry.prev_used = Some(used);
         }
     }
     alerts
@@ -289,6 +389,138 @@ mod tests {
         assert!(evaluate(&[make(50.0, false)], &cfg).is_empty());
         assert_eq!(evaluate(&[make(95.0, false)], &cfg).len(), 1);
         forget_snapshot(id);
+    }
+
+    #[test]
+    fn reset_fires_once_when_period_advances() {
+        let id = "codex@reset-advance";
+        let cfg = serde_json::json!({"notifyReset": true, "locale": "en"});
+        let period = 7 * 86_400_000_i64;
+        let t = chrono::Utc::now().timestamp_millis() + 2 * 3_600_000;
+        let make = |used, resets| Snapshot::ok(id, "Codex", None, vec![
+            crate::providers::Metric::progress("Weekly", used, None)
+                .with_reset(Some(resets), Some(period)),
+        ]);
+        forget_snapshot(id);
+        assert!(evaluate(&[make(80.0, t)], &cfg).is_empty());
+        assert!(evaluate(&[make(80.0, t)], &cfg).is_empty());
+        let alerts = evaluate(&[make(0.0, t + period)], &cfg);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].title, "Limit reset");
+        assert!(alerts[0].body.contains("Codex Weekly is back to 100%"));
+        assert!(alerts[0].body.contains("Next reset in"));
+        assert!(evaluate(&[make(0.0, t + period)], &cfg).is_empty());
+        forget_snapshot(id);
+    }
+
+    #[test]
+    fn reset_after_usage_resumed_reports_remaining() {
+        let id = "codex@reset-resumed";
+        let cfg = serde_json::json!({"notifyReset": true, "locale": "en"});
+        let period = 7 * 86_400_000_i64;
+        let t = chrono::Utc::now().timestamp_millis() + 2 * 3_600_000;
+        let make = |used, resets| Snapshot::ok(id, "Codex", None, vec![
+            crate::providers::Metric::progress("Weekly", used, None)
+                .with_reset(Some(resets), Some(period)),
+        ]);
+        forget_snapshot(id);
+        assert!(evaluate(&[make(80.0, t)], &cfg).is_empty());
+        // Usage already resumed (20% burned in the new window): report
+        // what's left, not a full quota.
+        let alerts = evaluate(&[make(20.0, t + period)], &cfg);
+        assert_eq!(alerts.len(), 1);
+        assert!(alerts[0].body.contains("has reset — 80% available"));
+        assert!(!alerts[0].body.contains("100%"));
+        forget_snapshot(id);
+    }
+
+    #[test]
+    fn reset_fires_for_untouched_window() {
+        let id = "codex@reset-untouched";
+        let cfg = serde_json::json!({"notifyReset": true, "locale": "en"});
+        let period = 7 * 86_400_000_i64;
+        let t = chrono::Utc::now().timestamp_millis() + 3_600_000;
+        let make = |used, resets| Snapshot::ok(id, "Codex", None, vec![
+            crate::providers::Metric::progress("Weekly", used, None)
+                .with_reset(Some(resets), Some(period)),
+        ]);
+        forget_snapshot(id);
+        assert!(evaluate(&[make(0.0, t)], &cfg).is_empty());
+        assert_eq!(evaluate(&[make(0.0, t + period)], &cfg).len(), 1);
+        forget_snapshot(id);
+    }
+
+    #[test]
+    fn sliding_window_drift_does_not_fire() {
+        let id = "codex@reset-drift";
+        let cfg = serde_json::json!({"notifyReset": true, "locale": "en"});
+        let t = chrono::Utc::now().timestamp_millis() + 3_600_000;
+        let make = |used, resets| Snapshot::ok(id, "Codex", None, vec![
+            crate::providers::Metric::progress("Weekly", used, None)
+                .with_reset(Some(resets), Some(7 * 86_400_000)),
+        ]);
+        forget_snapshot(id);
+        assert!(evaluate(&[make(60.0, t)], &cfg).is_empty());
+        // resets_at crept forward while usage climbed: a sliding window,
+        // not a rollover.
+        assert!(evaluate(&[make(62.0, t + 15 * 60_000)], &cfg).is_empty());
+        forget_snapshot(id);
+    }
+
+    #[test]
+    fn short_window_reset_is_silent() {
+        let id = "codex@reset-short";
+        let cfg = serde_json::json!({"notifyReset": true, "locale": "en"});
+        let period = 5 * 3_600_000_i64;
+        let t = chrono::Utc::now().timestamp_millis() + 3_600_000;
+        let make = |used, resets| Snapshot::ok(id, "Codex", None, vec![
+            crate::providers::Metric::progress("5 Hours", used, None)
+                .with_reset(Some(resets), Some(period)),
+        ]);
+        forget_snapshot(id);
+        assert!(evaluate(&[make(80.0, t)], &cfg).is_empty());
+        // A real rollover — but 5-hour windows don't toast.
+        assert!(evaluate(&[make(0.0, t + period)], &cfg).is_empty());
+        forget_snapshot(id);
+    }
+
+    #[test]
+    fn long_window_inferred_from_reset_jump_when_period_missing() {
+        let id = "codex@reset-noperiod";
+        let cfg = serde_json::json!({"notifyReset": true, "locale": "en"});
+        let t = chrono::Utc::now().timestamp_millis() + 3_600_000;
+        let make = |used, resets| Snapshot::ok(id, "Codex", None, vec![
+            crate::providers::Metric::progress("Weekly", used, None)
+                .with_reset(Some(resets), None),
+        ]);
+        forget_snapshot(id);
+        assert!(evaluate(&[make(80.0, t)], &cfg).is_empty());
+        // No declared period: a 7-day jump between resets IS the window.
+        assert_eq!(evaluate(&[make(0.0, t + 7 * 86_400_000)], &cfg).len(), 1);
+        forget_snapshot(id);
+    }
+
+    #[test]
+    fn reset_needs_baseline() {
+        let id = "codex@reset-baseline";
+        let cfg = serde_json::json!({"notifyReset": true, "locale": "en"});
+        let t = chrono::Utc::now().timestamp_millis() + 3_600_000;
+        let make = |used, resets| Snapshot::ok(id, "Codex", None, vec![
+            crate::providers::Metric::progress("Weekly", used, None)
+                .with_reset(Some(resets), Some(7 * 86_400_000)),
+        ]);
+        forget_snapshot(id);
+        // The first reading after launch is a silent baseline.
+        assert!(evaluate(&[make(0.0, t)], &cfg).is_empty());
+        forget_snapshot(id);
+    }
+
+    #[test]
+    fn compact_duration_formats() {
+        assert_eq!(compact_duration(6 * 86_400_000 + 23 * 3_600_000), "6d 23h");
+        assert_eq!(compact_duration(4 * 3_600_000 + 58 * 60_000), "4h 58m");
+        assert_eq!(compact_duration(12 * 60_000), "12m");
+        assert_eq!(compact_duration(-5_000), "0m");
     }
 
     #[test]
