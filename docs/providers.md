@@ -253,14 +253,17 @@ Ground rules that apply to every provider:
   and a 200 proves the key is real.
 - **Shows:** a Prepaid/Postpaid plan chip with Balance (and Vouchers
   when any are held) plus a "Credits used" percent bar metered against
-  the highest balance Pane has seen locally. Step Plan keys get a
+  the highest balance Pane has seen locally. .ai accounts display in
+  USD; .com accounts bill in CNY and display in ¥. Step Plan keys get a
   "Step Plan" chip and a "Monthly Credits — dashboard only" row:
   StepFun exposes plan quota only on its web dashboard
   (platform.stepfun.ai), not through the API key, so the card says so
   instead of guessing. Local spend for `step-*` models used through
   Claude Code, Codex, or OpenCode against the Step Plan endpoint routes
   to this card (models.dev catalog, falling back to baked StepFun list
-  prices).
+  prices). Models with no public token rate — `step-5-preview`,
+  `step-router-v1`, per-image `step-image-edit-2`, TTS/ASR — stay
+  unpriced ⚠ rather than guess.
 
 ## Kimi Code
 

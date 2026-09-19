@@ -4374,13 +4374,15 @@ mod tests {
         data.days.insert((1000, "claude-fable-5".into()), (5.0, 100.0));
         data.days.insert((1000, "step-3.7-flash".into()), (0.5, 50.0));
         data.days.insert((1001, "step-3.5-flash".into()), (0.2, 20.0));
+        // The unpublished preview routes by prefix too (stays unpriced ⚠).
+        data.days.insert((1001, "step-5-preview".into()), (0.1, 10.0));
         data.unpriced.insert("step-3.7-flash".into(), 3);
         data.unpriced.insert("mystery-model".into(), 1);
 
         let sf = split_models(&mut data, "step-");
         assert_eq!(data.days.len(), 1);
         assert_eq!(data.unpriced.len(), 1);
-        assert_eq!(sf.days.len(), 2);
+        assert_eq!(sf.days.len(), 3);
         assert_eq!(sf.days[&(1000, "step-3.7-flash".to_string())], (0.5, 50.0));
         assert_eq!(sf.unpriced.get("step-3.7-flash"), Some(&3));
     }
