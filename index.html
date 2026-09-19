@@ -233,6 +233,16 @@
             <input id="key-stepfun" type="password" placeholder="API key" data-i18n-placeholder="settings.keyPlaceholder" />
             <button data-save="stepfun" data-i18n="settings.save">Save</button>
           </div>
+          <div class="setting-row">
+            <label for="stepfun-plan" data-i18n="settings.stepfunPlan">Step Plan tier</label>
+            <select id="stepfun-plan">
+              <option value="" data-i18n="settings.stepfunPlanUnset">Not set</option>
+              <option value="400">Flash Mini · 400M</option>
+              <option value="1600">Flash Plus · 1,600M</option>
+              <option value="8000">Flash Pro · 8,000M</option>
+              <option value="40000">Flash Max · 40,000M</option>
+            </select>
+          </div>
           <div class="key-row">
             <label for="key-minimax">MiniMax</label>
             <input id="key-minimax" type="password" placeholder="API key (auto-detected from CLI)" data-i18n-placeholder="settings.keyPhMinimax" />

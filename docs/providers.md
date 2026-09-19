@@ -254,11 +254,16 @@ Ground rules that apply to every provider:
 - **Shows:** a Prepaid/Postpaid plan chip with Balance (and Vouchers
   when any are held) plus a "Credits used" percent bar metered against
   the highest balance Pane has seen locally. .ai accounts display in
-  USD; .com accounts bill in CNY and display in ¥. Step Plan keys get a
-  "Step Plan" chip and a "Monthly Credits — dashboard only" row:
-  StepFun exposes plan quota only on its web dashboard
-  (platform.stepfun.ai), not through the API key, so the card says so
-  instead of guessing. Local spend for `step-*` models used through
+  USD; .com accounts bill in CNY and display in ¥. When the key also
+  answers `/step_plan/v1/models`, the card switches to plan mode: a
+  "Credits used" row estimating this month's Step Plan Credits from
+  local logs (USD spend × 7, since 1M Credit = ¥1 at model list price).
+  StepFun's API has no plan-quota endpoint — the estimate is all it can
+  show, and it clears at month end like the real pool. Pick your tier in
+  Settings → API keys → StepFun (Flash Mini 400M / Plus 1,600M / Pro
+  8,000M / Max 40,000M) to turn the estimate into a bar against that
+  monthly pool; the wallet Balance row stays separate and is unaffected
+  by plan usage. Local spend for `step-*` models used through
   Claude Code, Codex, or OpenCode against the Step Plan endpoint routes
   to this card (models.dev catalog, falling back to baked StepFun list
   prices; `step-5-preview` is priced from Artificial Analysis — $1.00 in /

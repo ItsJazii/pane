@@ -146,6 +146,9 @@ fn config_with_defaults(mut cfg: Value) -> Value {
     obj.entry("starPromptLastMs").or_insert(json!(0));
     obj.entry("reduceAnimations").or_insert(json!(false));
     obj.entry("locale").or_insert(json!("auto"));
+    // StepFun's plan tier pick — null = "Not set" (Credits row stays an
+    // estimate-only text row instead of a bar against a monthly pool).
+    obj.entry("stepfunPlanCredits").or_insert(Value::Null);
     cfg
 }
 
@@ -198,6 +201,7 @@ const CONFIG_KEYS: &[&str] = &[
     "starPromptLastMs",
     "reduceAnimations",
     "locale",
+    "stepfunPlanCredits",
 ];
 
 static CONFIG_WRITE: Mutex<()> = Mutex::new(());

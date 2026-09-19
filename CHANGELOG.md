@@ -15,8 +15,11 @@
 - **StepFun card.** Paste a StepFun API key: account balance (and
   vouchers) with the usual credits-used meter, plus local spend for
   `step-*` models used through Claude Code / Codex / OpenCode against
-  the Step Plan endpoint. StepFun only exposes Step Plan monthly
-  Credits on its web dashboard, so the card says so instead of guessing.
+  the Step Plan endpoint. Step Plan keys get a "Credits used" estimate
+  of this month's plan Credits computed from those local spend logs
+  (USD × 7; 1M Credit = ¥1) — StepFun's API reports no plan quota.
+  Picking your tier in Settings → API keys → StepFun draws the estimate
+  as a bar against the monthly pool (Flash Mini–Max, 400M–40,000M).
 - **Keyless Claude config dirs count toward spend.** Claude Code
   sessions run from an API-key-only `CLAUDE_CONFIG_DIR` (e.g. StepFun's)
   are now included in local spend.

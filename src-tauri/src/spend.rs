@@ -22,6 +22,23 @@ use crate::providers;
 
 pub const TREND_DAYS: usize = 30;
 
+/// id → month-to-date USD from the last completed scan. `None` until the
+/// first scan finishes so a consumer can tell "not computed yet" from a
+/// provider that genuinely spent nothing.
+static MONTH_COST: OnceLock<Mutex<Option<HashMap<String, f64>>>> = OnceLock::new();
+
+/// Month-to-date local USD for a provider, from the last completed scan.
+/// `None` before the first scan; `Some(0.0)` for an id the scan didn't
+/// produce; `Some(cost)` otherwise.
+pub fn month_to_date_cost(id: &str) -> Option<f64> {
+    MONTH_COST
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()?
+        .as_ref()
+        .map(|m| m.get(id).copied().unwrap_or(0.0))
+}
+
 #[derive(Serialize, Clone)]
 pub struct ModelSpend {
     pub model: String,
@@ -52,6 +69,10 @@ pub struct ProviderSpend {
     /// under-report and the ⚠ says so.
     pub unpriced: u64,
     pub unpriced_models: Vec<String>,
+    /// USD spent since the 1st of the current local calendar month.
+    /// StepFun's Step Plan bills a monthly Credit pool with no quota API,
+    /// so the card estimates Credits from this number.
+    pub month_cost: f64,
 }
 
 impl ProviderSpend {
@@ -502,6 +523,12 @@ fn finalize_models(raw: HashMap<String, (f64, f64)>, window_cost: f64) -> Vec<Mo
 
 fn build_spend(id: impl Into<String>, name: impl Into<String>, data: FileData) -> ProviderSpend {
     let today = Local::now().date_naive().num_days_from_ce();
+    // Day numbers are days since CE, so the local month's first day is the
+    // month-to-date floor.
+    let month_start = Local::now()
+        .date_naive()
+        .with_day(1)
+        .map(|d| d.num_days_from_ce());
     let mut unpriced_models: Vec<String> = data.unpriced.keys().cloned().collect();
     unpriced_models.sort();
     unpriced_models.truncate(5);
@@ -515,6 +542,7 @@ fn build_spend(id: impl Into<String>, name: impl Into<String>, data: FileData) -
         trend: vec![0.0; TREND_DAYS],
         unpriced: data.unpriced.values().sum(),
         unpriced_models,
+        month_cost: 0.0,
     };
     let mut models: [HashMap<String, (f64, f64)>; 3] =
         [HashMap::new(), HashMap::new(), HashMap::new()];
@@ -532,6 +560,9 @@ fn build_spend(id: impl Into<String>, name: impl Into<String>, data: FileData) -
         }
         if day == today - 1 {
             bump(1, &mut sp.yesterday);
+        }
+        if month_start.is_some_and(|m| day >= m) {
+            sp.month_cost += cost;
         }
         if day > today - TREND_DAYS as i32 {
             bump(2, &mut sp.last30);
@@ -3047,6 +3078,15 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
         pricing::note_unpriced();
     }
     save_persisted_cache();
+    // Publish before has_data filters: a scanned-but-quiet provider still
+    // reads as Some(0.0) rather than "no scan yet".
+    if let Ok(mut slot) = MONTH_COST.get_or_init(|| Mutex::new(None)).lock() {
+        *slot = Some(
+            list.iter()
+                .map(|sp| (sp.id.clone(), sp.month_cost))
+                .collect(),
+        );
+    }
     list.into_iter().filter(ProviderSpend::has_data).collect()
 }
 
@@ -4379,6 +4419,22 @@ mod tests {
         assert_eq!(mm.days.len(), 2);
         assert_eq!(mm.days[&(1000, "MiniMax-M3".to_string())], (0.5, 50.0));
         assert_eq!(mm.unpriced.get("MiniMax-Unknown"), Some(&3));
+    }
+
+    #[test]
+    fn build_spend_counts_month_to_date() {
+        let today = Local::now().date_naive().num_days_from_ce();
+        let month_start = Local::now()
+            .date_naive()
+            .with_day(1)
+            .unwrap()
+            .num_days_from_ce();
+        let mut data = FileData::default();
+        // Last month's final day: $5 that must not count toward month_cost.
+        data.days.insert((month_start - 1, "m".into()), (5.0, 100.0));
+        data.days.insert((today, "m".into()), (2.0, 50.0));
+        let sp = build_spend("test", "Test", data);
+        assert_eq!(sp.month_cost, 2.0);
     }
 
     #[test]

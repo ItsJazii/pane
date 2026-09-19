@@ -122,6 +122,7 @@ interface ProviderSpend {
   trend: number[];
   unpriced: number;
   unpriced_models: string[];
+  month_cost: number;
 }
 
 /// How to get each provider signed in again, for the ⚠ Outdated tooltip.
@@ -225,6 +226,7 @@ interface Config {
   starPromptLastMs: number;
   reduceAnimations: boolean;
   locale: LocalePref;
+  stepfunPlanCredits: number | null;
 }
 
 const FRONTEND_CONFIG_KEYS = [
@@ -259,6 +261,7 @@ const FRONTEND_CONFIG_KEYS = [
   "starPromptLastMs",
   "reduceAnimations",
   "locale",
+  "stepfunPlanCredits",
 ] as const satisfies readonly (keyof Config)[];
 type _AssertAllConfigKeys = Exclude<keyof Config, (typeof FRONTEND_CONFIG_KEYS)[number]> extends never
   ? true
@@ -453,9 +456,14 @@ let config: Config = {
   starPromptLastMs: 0,
   reduceAnimations: false,
   locale: "auto",
+  stepfunPlanCredits: null,
 };
 let lastFetch = 0;
 let refreshing = false;
+// The StepFun plan bar reads the spend scan's month-to-date; on a cold
+// start the usage fetch usually finishes first, so we re-fetch usage once
+// when spend lands (see refresh()'s tail).
+let stepPlanNudged = false;
 // A forced refresh requested while one was already in flight (saving an
 // API key races the auto-refresh timer). Dropping it would leave the new
 // state unfetched and the status line stuck on the save message.
@@ -3462,6 +3470,23 @@ async function refresh(force = false, usageOnly = false): Promise<void> {
   }
   if (lastSnapshots.length) ensureLayout();
   if (!customizeOpen && lastSnapshots.length) renderIfVisible();
+  // Past the finally block, so `refreshing` is false and a forced pass is
+  // safe: swap StepFun's "Estimating…" placeholder for the real estimate.
+  // Keyed on the scan having landed, not on a StepFun entry: a quiet
+  // provider is filtered out of the list, yet its estimate (0) is ready.
+  if (
+    !stepPlanNudged &&
+    spend &&
+    lastSnapshots.some(
+      (s) =>
+        s.id === "stepfun" &&
+        s.status === "ok" &&
+        s.metrics.some((m) => m.detail === "Estimating from session logs…"),
+    )
+  ) {
+    stepPlanNudged = true;
+    void refresh(true, true);
+  }
 }
 
 function scheduleAutoRefresh(): void {
@@ -4812,6 +4837,15 @@ async function initSettings(): Promise<void> {
     requestTraySync();
   });
 
+  const stepfunPlan = document.querySelector<HTMLSelectElement>("#stepfun-plan")!;
+  stepfunPlan.value =
+    config.stepfunPlanCredits == null ? "" : String(config.stepfunPlanCredits);
+  stepfunPlan.addEventListener("change", () => {
+    const v = stepfunPlan.value;
+    // Await the write: the backend reads the tier from config.json.
+    void patchConfig({ stepfunPlanCredits: v ? Number(v) : null }).then(() => refresh(true, true));
+  });
+
   const notifyToggles: [string, keyof Config][] = [
     ["#notify-reset", "notifyReset"],
     ["#notify-almost", "notifyAlmostOut"],
@@ -4990,6 +5024,10 @@ function syncSettingsControls(): void {
   setCheck("#pacing", config.pacingAlways);
   setSelect("#timeformat", config.timeFormat);
   setSelect("#locale", config.locale);
+  setSelect(
+    "#stepfun-plan",
+    config.stepfunPlanCredits == null ? "" : String(config.stepfunPlanCredits),
+  );
   setCheck("#notify-reset", config.notifyReset);
   setCheck("#notify-almost", config.notifyAlmostOut);
   setCheck("#notify-close", config.notifyCuttingClose);

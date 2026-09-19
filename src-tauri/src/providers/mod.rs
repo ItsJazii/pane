@@ -607,18 +607,21 @@ pub(crate) fn account_scan_roots() -> Vec<std::path::PathBuf> {
     roots
 }
 
+/// One value from `%APPDATA%\Pane\config.json` — provider-facing read for
+/// settings the frontend persists (e.g. StepFun's plan-tier pick). `None`
+/// when the file is missing, unparseable, or lacks the key.
+pub fn config_value(key: &str) -> Option<serde_json::Value> {
+    let raw = std::fs::read_to_string(config_dir().join("config.json")).ok()?;
+    let cfg = serde_json::from_str::<serde_json::Value>(raw.trim_start_matches('\u{feff}')).ok()?;
+    cfg.get(key).cloned()
+}
+
 /// True when Customize has this provider switched off. Disabled providers
 /// must not make network calls — including a folded-in wallet fetch that
 /// lives on another card (Kimi Code's Moonshot API bar).
 pub fn provider_disabled(id: &str) -> bool {
-    let Ok(raw) = std::fs::read_to_string(config_dir().join("config.json")) else {
-        return false;
-    };
-    let Ok(cfg) = serde_json::from_str::<serde_json::Value>(raw.trim_start_matches('\u{feff}'))
-    else {
-        return false;
-    };
-    cfg.get("disabled")
+    config_value("disabled")
+        .as_ref()
         .and_then(serde_json::Value::as_array)
         .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(id)))
 }
