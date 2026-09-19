@@ -1040,6 +1040,10 @@ fn builtin_price(canonical: &str) -> Option<Price> {
         // last-segment peel above covers `stepfun/step-*` gateway slugs.
         "step-3.7-flash" => Some(Price::flat(0.20, 1.15, 0.04, 0.20)),
         "step-3.5-flash" | "step-3.5-flash-2603" => Some(Price::flat(0.10, 0.30, 0.02, 0.10)),
+        // step-5-preview is absent from StepFun's own price pages; the rate
+        // comes from Artificial Analysis (artificialanalysis.ai/models/step-5,
+        // 2026-09-19): $1.00 in / $2.70 out, 95% cache discount → $0.05.
+        "step-5-preview" => Some(Price::flat(1.00, 2.70, 0.05, 1.00)),
         // StepFun audio models (platform.stepfun.ai pricing, USD/MTok).
         "stepaudio-2.5-realtime" => Some(Price::flat(1.50, 10.00, 0.30, 1.50)),
         "stepaudio-2.5-chat" => Some(Price::flat(1.50, 3.50, 0.30, 1.50)),
@@ -1057,8 +1061,8 @@ fn builtin_price(canonical: &str) -> Option<Price> {
         "step-audio-r1.5" => Some(Price::flat(1.43, 15.00, 0.29, 1.43)),
         // Deliberately unpriced — StepFun publishes no token rate for
         // these, so rows keep the unpriced ⚠ instead of a guessed dollar
-        // figure: step-5-preview, step-router-v1, step-overture-preview,
-        // step-2x-large, step-gui; step-image-edit-2 bills per image;
+        // figure: step-router-v1, step-overture-preview, step-2x-large,
+        // step-gui; step-image-edit-2 bills per image;
         // TTS/ASR bill per character/hour.
         _ => None,
     }
@@ -1511,8 +1515,12 @@ mod tests {
             let p = super::builtin_price(slug).unwrap_or_else(|| panic!("{slug} did not price"));
             assert_eq!((p.input, p.output), (0.0, 0.0), "{slug}");
         }
-        // No public token rate — must stay unpriced rather than guess.
-        assert!(super::builtin_price("step-5-preview").is_none());
+        // step-5-preview: Artificial Analysis rate ($1.00 / $2.70, 95% cache discount).
+        let p = super::builtin_price("step-5-preview").expect("step-5-preview prices");
+        assert_eq!((p.input, p.output, p.cache_read, p.cache_write), (1.00, 2.70, 0.05, 1.00));
+        for slug in ["step-router-v1", "step-overture-preview"] {
+            assert!(super::builtin_price(slug).is_none(), "{slug}");
+        }
     }
 
     #[test]
