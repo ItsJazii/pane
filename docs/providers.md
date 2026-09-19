@@ -264,7 +264,10 @@ Ground rules that apply to every provider:
   prices; `step-5-preview` is priced from Artificial Analysis — $1.00 in /
   $2.70 out / $0.05 cache hit — because StepFun's own price pages omit
   it). Models with no public token rate — `step-router-v1`, per-image
-  `step-image-edit-2`, TTS/ASR — stay unpriced ⚠ rather than guess.
+  `step-image-edit-2`, TTS/ASR — stay unpriced ⚠ rather than guess. A
+  Claude Code run from its own `CLAUDE_CONFIG_DIR` (e.g. `~/.claude-step`)
+  with no Claude login is scanned too, so API-key sessions against
+  StepFun count here.
 
 ## Kimi Code
 

@@ -17,6 +17,9 @@
   `step-*` models used through Claude Code / Codex / OpenCode against
   the Step Plan endpoint. StepFun only exposes Step Plan monthly
   Credits on its web dashboard, so the card says so instead of guessing.
+- **Keyless Claude config dirs count toward spend.** Claude Code
+  sessions run from an API-key-only `CLAUDE_CONFIG_DIR` (e.g. StepFun's)
+  are now included in local spend.
 
 ## 0.4.52 — 2026-09-16
 

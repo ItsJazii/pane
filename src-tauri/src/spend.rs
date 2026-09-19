@@ -1583,9 +1583,10 @@ fn split_kimi_routed(all: &mut FileData) -> FileData {
     out
 }
 
-/// Claude Code writes one JSONL per session under ~/.claude/projects. Each
-/// assistant line carries usage token counts and usually a precomputed
-/// costUSD, which we prefer over our own pricing table.
+/// Claude Code writes one JSONL per session under <CLAUDE_CONFIG_DIR>/
+/// projects (~/.claude by default). Each assistant line carries usage
+/// token counts and usually a precomputed costUSD, which we prefer over
+/// our own pricing table.
 ///
 /// Claude Code can also run against MiniMax's Anthropic-compatible endpoint
 /// (ANTHROPIC_BASE_URL); those sessions log MiniMax models into the same
@@ -1602,6 +1603,18 @@ fn claude(extra: FileData) -> (ProviderSpend, FileData, FileData, FileData, File
     let mut all = FileData::default();
     for file in files {
         merge_data(&mut all, claude_file(&file));
+    }
+    // Keyless config dirs (API-key sessions against StepFun/MiniMax/…
+    // endpoints, e.g. CLAUDE_CONFIG_DIR=~/.claude-step) log the third-party
+    // model slug, so they join before the splits and route by model like
+    // everything else; native Claude rows there (an API key pointed
+    // straight at Anthropic) stay on the Claude card.
+    for dir in providers::claude::discover_keyless_dirs() {
+        let mut files2 = Vec::new();
+        recent_jsonl_files(&dir.join("projects"), &mut files2);
+        for file in files2 {
+            merge_data(&mut all, claude_file(&file));
+        }
     }
     // Usage from other scanners that belongs on this card (pi sessions)
     // driving a Claude account) joins before the splits below, so it gets
