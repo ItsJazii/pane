@@ -243,6 +243,25 @@ Ground rules that apply to every provider:
   notification). Saving a key in Settings turns that provider on if
   Customize had it off.
 
+## StepFun
+
+- **Reads:** pasted key or env var only (`STEPFUN_API_KEY`,
+  `STEP_API_KEY`).
+- **Calls:** `api.stepfun.ai/v1/accounts` then `api.stepfun.com` on a
+  401 (CN keys live on the mirror host). If both reject the key it may
+  be a Step Plan key — `/step_plan/v1/models` is probed on both hosts
+  and a 200 proves the key is real.
+- **Shows:** a Prepaid/Postpaid plan chip with Balance (and Vouchers
+  when any are held) plus a "Credits used" percent bar metered against
+  the highest balance Pane has seen locally. Step Plan keys get a
+  "Step Plan" chip and a "Monthly Credits — dashboard only" row:
+  StepFun exposes plan quota only on its web dashboard
+  (platform.stepfun.ai), not through the API key, so the card says so
+  instead of guessing. Local spend for `step-*` models used through
+  Claude Code, Codex, or OpenCode against the Step Plan endpoint routes
+  to this card (models.dev catalog, falling back to baked StepFun list
+  prices).
+
 ## Kimi Code
 
 - **Reads:** `%USERPROFILE%\.kimi-code\credentials\kimi-code.json` (honors

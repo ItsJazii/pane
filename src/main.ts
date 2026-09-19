@@ -33,6 +33,7 @@ import hermesIcon from "./assets/providers/hermes.svg?raw";
 import kimiIcon from "./assets/providers/kimi.svg?raw";
 import minimaxIcon from "./assets/providers/minimax.svg?raw";
 import onenewapiIcon from "./assets/providers/onenewapi.svg?raw";
+import stepfunIcon from "./assets/providers/stepfun.svg?raw";
 import sub2apiIcon from "./assets/providers/sub2api.svg?raw";
 import opencodeIcon from "./assets/providers/opencode.svg?raw";
 import openrouterIcon from "./assets/providers/openrouter.svg?raw";
@@ -62,6 +63,7 @@ const PROVIDER_ICONS: Record<string, string> = {
   sub2api: sub2apiIcon,
   opencode: opencodeIcon,
   openrouter: openrouterIcon,
+  stepfun: stepfunIcon,
   zai: zaiIcon,
 };
 
@@ -312,6 +314,7 @@ const ALL_PROVIDERS: [string, string][] = [
   ["qwen", "Qwen Code"],
   ["hermes", "Hermes"],
   ["kimi", "Kimi Code"],
+  ["stepfun", "StepFun"],
 ];
 
 function providerDisplayName(id: string): string {
@@ -373,6 +376,10 @@ const PROVIDER_LINKS: Record<string, { label: string; url: string }[]> = {
     { label: "Console", url: "https://www.kimi.com/code/console" },
     { label: "Quota", url: "https://www.kimi.com/membership/subscription?tab=quota" },
     { label: "API", url: "https://platform.moonshot.ai/console" },
+  ],
+  stepfun: [
+    { label: "Platform", url: "https://platform.stepfun.ai/" },
+    { label: "Docs", url: "https://platform.stepfun.ai/docs/en/step-plan/overview" },
   ],
 };
 

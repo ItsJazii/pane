@@ -12,6 +12,11 @@
 - **Star prompt.** Once the install is a few days old, Pane occasionally
   (at most twice a day) asks for a GitHub star when the popover opens;
   Star or "Don't ask again" retires it for good.
+- **StepFun card.** Paste a StepFun API key: account balance (and
+  vouchers) with the usual credits-used meter, plus local spend for
+  `step-*` models used through Claude Code / Codex / OpenCode against
+  the Step Plan endpoint. StepFun only exposes Step Plan monthly
+  Credits on its web dashboard, so the card says so instead of guessing.
 
 ## 0.4.52 — 2026-09-16
 

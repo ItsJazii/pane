@@ -19,6 +19,7 @@ pub mod onenewapi;
 pub mod opencode;
 pub mod openrouter;
 pub mod qwen;
+pub mod stepfun;
 pub mod sub2api;
 pub mod zai;
 

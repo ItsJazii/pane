@@ -1591,7 +1591,7 @@ fn split_kimi_routed(all: &mut FileData) -> FileData {
 /// (ANTHROPIC_BASE_URL); those sessions log MiniMax models into the same
 /// files. That usage is split out and returned separately — it belongs on
 /// the MiniMax card, not Claude's.
-fn claude(extra: FileData) -> (ProviderSpend, FileData, FileData, FileData) {
+fn claude(extra: FileData) -> (ProviderSpend, FileData, FileData, FileData, FileData) {
     let root = std::env::var("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| dirs::home_dir().unwrap_or_default().join(".claude"))
@@ -1615,7 +1615,10 @@ fn claude(extra: FileData) -> (ProviderSpend, FileData, FileData, FileData) {
     // Kimi slugs likewise mean Moonshot billed the session (Anthropic-
     // compatible endpoint or a router) — Kimi's card owns those dollars.
     let kimi_routed = split_kimi_routed(&mut all);
-    (build_spend("claude", "Claude", all), minimax, qwen_via_aihubmix, kimi_routed)
+    // step-* models mean the session ran against StepFun's Step Plan
+    // Anthropic-compatible endpoint — the StepFun card owns those rows.
+    let stepfun = split_models(&mut all, "step-");
+    (build_spend("claude", "Claude", all), minimax, qwen_via_aihubmix, kimi_routed, stepfun)
 }
 
 /// Spend for each discovered extra Claude account, scanned from that
@@ -1623,11 +1626,12 @@ fn claude(extra: FileData) -> (ProviderSpend, FileData, FileData, FileData) {
 /// scopes never mix). MiniMax/qwen-routed rows split out the same way the
 /// default account's do and are handed back for the caller to merge into
 /// those cards.
-fn claude_extra_accounts() -> (Vec<ProviderSpend>, FileData, FileData, FileData) {
+fn claude_extra_accounts() -> (Vec<ProviderSpend>, FileData, FileData, FileData, FileData) {
     let mut spends = Vec::new();
     let mut minimax_extra = FileData::default();
     let mut qwen_extra = FileData::default();
     let mut kimi_extra = FileData::default();
+    let mut stepfun_extra = FileData::default();
     for acct in providers::claude::discover_extra_accounts() {
         let root = acct.dir.join("projects");
         let mut files = Vec::new();
@@ -1639,9 +1643,10 @@ fn claude_extra_accounts() -> (Vec<ProviderSpend>, FileData, FileData, FileData)
         merge_data(&mut minimax_extra, split_models(&mut all, "MiniMax"));
         merge_data(&mut qwen_extra, split_models(&mut all, "qwen"));
         merge_data(&mut kimi_extra, split_kimi_routed(&mut all));
+        merge_data(&mut stepfun_extra, split_models(&mut all, "step-"));
         spends.push(build_spend(acct.id, acct.name, all));
     }
-    (spends, minimax_extra, qwen_extra, kimi_extra)
+    (spends, minimax_extra, qwen_extra, kimi_extra, stepfun_extra)
 }
 
 /// One Claude session file. A restored checkpoint skips the 1 MB
@@ -1699,6 +1704,13 @@ fn minimax(extra: FileData) -> ProviderSpend {
         }
     }
     build_spend("minimax", "MiniMax", data)
+}
+
+/// StepFun spend: whatever other CLIs logged against the Step Plan
+/// endpoint (step-* models split out of the Claude/Codex/OpenCode scans
+/// and passed in). StepFun publishes no local usage store of its own.
+fn stepfun(extra: FileData) -> ProviderSpend {
+    build_spend("stepfun", "StepFun", extra)
 }
 
 /// Which spend slice a Hermes row belongs to. MiniMax- and OpenRouter-routed
@@ -2192,7 +2204,7 @@ fn codex_scan(home: &Path) -> FileData {
     all
 }
 
-fn codex(extra: FileData) -> (ProviderSpend, FileData) {
+fn codex(extra: FileData) -> (ProviderSpend, FileData, FileData) {
     let home = std::env::var("CODEX_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| dirs::home_dir().unwrap_or_default().join(".codex"));
@@ -2203,21 +2215,26 @@ fn codex(extra: FileData) -> (ProviderSpend, FileData) {
     // them as "kimi-oauth/k3" etc.) bill the Kimi plan, not the ChatGPT
     // subscription — hand them to the Kimi card.
     let kimi_routed = split_kimi_routed(&mut all);
-    (build_spend("codex", "Codex", all), kimi_routed)
+    // step-* slugs mean the session ran against StepFun's Step Plan
+    // endpoint — those dollars belong on the StepFun card.
+    let stepfun_routed = split_models(&mut all, "step-");
+    (build_spend("codex", "Codex", all), kimi_routed, stepfun_routed)
 }
 
 /// Spend for each discovered extra Codex account, scanned from that
-/// account's own home (each keeps its own sessions/ logs). Kimi-routed
-/// rows split out the same way the default account's do.
-fn codex_extra_accounts() -> (Vec<ProviderSpend>, FileData) {
+/// account's own home (each keeps its own sessions/ logs). Kimi- and
+/// StepFun-routed rows split out the same way the default account's do.
+fn codex_extra_accounts() -> (Vec<ProviderSpend>, FileData, FileData) {
     let mut spends = Vec::new();
     let mut kimi_extra = FileData::default();
+    let mut stepfun_extra = FileData::default();
     for acct in providers::codex::discover_extra_accounts() {
         let mut data = codex_scan(&acct.dir);
         merge_data(&mut kimi_extra, split_kimi_routed(&mut data));
+        merge_data(&mut stepfun_extra, split_models(&mut data, "step-"));
         spends.push(build_spend(acct.id, acct.name, data));
     }
-    (spends, kimi_extra)
+    (spends, kimi_extra, stepfun_extra)
 }
 
 // ---------------------------------------------------------------------------
@@ -2479,35 +2496,46 @@ fn grok_line(model_by_pid: &mut HashMap<i64, String>, line: &str, data: &mut Fil
 /// spend slice — their dollars belong to that account, and the split gives
 /// the card its Today/Yesterday/30d rows and Usage Trend; everything else
 /// stays under OpenCode.
-/// Returns OpenCode's spend plus the AihubMix rows as raw FileData — the
-/// caller merges in AihubMix traffic from other CLIs (Claude Code) before
-/// building the card's spend.
+/// Returns OpenCode's spend plus the AihubMix and StepFun rows as raw
+/// FileData — the caller merges in traffic from other CLIs (Claude Code,
+/// Codex) before building each card's spend. StepFun rows arrive either
+/// under a `stepfun` provider id or as `step-*` model slugs logged while
+/// pointed at the Step Plan base URL.
 fn fold_opencode_data(
     events: impl IntoIterator<Item = (f64, f64, f64, String, String)>,
-) -> (FileData, FileData) {
+) -> (FileData, FileData, FileData) {
     let mut oc = FileData::default();
     let mut aihubmix = FileData::default();
+    let mut stepfun = FileData::default();
     for (ts_ms, cost, tokens, model, provider) in events {
         if let Some(ts) = DateTime::from_timestamp_millis(ts_ms as i64) {
-            let target = if provider == "aihubmix" { &mut aihubmix } else { &mut oc };
+            let target = if provider == "aihubmix" {
+                &mut aihubmix
+            } else if provider == "stepfun" || model.to_ascii_lowercase().starts_with("step-") {
+                &mut stepfun
+            } else {
+                &mut oc
+            };
             add_event(target, ts, &model, cost, tokens);
         }
     }
-    (oc, aihubmix)
+    (oc, aihubmix, stepfun)
 }
 
 /// One discovery pass, then partition. Calling extra_ledger_homes twice
 /// could move a dir across the default/extra boundary if auth swapped
 /// between the two reads and double-count that ledger.
-fn opencode_accounts() -> (ProviderSpend, Vec<ProviderSpend>, FileData) {
+fn opencode_accounts() -> (ProviderSpend, Vec<ProviderSpend>, FileData, FileData) {
     let homes = providers::opencode::extra_ledger_homes();
-    let (mut oc, mut aihubmix) =
+    let (mut oc, mut aihubmix, mut stepfun) =
         fold_opencode_data(providers::opencode::collect_cost_events());
     let mut groups: std::collections::BTreeMap<String, (String, FileData)> =
         std::collections::BTreeMap::new();
     for (id, name, dir) in homes {
-        let (data, extra_ai) = fold_opencode_data(providers::opencode::collect_cost_events_in(&dir));
+        let (data, extra_ai, extra_sf) =
+            fold_opencode_data(providers::opencode::collect_cost_events_in(&dir));
         merge_data(&mut aihubmix, extra_ai);
+        merge_data(&mut stepfun, extra_sf);
         if id == "opencode" {
             merge_data(&mut oc, data);
         } else {
@@ -2519,7 +2547,7 @@ fn opencode_accounts() -> (ProviderSpend, Vec<ProviderSpend>, FileData) {
         .into_iter()
         .map(|(id, (name, data))| build_spend(id, name, data))
         .collect();
-    (build_spend("opencode", "OpenCode", oc), extras, aihubmix)
+    (build_spend("opencode", "OpenCode", oc), extras, aihubmix, stepfun)
 }
 
 /// Devin CLI keeps per-request token metrics in its local sessions.db
@@ -2914,20 +2942,22 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
     let mut list = std::thread::scope(|s| {
         let claude_t = s.spawn(|| {
             spend_step("claude", || {
-                let (sp, mut mm, mut qw, mut km) = claude(pi_claude);
-                let (extras, mm2, qw2, km2) = claude_extra_accounts();
+                let (sp, mut mm, mut qw, mut km, mut sf) = claude(pi_claude);
+                let (extras, mm2, qw2, km2, sf2) = claude_extra_accounts();
                 merge_data(&mut mm, mm2);
                 merge_data(&mut qw, qw2);
                 merge_data(&mut km, km2);
-                (sp, extras, mm, qw, km)
+                merge_data(&mut sf, sf2);
+                (sp, extras, mm, qw, km, sf)
             })
         });
         let codex_t = s.spawn(|| {
             spend_step("codex", || {
-                let (sp, mut km) = codex(pi_codex);
-                let (extras, km2) = codex_extra_accounts();
+                let (sp, mut km, mut sf) = codex(pi_codex);
+                let (extras, km2, sf2) = codex_extra_accounts();
                 merge_data(&mut km, km2);
-                (sp, extras, km)
+                merge_data(&mut sf, sf2);
+                (sp, extras, km, sf)
             })
         });
         let oc_t = s.spawn(|| spend_step("opencode", opencode_accounts));
@@ -2936,26 +2966,39 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
         let devin_t = s.spawn(|| spend_step("devin", devin));
         let qwen_t = s.spawn(|| spend_step("qwen", qwen));
 
-        let (claude_sp, extra_claude_spends, mut minimax_extra, qwen_via_claude, mut kimi_routed) =
+        let (claude_sp, extra_claude_spends, mut minimax_extra, qwen_via_claude, mut kimi_routed, mut stepfun_data) =
             take_join(claude_t, "claude", (
                 build_spend("claude", "Claude", FileData::default()),
                 Vec::new(),
                 FileData::default(),
                 FileData::default(),
                 FileData::default(),
+                FileData::default(),
             ));
-        let (codex_sp, extra_codex_spends, kimi_via_codex) = take_join(
+        let (codex_sp, extra_codex_spends, kimi_via_codex, stepfun_via_codex) = take_join(
             codex_t,
             "codex",
-            (build_spend("codex", "Codex", FileData::default()), Vec::new(), FileData::default()),
+            (
+                build_spend("codex", "Codex", FileData::default()),
+                Vec::new(),
+                FileData::default(),
+                FileData::default(),
+            ),
         );
         merge_data(&mut kimi_routed, kimi_via_codex);
-        let (opencode_sp, extra_opencode_spends, mut aihubmix_data) = take_join(
+        merge_data(&mut stepfun_data, stepfun_via_codex);
+        let (opencode_sp, extra_opencode_spends, mut aihubmix_data, stepfun_via_opencode) = take_join(
             oc_t,
             "opencode",
-            (build_spend("opencode", "OpenCode", FileData::default()), Vec::new(), FileData::default()),
+            (
+                build_spend("opencode", "OpenCode", FileData::default()),
+                Vec::new(),
+                FileData::default(),
+                FileData::default(),
+            ),
         );
         merge_data(&mut aihubmix_data, qwen_via_claude);
+        merge_data(&mut stepfun_data, stepfun_via_opencode);
         let mut hermes_rest = Vec::new();
         for (id, name, data) in take_join(hermes_t, "hermes", Vec::new()) {
             if id == "minimax" {
@@ -2972,6 +3015,7 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
             build_spend("aihubmix", "AihubMix", aihubmix_data),
             take_join(devin_t, "devin", build_spend("devin", "Devin", FileData::default())),
             minimax(minimax_extra),
+            stepfun(stepfun_data),
             kimi(kimi_routed),
             take_join(qwen_t, "qwen", build_spend("qwen", "Qwen Code", FileData::default())),
         ];
@@ -4322,6 +4366,23 @@ mod tests {
         assert_eq!(mm.days.len(), 2);
         assert_eq!(mm.days[&(1000, "MiniMax-M3".to_string())], (0.5, 50.0));
         assert_eq!(mm.unpriced.get("MiniMax-Unknown"), Some(&3));
+    }
+
+    #[test]
+    fn split_models_reroutes_stepfun_usage() {
+        let mut data = FileData::default();
+        data.days.insert((1000, "claude-fable-5".into()), (5.0, 100.0));
+        data.days.insert((1000, "step-3.7-flash".into()), (0.5, 50.0));
+        data.days.insert((1001, "step-3.5-flash".into()), (0.2, 20.0));
+        data.unpriced.insert("step-3.7-flash".into(), 3);
+        data.unpriced.insert("mystery-model".into(), 1);
+
+        let sf = split_models(&mut data, "step-");
+        assert_eq!(data.days.len(), 1);
+        assert_eq!(data.unpriced.len(), 1);
+        assert_eq!(sf.days.len(), 2);
+        assert_eq!(sf.days[&(1000, "step-3.7-flash".to_string())], (0.5, 50.0));
+        assert_eq!(sf.unpriced.get("step-3.7-flash"), Some(&3));
     }
 
     #[test]

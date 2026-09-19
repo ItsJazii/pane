@@ -1033,6 +1033,13 @@ fn builtin_price(canonical: &str) -> Option<Price> {
         "swe-1.7-lightning" | "swe-1-7-lightning" => {
             Some(Price::flat(2.50, 12.50, 1.00, 2.50))
         }
+        // StepFun Step Plan (platform.stepfun.ai pricing, USD/MTok):
+        // step-3.7-flash $0.20 in / $1.15 out / $0.04 cache hit;
+        // step-3.5-flash (+ the -2603 dated SKU) $0.10 / $0.30 / $0.02.
+        // No separate cache-write rate — writes bill at input. The
+        // last-segment peel above covers `stepfun/step-*` gateway slugs.
+        "step-3.7-flash" => Some(Price::flat(0.20, 1.15, 0.04, 0.20)),
+        "step-3.5-flash" | "step-3.5-flash-2603" => Some(Price::flat(0.10, 0.30, 0.02, 0.10)),
         _ => None,
     }
 }
@@ -1441,6 +1448,27 @@ mod tests {
         ] {
             let p = super::lookup(slug).unwrap_or_else(|| panic!("{slug} did not price"));
             assert_eq!((p.input, p.output, p.cache_read), (1.90, 8.0, 0.38), "{slug}");
+        }
+    }
+
+    #[test]
+    fn stepfun_builtins_price() {
+        // Step Plan list prices (platform.stepfun.ai). Asserted at the
+        // builtin layer — a live catalog row outranks these at lookup().
+        let p = super::builtin_price("step-3.7-flash")
+            .expect("step-3.7-flash did not price");
+        assert_eq!((p.input, p.output, p.cache_read, p.cache_write), (0.20, 1.15, 0.04, 0.20));
+        // The gateway spelling peels to the same card.
+        let p = super::builtin_price("stepfun/step-3.7-flash")
+            .expect("stepfun/step-3.7-flash did not reach the builtin");
+        assert_eq!((p.input, p.output), (0.20, 1.15));
+        for slug in ["step-3.5-flash", "step-3.5-flash-2603"] {
+            let p = super::builtin_price(slug).unwrap_or_else(|| panic!("{slug} did not price"));
+            assert_eq!(
+                (p.input, p.output, p.cache_read, p.cache_write),
+                (0.10, 0.30, 0.02, 0.10),
+                "{slug}"
+            );
         }
     }
 
