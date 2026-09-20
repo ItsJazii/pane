@@ -2,6 +2,7 @@ use super::{config_value, http, stored_api_key, Metric, Snapshot};
 use crate::spend;
 use chrono::{Datelike, Local, NaiveDate};
 use serde_json::Value;
+use std::path::Path;
 
 const ID: &str = "stepfun";
 const NAME: &str = "StepFun";
@@ -77,8 +78,9 @@ async fn fetch() -> Result<Snapshot, String> {
             // .com accounts are billed in CNY.
             let sign = if url.contains("stepfun.com") { "¥" } else { "$" };
             // The same key may also open a Step Plan — probe its surface on
-            // the answering host. Plan usage never touches the wallet, so a
-            // plan key must not wear the wallet's Credits-used meter.
+            // the answering host. Both pots then live on one card: wallet
+            // rows first (its bar is labeled "Wallet" — pay-as-you-go
+            // clients on /v1 drain it), the Plan Credits estimate last.
             let plan_url = url.replacen("/v1/accounts", "/step_plan/v1/models", 1);
             let plan_key = http()
                 .get(&plan_url)
@@ -86,13 +88,17 @@ async fn fetch() -> Result<Snapshot, String> {
                 .send()
                 .await
                 .is_ok_and(|r| r.status().is_success());
-            let (plan, wallet_rows) = parse_account(&doc, sign, !plan_key)?;
+            let (plan, mut metrics) = parse_account(
+                &doc,
+                sign,
+                Some(if plan_key { "Wallet" } else { "Credits used" }),
+            )?;
             if !plan_key {
-                return Ok(Snapshot::ok(ID, NAME, plan, wallet_rows));
+                return Ok(Snapshot::ok(ID, NAME, plan, metrics));
             }
-            let (chip, mut metrics, warning) =
+            let (chip, plan_rows, warning) =
                 plan_metrics(spend::month_to_date_cost(ID), plan_tier());
-            metrics.extend(wallet_rows);
+            metrics.extend(plan_rows);
             let mut snap = Snapshot::ok(ID, NAME, chip, metrics);
             snap.warning = warning;
             Ok(snap)
@@ -155,7 +161,7 @@ fn month_window_ms() -> Option<(i64, i64)> {
     Some((end, end - start))
 }
 
-/// Step Plan rows: the "Credits used" estimate from this month's local
+/// Step Plan rows: the "Plan Credits" estimate from this month's local
 /// spend, either as a bar against the configured tier or as a text row
 /// with a pick-a-tier hint. Chip is the tier name when configured.
 fn plan_metrics(
@@ -167,7 +173,7 @@ fn plan_metrics(
         return (
             chip,
             vec![Metric::progress(
-                "Credits used",
+                "Plan Credits",
                 0.0,
                 // The frontend keys on this exact string to re-fetch once
                 // the first spend scan lands.
@@ -184,7 +190,7 @@ fn plan_metrics(
                 .map(|(r, p)| (Some(r), Some(p)))
                 .unwrap_or((None, None));
             let metric = Metric::progress(
-                "Credits used",
+                "Plan Credits",
                 pct,
                 Some(format!(
                     "≈{used_m:.0}M of {}M Credits used · est. from logs",
@@ -197,7 +203,7 @@ fn plan_metrics(
         None => (
             chip,
             vec![Metric::text(
-                "Credits used",
+                "Plan Credits",
                 format!("≈{used_m:.0}M Credits this month · est. from logs"),
             )],
             Some(
@@ -212,13 +218,25 @@ fn plan_metrics(
 
 /// `GET /v1/accounts` body: `{object:"account", type:"prepaid"|"postpaid",
 /// balance, total_cash_balance, total_voucher_balance}`. `sign` is the
-/// region's currency ($ on .ai, ¥ on .com). `with_meter` is false for a
-/// Step Plan key — plan usage never touches the wallet, so the meter is
-/// misleading there; the Balance/Vouchers rows still apply.
+/// region's currency ($ on .ai, ¥ on .com). `meter_label` is the wallet
+/// bar's row label — `Some("Credits used")` for a plain wallet key,
+/// `Some("Wallet")` when a Step Plan sits beside it (pay-as-you-go
+/// clients on /v1 still drain the wallet), `None` for no meter at all.
 fn parse_account(
     doc: &Value,
     sign: &str,
-    with_meter: bool,
+    meter_label: Option<&str>,
+) -> Result<(Option<String>, Vec<Metric>), String> {
+    parse_account_in(&super::config_dir(), doc, sign, meter_label)
+}
+
+/// `parse_account` against a caller-chosen config dir so tests never
+/// touch the real `credit_baselines.json` high-water marks.
+fn parse_account_in(
+    dir: &Path,
+    doc: &Value,
+    sign: &str,
+    meter_label: Option<&str>,
 ) -> Result<(Option<String>, Vec<Metric>), String> {
     let balance = doc
         .get("balance")
@@ -228,8 +246,8 @@ fn parse_account(
     let mut metrics = Vec::new();
     // Credits-used meter against the highest balance seen locally —
     // top-ups raise it (feeds the Almost Out notification).
-    if with_meter {
-        if let Some(meter) = super::credit_meter(ID, sign, balance) {
+    if let Some(label) = meter_label {
+        if let Some(meter) = super::credit_meter_labeled_in(dir, ID, sign, balance, label, "") {
             metrics.push(meter);
         }
     }
@@ -252,22 +270,34 @@ fn parse_account(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_account, plan_metrics, Metric};
+    use super::{parse_account_in, plan_metrics, Metric};
     use serde_json::json;
+    use std::path::PathBuf;
 
     fn text_row<'a>(metrics: &'a [Metric], label: &str) -> Option<&'a Metric> {
         metrics.iter().find(|m| m.kind == "text" && m.label == label)
     }
 
+    // A fresh dir per test: credit_meter_labeled_in persists
+    // credit_baselines.json, and the real config dir's high-water marks
+    // must never see test balances.
+    fn tmpdir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pane-stepfun-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn prepaid_with_vouchers_shows_plan_balance_and_vouchers() {
-        let (plan, metrics) = parse_account(&json!({
+        let dir = tmpdir("prepaid");
+        let (plan, metrics) = parse_account_in(&dir, &json!({
             "object": "account",
             "type": "prepaid",
             "balance": 12.345,
             "total_cash_balance": 10.0,
             "total_voucher_balance": 2.345,
-        }), "$", true)
+        }), "$", Some("Credits used"))
         .unwrap();
         assert_eq!(plan.as_deref(), Some("Prepaid"));
         assert_eq!(
@@ -278,18 +308,20 @@ mod tests {
             text_row(&metrics, "Vouchers").and_then(|m| m.value.as_deref()),
             Some("$2.35")
         );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn cn_accounts_show_yuan() {
         // .com accounts bill in CNY — same body, ¥ sign.
-        let (plan, metrics) = parse_account(&json!({
+        let dir = tmpdir("cn");
+        let (plan, metrics) = parse_account_in(&dir, &json!({
             "object": "account",
             "type": "prepaid",
             "balance": 99.08,
             "total_cash_balance": 100.0,
             "total_voucher_balance": 0.0,
-        }), "¥", true)
+        }), "¥", Some("Credits used"))
         .unwrap();
         assert_eq!(plan.as_deref(), Some("Prepaid"));
         assert_eq!(
@@ -297,17 +329,19 @@ mod tests {
             Some("¥99.08")
         );
         assert!(text_row(&metrics, "Vouchers").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn postpaid_without_vouchers_hides_the_voucher_row() {
-        let (plan, metrics) = parse_account(&json!({
+        let dir = tmpdir("postpaid");
+        let (plan, metrics) = parse_account_in(&dir, &json!({
             "object": "account",
             "type": "postpaid",
             "balance": 4.0,
             "total_cash_balance": 4.0,
             "total_voucher_balance": 0.0,
-        }), "$", true)
+        }), "$", Some("Credits used"))
         .unwrap();
         assert_eq!(plan.as_deref(), Some("Postpaid"));
         assert_eq!(
@@ -315,11 +349,43 @@ mod tests {
             Some("$4.00")
         );
         assert!(text_row(&metrics, "Vouchers").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plan_key_keeps_a_wallet_bar_beside_balance() {
+        // omp-style clients bill the pay-as-you-go wallet directly via
+        // /v1 — a Step Plan key still needs the API-authoritative meter.
+        let dir = tmpdir("wallet-bar");
+        let (plan, metrics) = parse_account_in(&dir, &json!({
+            "object": "account",
+            "type": "prepaid",
+            "balance": 43.40,
+            "total_cash_balance": 43.40,
+            "total_voucher_balance": 0.0,
+        }), "¥", Some("Wallet"))
+        .unwrap();
+        assert_eq!(plan.as_deref(), Some("Prepaid"));
+        assert_eq!(metrics[0].kind, "progress");
+        assert_eq!(metrics[0].label, "Wallet");
+        assert!(
+            metrics[0].detail.as_deref().is_some_and(|d| d.contains("¥43.40")),
+            "detail={:?}", metrics[0].detail
+        );
+        assert_eq!(
+            text_row(&metrics, "Balance").and_then(|m| m.value.as_deref()),
+            Some("¥43.40")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn missing_balance_is_an_error() {
-        assert!(parse_account(&json!({"object": "account", "type": "prepaid"}), "$", true).is_err());
+        let dir = tmpdir("missing");
+        assert!(
+            parse_account_in(&dir, &json!({"object": "account", "type": "prepaid"}), "$", Some("Credits used")).is_err()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -330,7 +396,7 @@ mod tests {
         assert!(warning.is_none());
         assert_eq!(metrics.len(), 1);
         let m = &metrics[0];
-        assert_eq!(m.label, "Credits used");
+        assert_eq!(m.label, "Plan Credits");
         assert_eq!(m.kind, "progress");
         // $4.35 × 7 ≈ 30.45M of 1,600M → ~1.9%.
         let pct = m.used_percent.unwrap();
@@ -351,7 +417,7 @@ mod tests {
         assert!(warning.is_some());
         let m = &metrics[0];
         assert_eq!(m.kind, "text");
-        assert_eq!(m.label, "Credits used");
+        assert_eq!(m.label, "Plan Credits");
         assert!(
             m.value.as_deref().is_some_and(|v| v.contains("≈30M Credits")),
             "value={:?}", m.value
