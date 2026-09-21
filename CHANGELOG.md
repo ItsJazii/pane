@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.53 — 2026-09-21
+
 ### Added
 - **Toast when a weekly limit resets.** Any provider's weekly or
   monthly window rolling over posts a Windows notification within about
