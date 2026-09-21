@@ -134,10 +134,10 @@ impl FileData {
 /// The overflow bucket keeps Pi's routing prefix: take_tagged can only
 /// claim keys that still start with `{card}\u{1}`, so folding a tagged
 /// name into the bare overflow key would strand that usage between cards.
-/// Pi's card set is fixed (`claude`, `codex` — see pi_line), so this adds
-/// at most one bounded key per card.
+/// Pi's card set is fixed (`claude`, `codex`, `aihubmix`, `stepfun` —
+/// see pi_line), so this adds at most one bounded key per card.
 fn overflow_key(model: &str) -> String {
-    for card in ["claude", "codex"] {
+    for card in ["claude", "codex", "aihubmix", "stepfun"] {
         let prefix = format!("{card}{PI_SEP}");
         if model.starts_with(&prefix) {
             return format!("{prefix}{OVERFLOW_MODEL_KEY}");
@@ -2304,6 +2304,23 @@ fn pi_sessions_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_default().join(".pi").join("agent").join("sessions")
 }
 
+/// pi plus oh-my-pi ("omp") — an omp session file is byte-for-byte the
+/// pi format, only rooted at `~/.omp/agent/sessions` instead. Deduped in
+/// case an env override points the pi dir at omp's tree.
+fn pi_sessions_dirs() -> Vec<PathBuf> {
+    let pi = pi_sessions_dir();
+    let omp = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".omp")
+        .join("agent")
+        .join("sessions");
+    let mut out = vec![pi];
+    if omp != out[0] {
+        out.push(omp);
+    }
+    out
+}
+
 /// The per-file cache stores ONE FileData per path, but a pi file can hold
 /// usage for several destination cards — so models are stored tagged
 /// ("claude␁<model>") and untagged by take_tagged() after the scan.
@@ -2312,11 +2329,15 @@ const PI_SEP: char = '\u{1}';
 /// One pi session-log line → spend event. Only assistant "message" lines
 /// carry usage; pi's `provider` field says whose account it drove
 /// (mirroring upstream OpenUsage's mapping — pi providers with no local
-/// spend source here are skipped). Pi records an authoritative
-/// per-message usage.cost.total like OpenCode: a carried cost > 0 wins,
-/// a $0 cost (subscription usage pi doesn't impute) prices through the
-/// catalog. Duplicate message ids within a file (forked-session replays)
-/// keep the first occurrence.
+/// spend source here are skipped). `anthropic`/`claude-agent-sdk` →
+/// Claude, `openai-codex` → Codex, `aihubmix` → AihubMix, and any
+/// `stepfun*` provider name (omp calls its CN endpoint `stepfun-cn`) →
+/// StepFun — as does a `step-*` model on an unrecognized provider, since
+/// a custom-named StepFun endpoint still logs the upstream slug. Pi
+/// records an authoritative per-message usage.cost.total like OpenCode:
+/// a carried cost > 0 wins, a $0 cost (omp/subscription usage that isn't
+/// imputed) prices through the catalog. Duplicate message ids within a
+/// file (forked-session replays) keep the first occurrence.
 fn pi_line(seen: &mut HashSet<String>, line: &str, data: &mut FileData) {
     if !line.contains("\"usage\"") {
         return;
@@ -2330,9 +2351,19 @@ fn pi_line(seen: &mut HashSet<String>, line: &str, data: &mut FileData) {
     if msg.get("role").and_then(Value::as_str) != Some("assistant") {
         return;
     }
-    let card = match msg.get("provider").and_then(Value::as_str) {
-        Some("anthropic" | "claude-agent-sdk") => "claude",
-        Some("openai-codex") => "codex",
+    let provider = msg.get("provider").and_then(Value::as_str).unwrap_or("");
+    let model = msg
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .unwrap_or("unknown");
+    let card = match provider {
+        "anthropic" | "claude-agent-sdk" => "claude",
+        "openai-codex" => "codex",
+        "aihubmix" => "aihubmix",
+        p if p.to_lowercase().starts_with("stepfun") => "stepfun",
+        _ if model.to_lowercase().starts_with("step-") => "stepfun",
         _ => return,
     };
     if let Some(id) = v.get("id").and_then(Value::as_str) {
@@ -2355,12 +2386,6 @@ fn pi_line(seen: &mut HashSet<String>, line: &str, data: &mut FileData) {
     if tokens <= 0.0 && carried.unwrap_or(0.0) <= 0.0 {
         return;
     }
-    let model = msg
-        .get("model")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|m| !m.is_empty())
-        .unwrap_or("unknown");
     let tagged = format!("{card}{PI_SEP}{model}");
     if let Some(c) = carried.filter(|c| *c > 0.0) {
         add_event(data, ts, &tagged, c, tokens);
@@ -2405,11 +2430,14 @@ fn take_tagged(data: &mut FileData, card: &str) -> FileData {
 /// Pi is a bring-your-own-account agent, so its usage belongs on the card
 /// of the account it drove rather than a card of its own — a Claude sub
 /// used inside pi lands on the Claude card, Codex likewise (the fold
-/// upstream OpenUsage ships).
-fn pi() -> (FileData, FileData) {
-    let root = pi_sessions_dir();
+/// upstream OpenUsage ships). oh-my-pi ("omp") writes the same format
+/// under `~/.omp/agent/sessions`; its StepFun/AihubMix rows fold the same
+/// way.
+fn pi() -> (FileData, FileData, FileData, FileData) {
     let mut files = Vec::new();
-    recent_jsonl_files(&root, &mut files);
+    for root in pi_sessions_dirs() {
+        recent_jsonl_files(&root, &mut files);
+    }
     let mut all = FileData::default();
     for file in files {
         if cache_unchanged(&file) {
@@ -2430,7 +2458,9 @@ fn pi() -> (FileData, FileData) {
     }
     let claude = take_tagged(&mut all, "claude");
     let codex = take_tagged(&mut all, "codex");
-    (claude, codex)
+    let aihubmix = take_tagged(&mut all, "aihubmix");
+    let stepfun = take_tagged(&mut all, "stepfun");
+    (claude, codex, aihubmix, stepfun)
 }
 
 /// Grok CLI appends one global log at ~/.grok/logs/unified.jsonl (or under
@@ -2980,7 +3010,7 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
     if let Ok(mut t) = touched().lock() {
         t.clear();
     }
-    let (pi_claude, pi_codex) = pi();
+    let (pi_claude, pi_codex, pi_aihubmix, pi_stepfun) = pi();
     // Claude / Codex / OpenCode / Devin used to run one after another on
     // this machine that is minutes of IO. They touch different trees.
     let mut list = std::thread::scope(|s| {
@@ -3043,6 +3073,8 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
         );
         merge_data(&mut aihubmix_data, qwen_via_claude);
         merge_data(&mut stepfun_data, stepfun_via_opencode);
+        merge_data(&mut aihubmix_data, pi_aihubmix);
+        merge_data(&mut stepfun_data, pi_stepfun);
         let mut hermes_rest = Vec::new();
         for (id, name, data) in take_join(hermes_t, "hermes", Vec::new()) {
             if id == "minimax" {
@@ -4349,6 +4381,56 @@ mod tests {
         // $0 carried cost falls through to pricing; unknown model → honest ⚠.
         assert_eq!(codex.days.values().map(|v| v.1).sum::<f64>(), 500.0);
         assert_eq!(codex.unpriced.get("pi-test-model"), Some(&1));
+    }
+
+    #[test]
+    fn pi_lines_route_stepfun_and_aihubmix() {
+        let mut seen = HashSet::new();
+        let mut data = FileData::default();
+        // omp writes the pi format: provider stepfun-cn / aihubmix, $0
+        // carried cost (omp doesn't impute) → priced through the catalog.
+        let stepfun_cn = json!({"type": "message", "id": "o1", "timestamp": "2026-08-03T10:00:00Z",
+            "message": {"role": "assistant", "provider": "stepfun-cn", "model": "step-5-preview",
+                        "usage": {"input": 25558.0, "output": 690.0, "cacheRead": 256.0,
+                                  "cacheWrite": 0.0, "totalTokens": 26504.0,
+                                  "cost": {"total": 0.0}}}})
+        .to_string();
+        let aihubmix = stepfun_cn
+            .replace("\"o1\"", "\"o2\"")
+            .replace("\"stepfun-cn\"", "\"aihubmix\"");
+        // A custom provider name pointed at StepFun still routes by model.
+        let gateway = json!({"type": "message", "id": "o3", "timestamp": "2026-08-03T10:01:00Z",
+            "message": {"role": "assistant", "provider": "my-gateway", "model": "step-3.7-flash",
+                        "usage": {"input": 100.0, "output": 50.0, "cacheRead": 0.0,
+                                  "cacheWrite": 0.0, "totalTokens": 150.0,
+                                  "cost": {"total": 0.0}}}})
+        .to_string();
+        // A 402 error row carries all-zero usage → dropped by the
+        // no-tokens-no-dollars rule.
+        let err = json!({"type": "message", "id": "o4", "timestamp": "2026-08-03T10:02:00Z",
+            "message": {"role": "assistant", "provider": "stepfun-cn", "model": "step-5-preview",
+                        "stopReason": "error", "errorStatus": 402,
+                        "usage": {"input": 0.0, "output": 0.0, "cacheRead": 0.0,
+                                  "cacheWrite": 0.0, "totalTokens": 0.0,
+                                  "cost": {"total": 0.0}}}})
+        .to_string();
+        for line in [&stepfun_cn, &aihubmix, &gateway, &err] {
+            pi_line(&mut seen, line, &mut data);
+        }
+
+        let claude = take_tagged(&mut data, "claude");
+        let codex = take_tagged(&mut data, "codex");
+        let mix = take_tagged(&mut data, "aihubmix");
+        let stepfun = take_tagged(&mut data, "stepfun");
+        assert!(data.days.is_empty() && data.unpriced.is_empty());
+        assert_eq!(tokens_sum(&claude), 0.0);
+        assert_eq!(tokens_sum(&codex), 0.0);
+        assert_eq!(tokens_sum(&mix), 26504.0);
+        // stepfun-cn + the model-prefix fallback; the 402 row contributed
+        // nothing.
+        assert_eq!(tokens_sum(&stepfun), 26504.0 + 150.0);
+        assert!(stepfun.days.keys().any(|(_, m)| m == "step-5-preview"));
+        assert!(stepfun.days.keys().any(|(_, m)| m == "step-3.7-flash"));
     }
 
     /// Overflowed Pi keys keep their routing prefix: take_tagged must still

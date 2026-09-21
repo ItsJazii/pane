@@ -41,7 +41,8 @@ Ground rules that apply to every provider:
   inside the parent totals. Sidechain (subagent) logs that replay the
   parent's message under a fresh request id are deduplicated. Sessions
   of the pi coding agent that drove this Claude account
-  (`~\.pi\agent\sessions`, providers `anthropic`/`claude-agent-sdk`)
+  (`~\.pi\agent\sessions`, providers `anthropic`/`claude-agent-sdk`;
+  oh-my-pi writes the same format under `~\.omp\agent\sessions`)
   fold into this card's spend — pi's own recorded cost when present,
   catalog pricing otherwise.
 
@@ -273,7 +274,11 @@ Ground rules that apply to every provider:
   `step-image-edit-2`, TTS/ASR — stay unpriced ⚠ rather than guess. A
   Claude Code run from its own `CLAUDE_CONFIG_DIR` (e.g. `~/.claude-step`)
   with no Claude login is scanned too, so API-key sessions against
-  StepFun count here.
+  StepFun count here. pi and oh-my-pi sessions
+  (`~\.pi\agent\sessions`, `~\.omp\agent\sessions`) with a `stepfun*`
+  provider name (`stepfun-cn` is omp's CN endpoint) or a `step-*`
+  model on any provider route here as well; `aihubmix` provider rows
+  land on the AihubMix card.
 
 ## Kimi Code
 
@@ -397,7 +402,8 @@ Ground rules that apply to every provider:
   way MiniMax-routed sessions are. Claude Code logs don't record which
   gateway served a request, so this assumes qwen models reached Claude
   Code via AihubMix — sessions run through Alibaba's own
-  Anthropic-compatible proxy would land here too.
+  Anthropic-compatible proxy would land here too. pi / oh-my-pi session
+  rows carrying `provider: "aihubmix"` fold in the same way.
 
 ## One/New API
 

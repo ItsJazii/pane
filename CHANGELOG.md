@@ -24,6 +24,10 @@
 - **Keyless Claude config dirs count toward spend.** Claude Code
   sessions run from an API-key-only `CLAUDE_CONFIG_DIR` (e.g. StepFun's)
   are now included in local spend.
+- **oh-my-pi sessions count toward spend.** `~/.omp/agent/sessions` is
+  scanned alongside pi's own logs; `stepfun*` provider rows (incl.
+  `stepfun-cn`) and `step-*` models land on the StepFun card,
+  `aihubmix` rows on AihubMix.
 
 ## 0.4.52 — 2026-09-16
 
