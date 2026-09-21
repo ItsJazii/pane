@@ -77,27 +77,25 @@ async fn fetch() -> Result<Snapshot, String> {
             let doc: Value = resp.json().await.map_err(|e| format!("accounts parse: {e}"))?;
             // .com accounts are billed in CNY.
             let sign = if url.contains("stepfun.com") { "¥" } else { "$" };
-            // The same key may also open a Step Plan — probe its surface on
-            // the answering host. Both pots then live on one card: wallet
-            // rows first (its bar is labeled "Wallet" — pay-as-you-go
-            // clients on /v1 drain it), the Plan Credits estimate last.
-            let plan_url = url.replacen("/v1/accounts", "/step_plan/v1/models", 1);
-            let plan_key = http()
-                .get(&plan_url)
-                .bearer_auth(&key)
-                .send()
-                .await
-                .is_ok_and(|r| r.status().is_success());
+            // A Step Plan subscription can't be detected over the API —
+            // /step_plan/v1/models answers 200 for any valid key, and
+            // probing a real plan endpoint would spend the user's money.
+            // So the Plan Credits bar is opt-in: it appears only when the
+            // user picked a tier in Settings. With a tier the card shows
+            // both pots — wallet rows first (its bar is labeled "Wallet";
+            // pay-as-you-go clients on /v1 drain it), the Plan Credits
+            // estimate last.
+            let tier = plan_tier();
             let (plan, mut metrics) = parse_account(
                 &doc,
                 sign,
-                Some(if plan_key { "Wallet" } else { "Credits used" }),
+                Some(if tier.is_some() { "Wallet" } else { "Credits used" }),
             )?;
-            if !plan_key {
+            if tier.is_none() {
                 return Ok(Snapshot::ok(ID, NAME, plan, metrics));
             }
             let (chip, plan_rows, warning) =
-                plan_metrics(spend::month_to_date_cost(ID), plan_tier());
+                plan_metrics(spend::month_to_date_cost(ID), tier);
             metrics.extend(plan_rows);
             let mut snap = Snapshot::ok(ID, NAME, chip, metrics);
             snap.warning = warning;
@@ -162,8 +160,9 @@ fn month_window_ms() -> Option<(i64, i64)> {
 }
 
 /// Step Plan rows: the "Plan Credits" estimate from this month's local
-/// spend, either as a bar against the configured tier or as a text row
-/// with a pick-a-tier hint. Chip is the tier name when configured.
+/// spend, as a bar against the configured tier. Chip is the tier name.
+/// The `None` tier branch (text row + pick-a-tier hint) only runs for a
+/// plan-only key — one the wallet endpoints rejected outright.
 fn plan_metrics(
     month_cost_usd: Option<f64>,
     tier: Option<(u64, &'static str)>,

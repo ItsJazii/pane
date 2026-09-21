@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Added
+- **StepFun card.** Paste a StepFun API key: account balance (and
+  vouchers) with the usual credits-used meter, plus local spend for
+  `step-*` models used through Claude Code / Codex / OpenCode against
+  the Step Plan endpoint. If you subscribe to Step Plan, pick your tier
+  in Settings → API keys → StepFun and the card shows both pots: a live
+  "Wallet" bar (pay-as-you-go clients on `/v1` drain it) plus a "Plan
+  Credits" estimate of this month's plan Credits computed from local
+  spend logs (USD × 7; 1M Credit = ¥1) against the monthly pool
+  (Flash Mini–Max, 400M–40,000M) — StepFun's API reports no plan quota
+  and can't even confirm the subscription exists.
+- **Keyless Claude config dirs count toward spend.** Claude Code
+  sessions run from an API-key-only `CLAUDE_CONFIG_DIR` (e.g. StepFun's)
+  are now included in local spend.
+- **oh-my-pi sessions count toward spend.** `~/.omp/agent/sessions` is
+  scanned alongside pi's own logs; `stepfun*` provider rows (incl.
+  `stepfun-cn`) and `step-*` models land on the StepFun card,
+  `aihubmix` rows on AihubMix.
+
 ## 0.4.53 — 2026-09-21
 
 ### Added
@@ -12,22 +31,6 @@
 - **Star prompt.** Once the install is a few days old, Pane occasionally
   (at most twice a day) asks for a GitHub star when the popover opens;
   Star or "Don't ask again" retires it for good.
-- **StepFun card.** Paste a StepFun API key: account balance (and
-  vouchers) with the usual credits-used meter, plus local spend for
-  `step-*` models used through Claude Code / Codex / OpenCode against
-  the Step Plan endpoint. Step Plan keys see both pots: a live "Wallet"
-  bar (pay-as-you-go clients on `/v1` drain it) plus a "Plan Credits"
-  estimate of this month's plan Credits computed from local spend logs
-  (USD × 7; 1M Credit = ¥1) — StepFun's API reports no plan quota.
-  Picking your tier in Settings → API keys → StepFun draws the estimate
-  as a bar against the monthly pool (Flash Mini–Max, 400M–40,000M).
-- **Keyless Claude config dirs count toward spend.** Claude Code
-  sessions run from an API-key-only `CLAUDE_CONFIG_DIR` (e.g. StepFun's)
-  are now included in local spend.
-- **oh-my-pi sessions count toward spend.** `~/.omp/agent/sessions` is
-  scanned alongside pi's own logs; `stepfun*` provider rows (incl.
-  `stepfun-cn`) and `step-*` models land on the StepFun card,
-  `aihubmix` rows on AihubMix.
 
 ## 0.4.52 — 2026-09-16
 

@@ -132,6 +132,8 @@ const en: Dict = {
   "settings.keyPlaceholder": "API key",
   "settings.stepfunPlan": "Step Plan tier",
   "settings.stepfunPlanUnset": "Not set",
+  "settings.stepfunPlanHint":
+    "Only if you subscribe to Step Plan — turns local usage into a monthly Credits bar.",
   "settings.keyPhMinimax": "API key (auto-detected from CLI)",
   "settings.keyPhMoonshot": "sk-… (platform.kimi.ai key)",
   "settings.keyPhKimi": "Kimi For Coding plan key (if you don't use kimi login)",
@@ -520,6 +522,8 @@ const zh: Dict = {
   "settings.keyPlaceholder": "API 密钥",
   "settings.stepfunPlan": "Step Plan 套餐",
   "settings.stepfunPlanUnset": "未设置",
+  "settings.stepfunPlanHint":
+    "仅当你订阅了 Step Plan 时选择 — 将本地用量显示为每月额度进度条。",
   "settings.keyPhMinimax": "API 密钥（可从 CLI 自动读取）",
   "settings.keyPhMoonshot": "sk-…（platform.kimi.ai 密钥）",
   "settings.keyPhKimi": "Kimi For Coding 订阅密钥（未用 kimi login 时填写）",
@@ -869,6 +873,8 @@ const ru: Dict = {
   "settings.keyPlaceholder": "Ключ API",
   "settings.stepfunPlan": "Тариф Step Plan",
   "settings.stepfunPlanUnset": "Не задан",
+  "settings.stepfunPlanHint":
+    "Только если у вас есть подписка Step Plan — показывает локальное использование как месячную шкалу кредитов.",
   "settings.keyPhMinimax": "Ключ API (можно взять из CLI)",
   "settings.keyPhMoonshot": "sk-… (ключ platform.kimi.ai)",
   "settings.keyPhKimi": "Ключ подписки Kimi For Coding (если не используете kimi login)",

@@ -255,16 +255,19 @@ Ground rules that apply to every provider:
 - **Shows:** a Prepaid/Postpaid plan chip with Balance (and Vouchers
   when any are held) plus a "Credits used" percent bar metered against
   the highest balance Pane has seen locally. .ai accounts display in
-  USD; .com accounts bill in CNY and display in ¥. When the key also
-  answers `/step_plan/v1/models`, the card shows both pots: the
-  "Wallet" bar stays live from the API (pay-as-you-go clients on `/v1`
-  drain it) and a "Plan Credits" row estimates this month's Step Plan
-  Credits from local logs (USD spend × 7, since 1M Credit = ¥1 at
-  model list price). StepFun's API has no plan-quota endpoint — the
-  estimate is all it can show, and it clears at month end like the real
-  pool. Pick your tier in Settings → API keys → StepFun (Flash Mini
-  400M / Plus 1,600M / Pro 8,000M / Max 40,000M) to turn the estimate
-  into a bar against that monthly pool. Local spend for `step-*`
+  USD; .com accounts bill in CNY and display in ¥. A Step Plan
+  subscription can't be detected over the API — `/step_plan/v1/models`
+  answers 200 for any valid key, subscribed or not — so the plan side
+  is opt-in: pick your tier in Settings → API keys → StepFun (Flash
+  Mini 400M / Plus 1,600M / Pro 8,000M / Max 40,000M) and the card
+  shows both pots. The "Wallet" bar stays live from the API
+  (pay-as-you-go clients on `/v1` drain it) while "Plan Credits"
+  estimates this month's plan Credits from local logs (USD spend × 7,
+  since 1M Credit = ¥1 at model list price). StepFun's API has no
+  plan-quota endpoint — the estimate is all it can show, it clears at
+  month end like the real pool, and it counts every `step-*` row the
+  log scan finds, so wallet-billed clients inflate it; the Wallet bar
+  is the authoritative number. Local spend for `step-*`
   models used through
   Claude Code, Codex, or OpenCode against the Step Plan endpoint routes
   to this card (models.dev catalog, falling back to baked StepFun list
