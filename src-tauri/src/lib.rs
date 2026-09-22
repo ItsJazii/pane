@@ -290,32 +290,121 @@ fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
 // Tray icon with the pinned metric drawn onto it
 // ---------------------------------------------------------------------------
 
-// 4x6 pixel digit font, one nibble per row (bit 3 = leftmost pixel).
+// 4x6 digits. The high bit of each 4-column row is the leftmost pixel.
+// Digit 1 is a stem with a top-left flag and no foot.
 const DIGIT_FONT: [[u8; 6]; 10] = [
-    [0x6, 0x9, 0x9, 0x9, 0x9, 0x6], // 0
-    [0x2, 0x6, 0x2, 0x2, 0x2, 0x7], // 1
-    [0x6, 0x9, 0x1, 0x2, 0x4, 0xF], // 2
-    [0xE, 0x1, 0x6, 0x1, 0x9, 0x6], // 3
-    [0x2, 0x6, 0xA, 0xF, 0x2, 0x2], // 4
-    [0xF, 0x8, 0xE, 0x1, 0x9, 0x6], // 5
-    [0x6, 0x8, 0xE, 0x9, 0x9, 0x6], // 6
-    [0xF, 0x1, 0x2, 0x2, 0x4, 0x4], // 7
-    [0x6, 0x9, 0x6, 0x9, 0x9, 0x6], // 8
-    [0x6, 0x9, 0x9, 0x7, 0x1, 0x6], // 9
+    [0b0110, 0b1001, 0b1001, 0b1001, 0b1001, 0b0110], // 0
+    [0b0010, 0b0110, 0b0010, 0b0010, 0b0010, 0b0010], // 1
+    [0b0110, 0b1001, 0b0001, 0b0010, 0b0100, 0b1111], // 2
+    [0b1110, 0b0001, 0b0110, 0b0001, 0b1001, 0b0110], // 3
+    [0b0010, 0b0110, 0b1010, 0b1111, 0b0010, 0b0010], // 4
+    [0b1111, 0b1000, 0b1110, 0b0001, 0b1001, 0b0110], // 5
+    [0b0110, 0b1000, 0b1110, 0b1001, 0b1001, 0b0110], // 6
+    [0b1111, 0b0001, 0b0010, 0b0010, 0b0100, 0b0100], // 7
+    [0b0110, 0b1001, 0b0110, 0b1001, 0b1001, 0b0110], // 8
+    [0b0110, 0b1001, 0b1001, 0b0111, 0b0001, 0b0110], // 9
 ];
 
-/// Renders one or two numbers (0-100) stacked on a 32x32 RGBA tray icon —
-/// two rows mimic the Mac menu bar's "100% / 36%" pair. White digits with a
-/// black outline so they read on both light and dark taskbars.
-fn draw_tray_numbers(values: &[u32]) -> Vec<u8> {
-    const SIZE: usize = 32;
-    let scale = 2usize;
-    let glyph_w = 4 * scale;
-    let _glyph_h = 6 * scale;
-    let gap = scale;
+fn digit_columns(_digit: usize) -> usize {
+    4
+}
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TrayInk {
+    foreground: [u8; 4],
+    outline: [u8; 4],
+}
+
+const TRAY_INK_LIGHT: TrayInk = TrayInk {
+    foreground: [20, 24, 33, 255],
+    outline: [255, 255, 255, 220],
+};
+const TRAY_INK_DARK: TrayInk = TrayInk {
+    foreground: [255, 255, 255, 255],
+    outline: [0, 0, 0, 200],
+};
+const TRAY_INK_FALLBACK: TrayInk = TrayInk {
+    foreground: [255, 255, 255, 255],
+    outline: [0, 0, 0, 230],
+};
+
+fn tray_ink_for_system_theme(value: Option<u32>) -> TrayInk {
+    match value {
+        Some(1) => TRAY_INK_LIGHT,
+        Some(0) => TRAY_INK_DARK,
+        _ => TRAY_INK_FALLBACK,
+    }
+}
+
+/// One read per paint. A theme change shows up on the next normal redraw;
+/// there is no cache and no settings-change listener.
+fn read_system_uses_light_theme() -> Option<u32> {
+    #[cfg(windows)]
+    {
+        read_system_uses_light_theme_win()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn read_system_uses_light_theme_win() -> Option<u32> {
+    use windows::core::w;
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ, REG_DWORD,
+        REG_NONE,
+    };
+
+    // Every successful open closes, including the query-failure returns.
+    struct OpenKey(HKEY);
+    impl Drop for OpenKey {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = RegCloseKey(self.0);
+            }
+        }
+    }
+
+    unsafe {
+        let mut raw = HKEY(std::ptr::null_mut());
+        let opened = RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+            Some(0),
+            KEY_READ,
+            &mut raw,
+        );
+        if opened != ERROR_SUCCESS || raw.0.is_null() {
+            return None;
+        }
+        let key = OpenKey(raw);
+        let mut kind = REG_NONE;
+        let mut data = [0u8; 4];
+        let mut len = data.len() as u32;
+        let queried = RegQueryValueExW(
+            key.0,
+            w!("SystemUsesLightTheme"),
+            None,
+            Some(&mut kind),
+            Some(data.as_mut_ptr()),
+            Some(&mut len),
+        );
+        if queried != ERROR_SUCCESS || kind != REG_DWORD || len != 4 {
+            return None;
+        }
+        Some(u32::from_le_bytes(data))
+    }
+}
+
+fn draw_tray_numbers_with(values: &[u32], ink: TrayInk) -> Vec<u8> {
+    const SIZE: usize = 32;
+    const SCALE: usize = 2;
+    const GAP: usize = 2;
     let mut mask = [false; SIZE * SIZE];
-    let rows: &[usize] = if values.len() >= 2 { &[3, 17] } else { &[10] };
+    let rows: &[usize] = if values.len() >= 2 { &[2, 18] } else { &[10] };
 
     for (value, y0) in values.iter().zip(rows) {
         let digits: Vec<usize> = value
@@ -323,31 +412,37 @@ fn draw_tray_numbers(values: &[u32]) -> Vec<u8> {
             .chars()
             .filter_map(|c| c.to_digit(10).map(|d| d as usize))
             .collect();
-        let text_w = digits.len() * glyph_w + digits.len().saturating_sub(1) * gap;
-        let x0 = (SIZE.saturating_sub(text_w)) / 2;
-
-        for (i, d) in digits.iter().enumerate() {
-            let gx = x0 + i * (glyph_w + gap);
-            for (row, bits) in DIGIT_FONT[*d].iter().enumerate() {
-                for col in 0..4 {
-                    if bits & (0x8 >> col) != 0 {
-                        for sy in 0..scale {
-                            for sx in 0..scale {
-                                let x = gx + col * scale + sx;
-                                let y = y0 + row * scale + sy;
-                                if x < SIZE && y < SIZE {
-                                    mask[y * SIZE + x] = true;
-                                }
+        let mut text_w = 0usize;
+        for (index, digit) in digits.iter().enumerate() {
+            text_w += digit_columns(*digit) * SCALE;
+            if index + 1 != digits.len() {
+                text_w += GAP;
+            }
+        }
+        let mut gx = SIZE.saturating_sub(text_w) / 2;
+        for digit in digits {
+            let columns = digit_columns(digit);
+            for (row, bits) in DIGIT_FONT[digit].iter().enumerate() {
+                for col in 0..columns {
+                    if bits & (1u8 << (columns - 1 - col)) == 0 {
+                        continue;
+                    }
+                    for sy in 0..SCALE {
+                        for sx in 0..SCALE {
+                            let x = gx + col * SCALE + sx;
+                            let y = y0 + row * SCALE + sy;
+                            if x < SIZE && y < SIZE {
+                                mask[y * SIZE + x] = true;
                             }
                         }
                     }
                 }
             }
+            gx += columns * SCALE + GAP;
         }
     }
 
     let mut rgba = vec![0u8; SIZE * SIZE * 4];
-    // Outline pass: black anywhere adjacent to a text pixel.
     for y in 0..SIZE {
         for x in 0..SIZE {
             if mask[y * SIZE + x] {
@@ -366,7 +461,7 @@ fn draw_tray_numbers(values: &[u32]) -> Vec<u8> {
             });
             if near {
                 let p = (y * SIZE + x) * 4;
-                rgba[p..p + 4].copy_from_slice(&[0, 0, 0, 230]);
+                rgba[p..p + 4].copy_from_slice(&ink.outline);
             }
         }
     }
@@ -374,11 +469,20 @@ fn draw_tray_numbers(values: &[u32]) -> Vec<u8> {
         for x in 0..SIZE {
             if mask[y * SIZE + x] {
                 let p = (y * SIZE + x) * 4;
-                rgba[p..p + 4].copy_from_slice(&[255, 255, 255, 255]);
+                rgba[p..p + 4].copy_from_slice(&ink.foreground);
             }
         }
     }
     rgba
+}
+
+/// Renders one or two numbers on a 32x32 RGBA tray icon. Ink follows the
+/// Windows taskbar theme read at paint time, not the in-app appearance.
+fn draw_tray_numbers(values: &[u32]) -> Vec<u8> {
+    draw_tray_numbers_with(
+        values,
+        tray_ink_for_system_theme(read_system_uses_light_theme()),
+    )
 }
 
 fn apply_main_tray_projection(
@@ -2484,6 +2588,202 @@ fn set_webview_memory_level(window: &tauri::WebviewWindow, low: bool) {
     });
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PixelRect {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+fn rect_span_end(origin: i32, span: u32) -> i64 {
+    i64::from(origin) + i64::from(span)
+}
+
+fn clamp_axis(value: i64, start: i64, end: i64, span: i64) -> i64 {
+    let room = end - start;
+    if span > room {
+        start
+    } else {
+        value.clamp(start, end - span)
+    }
+}
+
+fn fit_i32(value: i64) -> i32 {
+    value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+}
+
+fn physical_px(value: f64) -> i32 {
+    if !value.is_finite() {
+        return 0;
+    }
+    fit_i32(value.round() as i64)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TaskbarEdge {
+    Bottom,
+    Top,
+    Left,
+    Right,
+}
+
+/// Largest positive inset wins. Equal insets keep the earlier edge, which is
+/// bottom, then top, then left, then right. No positive inset is the bottom.
+fn taskbar_edge(monitor: PixelRect, work: PixelRect) -> TaskbarEdge {
+    let top = i64::from(work.y) - i64::from(monitor.y);
+    let bottom = rect_span_end(monitor.y, monitor.height) - rect_span_end(work.y, work.height);
+    let left = i64::from(work.x) - i64::from(monitor.x);
+    let right = rect_span_end(monitor.x, monitor.width) - rect_span_end(work.x, work.width);
+    let insets = [
+        (bottom, TaskbarEdge::Bottom),
+        (top, TaskbarEdge::Top),
+        (left, TaskbarEdge::Left),
+        (right, TaskbarEdge::Right),
+    ];
+    let max_positive = insets
+        .iter()
+        .map(|(inset, _)| *inset)
+        .filter(|inset| *inset > 0)
+        .max();
+    match max_positive {
+        Some(max) => insets
+            .into_iter()
+            .find(|(inset, _)| *inset == max)
+            .map(|(_, edge)| edge)
+            .unwrap_or(TaskbarEdge::Bottom),
+        None => TaskbarEdge::Bottom,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WindowMargin {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+impl WindowMargin {
+    const ZERO: Self = Self {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+}
+
+fn frame_inset(value: i64) -> i32 {
+    if (0..=128).contains(&value) {
+        value as i32
+    } else {
+        0
+    }
+}
+
+fn visible_span(outer: u32, leading: i32, trailing: i32) -> u32 {
+    let inset = i64::from(leading) + i64::from(trailing);
+    (i64::from(outer) - inset).clamp(0, i64::from(u32::MAX)) as u32
+}
+
+/// Borderless Windows shadow lives inside the outer rect (Win11: about 1px on
+/// top, a resize frame on the other edges). Placement uses the visible client.
+fn popover_outer_origin(
+    click: (i32, i32),
+    outer_size: (u32, u32),
+    margin: WindowMargin,
+    monitor_rect: PixelRect,
+    work_area: PixelRect,
+) -> (i32, i32) {
+    let visible = (
+        visible_span(outer_size.0, margin.left, margin.right),
+        visible_span(outer_size.1, margin.top, margin.bottom),
+    );
+    let (x, y) = popover_origin(click, visible, monitor_rect, work_area);
+    (
+        fit_i32(i64::from(x) - i64::from(margin.left)),
+        fit_i32(i64::from(y) - i64::from(margin.top)),
+    )
+}
+
+fn popover_origin(
+    click: (i32, i32),
+    window_size: (u32, u32),
+    monitor_rect: PixelRect,
+    work_area: PixelRect,
+) -> (i32, i32) {
+    let width = i64::from(window_size.0);
+    let height = i64::from(window_size.1);
+    let left = i64::from(work_area.x);
+    let top = i64::from(work_area.y);
+    let right = rect_span_end(work_area.x, work_area.width);
+    let bottom = rect_span_end(work_area.y, work_area.height);
+    let (x, y) = match taskbar_edge(monitor_rect, work_area) {
+        TaskbarEdge::Bottom => (i64::from(click.0) - width, bottom - height),
+        TaskbarEdge::Top => (i64::from(click.0) - width, top),
+        TaskbarEdge::Left => (left, i64::from(click.1) - height),
+        TaskbarEdge::Right => (right - width, i64::from(click.1) - height),
+    };
+    (
+        fit_i32(clamp_axis(x, left, right, width)),
+        fit_i32(clamp_axis(y, top, bottom, height)),
+    )
+}
+
+fn pixel_rect_from_monitor(monitor: &tauri::Monitor) -> PixelRect {
+    let position = monitor.position();
+    let size = monitor.size();
+    PixelRect {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
+    }
+}
+
+fn pixel_rect_from_work_area(monitor: &tauri::Monitor) -> PixelRect {
+    let area = monitor.work_area();
+    PixelRect {
+        x: area.position.x,
+        y: area.position.y,
+        width: area.size.width,
+        height: area.size.height,
+    }
+}
+
+fn popover_monitor(window: &tauri::WebviewWindow) -> Option<tauri::Monitor> {
+    window.primary_monitor().ok().flatten()
+}
+
+fn window_margin(window: &tauri::WebviewWindow) -> WindowMargin {
+    let Ok(outer_pos) = window.outer_position() else {
+        return WindowMargin::ZERO;
+    };
+    let Ok(inner_pos) = window.inner_position() else {
+        return WindowMargin::ZERO;
+    };
+    let Ok(outer_size) = window.outer_size() else {
+        return WindowMargin::ZERO;
+    };
+    let Ok(inner_size) = window.inner_size() else {
+        return WindowMargin::ZERO;
+    };
+    let left = i64::from(inner_pos.x) - i64::from(outer_pos.x);
+    let top = i64::from(inner_pos.y) - i64::from(outer_pos.y);
+    let right = i64::from(outer_pos.x) + i64::from(outer_size.width)
+        - i64::from(inner_pos.x)
+        - i64::from(inner_size.width);
+    let bottom = i64::from(outer_pos.y) + i64::from(outer_size.height)
+        - i64::from(inner_pos.y)
+        - i64::from(inner_size.height);
+    WindowMargin {
+        left: frame_inset(left),
+        top: frame_inset(top),
+        right: frame_inset(right),
+        bottom: frame_inset(bottom),
+    }
+}
+
 fn toggle_popover(app: &tauri::AppHandle, click: tauri::PhysicalPosition<f64>) {
     let Some(window) = app.get_webview_window("main") else {
         return;
@@ -2501,14 +2801,27 @@ fn toggle_popover(app: &tauri::AppHandle, click: tauri::PhysicalPosition<f64>) {
 
     set_webview_memory_level(&window, false);
 
-    // Anchor the popover's bottom-right corner near the tray click,
-    // which sits next to the clock on a standard bottom taskbar.
     let size = window
         .outer_size()
         .unwrap_or(tauri::PhysicalSize::new(380, 600));
-    let x = (click.x - f64::from(size.width)).max(0.0);
-    let y = (click.y - f64::from(size.height) - 8.0).max(0.0);
-    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    let margin = window_margin(&window);
+    let frames = popover_monitor(&window).map(|monitor| {
+        (
+            pixel_rect_from_monitor(&monitor),
+            pixel_rect_from_work_area(&monitor),
+        )
+    });
+    let anchor = (physical_px(click.x), physical_px(click.y));
+    if let Some((monitor_rect, work_area)) = frames {
+        let (x, y) = popover_outer_origin(
+            anchor,
+            (size.width, size.height),
+            margin,
+            monitor_rect,
+            work_area,
+        );
+        let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    }
     let _ = window.show();
     let _ = window.set_focus();
     let _ = window.emit("popover-shown", ());
@@ -2659,6 +2972,10 @@ mod tests {
         rename_cached_snapshot, rename_cached_snapshot_in, rename_cached_snapshots_in,
         restore_kimi_wallet_rows,
         restore_last_success_after_error,
+        digit_columns, draw_tray_numbers_with, popover_origin, popover_outer_origin,
+        tray_ink_for_system_theme, WindowMargin,
+        PixelRect,
+        TRAY_INK_DARK, TRAY_INK_FALLBACK, TRAY_INK_LIGHT,
         retain_current_onenewapi_results, strip_entry_application_order, strip_icon_ids_to_clear,
         strip_is_active, strip_reset_ids, updater_endpoint_strings, CachedSnap, FailState,
         OneNewApiMutationGuard, StripEntry, SNAPSHOT_CACHE_MS, STALE_GRACE_MS,
@@ -3614,4 +3931,208 @@ mod tests {
         assert!(alerts::has_state_for_test("onenewapi@ticket07-b1:Usage"));
         alerts::forget_snapshot("onenewapi@ticket07-b1");
     }
+
+    fn rect(x: i32, y: i32, width: u32, height: u32) -> PixelRect {
+        PixelRect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    fn icon_pixel(rgba: &[u8], x: usize, y: usize) -> [u8; 4] {
+        let index = (y * 32 + x) * 4;
+        [rgba[index], rgba[index + 1], rgba[index + 2], rgba[index + 3]]
+    }
+
+    #[test]
+    fn tray_popover_shadow_inset_flushes_the_visible_edge() {
+        let margin = WindowMargin {
+            left: 8,
+            top: 1,
+            right: 8,
+            bottom: 8,
+        };
+        let monitor = rect(0, 0, 1920, 1080);
+        let bottom = rect(0, 0, 1920, 1040);
+        let low = popover_outer_origin((1000, 1050), (380, 600), margin, monitor, bottom);
+        let high = popover_outer_origin((1000, 1070), (380, 600), margin, monitor, bottom);
+        assert_eq!(low.1, 448);
+        assert_eq!(high.1, 448);
+        assert_eq!(low.1 + margin.top + (600 - margin.top - margin.bottom), 1040);
+
+        let top = rect(0, 48, 1920, 1032);
+        assert_eq!(
+            popover_outer_origin((1000, 10), (380, 600), margin, monitor, top).1,
+            47
+        );
+
+        let left = rect(48, 0, 1872, 1080);
+        assert_eq!(
+            popover_outer_origin((10, 800), (380, 600), margin, monitor, left).0,
+            40
+        );
+        let right = rect(0, 0, 1872, 1080);
+        let right_origin = popover_outer_origin((1800, 900), (380, 600), margin, monitor, right);
+        assert_eq!(right_origin.0 + margin.left + (380 - margin.left - margin.right), 1872);
+
+        assert_eq!(
+            popover_outer_origin((1000, 1070), (380, 600), WindowMargin::ZERO, monitor, bottom).1,
+            440
+        );
+    }
+
+    #[test]
+    fn tray_popover_bottom_edge_ignores_click_y() {
+        let monitor = rect(0, 0, 1920, 1080);
+        let work = rect(0, 0, 1920, 1040);
+        let high = popover_origin((1000, 1050), (380, 600), monitor, work);
+        let low = popover_origin((1000, 1070), (380, 600), monitor, work);
+        assert_eq!(high.1, 440);
+        assert_eq!(low.1, 440);
+        assert_eq!(popover_origin((2000, 1070), (380, 600), monitor, work).0, 1540);
+    }
+
+    #[test]
+    fn tray_digits_light_rows_keep_gap_and_slate_ink() {
+        let rgba = draw_tray_numbers_with(&[100, 97], TRAY_INK_LIGHT);
+        for y in 15..=16 {
+            for x in 0..32 {
+                assert_eq!(icon_pixel(&rgba, x, y), [0, 0, 0, 0], "x={x} y={y}");
+            }
+        }
+        assert_eq!(icon_pixel(&rgba, 6, 2), [20, 24, 33, 255]);
+        assert_eq!(icon_pixel(&rgba, 5, 2), [255, 255, 255, 220]);
+        assert_eq!(icon_pixel(&rgba, 4, 2), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn tray_digit_one_is_a_stem_with_a_top_left_flag() {
+        let rgba = draw_tray_numbers_with(&[1], TRAY_INK_DARK);
+        assert_eq!(icon_pixel(&rgba, 16, 10), [255, 255, 255, 255]);
+        assert_ne!(icon_pixel(&rgba, 14, 10), [255, 255, 255, 255]);
+        assert_eq!(icon_pixel(&rgba, 14, 12), [255, 255, 255, 255]);
+        assert_ne!(icon_pixel(&rgba, 14, 20), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn tray_digits_dark_and_fallback_outline_alpha() {
+        let dark = draw_tray_numbers_with(&[100, 97], TRAY_INK_DARK);
+        assert_eq!(icon_pixel(&dark, 6, 2), [255, 255, 255, 255]);
+        assert_eq!(icon_pixel(&dark, 5, 2), [0, 0, 0, 200]);
+        let fallback = draw_tray_numbers_with(&[100, 97], TRAY_INK_FALLBACK);
+        assert_eq!(icon_pixel(&fallback, 6, 2), [255, 255, 255, 255]);
+        assert_eq!(icon_pixel(&fallback, 5, 2), [0, 0, 0, 230]);
+    }
+
+    #[test]
+    fn tray_ink_follows_system_theme_dword() {
+        assert_eq!(tray_ink_for_system_theme(Some(1)), TRAY_INK_LIGHT);
+        assert_eq!(tray_ink_for_system_theme(Some(0)), TRAY_INK_DARK);
+        assert_eq!(tray_ink_for_system_theme(Some(2)), TRAY_INK_FALLBACK);
+        assert_eq!(tray_ink_for_system_theme(None), TRAY_INK_FALLBACK);
+    }
+
+    #[test]
+    fn tray_digits_hundred_keeps_side_margin() {
+        assert_eq!(digit_columns(1), 4);
+        assert_eq!(digit_columns(0), 4);
+        let rgba = draw_tray_numbers_with(&[100, 100], TRAY_INK_LIGHT);
+        for y in 0..32 {
+            assert_eq!(icon_pixel(&rgba, 0, y), [0, 0, 0, 0], "x=0 y={y}");
+            assert_eq!(icon_pixel(&rgba, 31, y), [0, 0, 0, 0], "x=31 y={y}");
+        }
+    }
+
+    #[test]
+    fn tray_digits_single_row_stays_in_the_middle_band() {
+        let rgba = draw_tray_numbers_with(&[97], TRAY_INK_LIGHT);
+        let mut saw_foreground = false;
+        for y in 0..32 {
+            for x in 0..32 {
+                if icon_pixel(&rgba, x, y) == TRAY_INK_LIGHT.foreground {
+                    assert!((10..=21).contains(&y), "foreground at {x},{y}");
+                    saw_foreground = true;
+                }
+            }
+        }
+        assert!(saw_foreground);
+    }
+
+    #[test]
+    fn tray_digits_empty_values_are_transparent() {
+        let rgba = draw_tray_numbers_with(&[], TRAY_INK_LIGHT);
+        assert_eq!(rgba.len(), 32 * 32 * 4);
+        assert!(rgba.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn tray_digits_closed_shapes_keep_an_interior_counter() {
+        for value in [0u32, 6, 8, 9] {
+            let rgba = draw_tray_numbers_with(&[value], TRAY_INK_LIGHT);
+            assert_eq!(
+                icon_pixel(&rgba, 14, 10),
+                TRAY_INK_LIGHT.foreground,
+                "{value} stroke"
+            );
+            assert_eq!(
+                icon_pixel(&rgba, 14, 12),
+                TRAY_INK_LIGHT.outline,
+                "{value} counter"
+            );
+        }
+    }
+
+    #[test]
+    fn tray_digits_out_of_range_still_clips_inside_the_icon() {
+        let rgba = draw_tray_numbers_with(&[1000], TRAY_INK_DARK);
+        assert_eq!(rgba.len(), 32 * 32 * 4);
+    }
+
+    #[test]
+    fn tray_popover_top_edge_uses_work_top() {
+        let monitor = rect(0, 0, 1920, 1080);
+        let work = rect(0, 48, 1920, 1032);
+        assert_eq!(popover_origin((1000, 10), (380, 600), monitor, work).1, 48);
+        assert_eq!(popover_origin((1000, 80), (380, 600), monitor, work).1, 48);
+    }
+
+    #[test]
+    fn tray_popover_side_edges_pin_the_fixed_axis() {
+        let monitor = rect(0, 0, 1920, 1080);
+        let left = rect(48, 0, 1872, 1080);
+        assert_eq!(popover_origin((10, 800), (380, 600), monitor, left), (48, 200));
+        assert_eq!(popover_origin((10, 100), (380, 600), monitor, left).1, 0);
+        let right = rect(0, 0, 1872, 1080);
+        assert_eq!(
+            popover_origin((1800, 900), (380, 600), monitor, right),
+            (1492, 300)
+        );
+    }
+
+    #[test]
+    fn tray_popover_oversized_window_uses_work_origin() {
+        let area = rect(10, 20, 200, 400);
+        assert_eq!(popover_origin((100, 100), (380, 600), area, area), (10, 20));
+        let monitor = rect(0, 0, 200, 1080);
+        let work = rect(0, 0, 200, 1040);
+        assert_eq!(popover_origin((150, 1070), (380, 600), monitor, work), (0, 440));
+    }
+
+    #[test]
+    fn tray_popover_zero_inset_uses_the_bottom_edge() {
+        let area = rect(0, 0, 1920, 1080);
+        assert_eq!(popover_origin((1000, 500), (380, 600), area, area).1, 480);
+    }
+
+    #[test]
+    fn tray_popover_equal_insets_follow_edge_priority() {
+        let monitor = rect(0, 0, 1920, 1080);
+        let vertical = rect(0, 40, 1920, 1000);
+        assert_eq!(popover_origin((1000, 100), (380, 600), monitor, vertical).1, 440);
+        let horizontal = rect(40, 0, 1840, 1080);
+        assert_eq!(popover_origin((1000, 800), (380, 600), monitor, horizontal).0, 40);
+    }
+
 }
