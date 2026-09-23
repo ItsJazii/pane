@@ -6,6 +6,9 @@
 - **Weekly capacity (#236).** Codex and Claude cards estimate what 100%
   of the weekly limit is worth in tokens and API-equivalent dollars,
   and keep a history of weeks Pane saw reach 100%.
+- **Claude: banked limit resets** (e.g. the Opus 5.5 launch reset) show
+  in the Rate Limit Resets row with their expiry, and can be used from
+  Pane like Codex's.
 
 ## 0.4.53 — 2026-09-21
 
