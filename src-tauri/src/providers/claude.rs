@@ -494,8 +494,10 @@ fn parse_reset_credit_id(credit_id: &str) -> Option<&str> {
     if !valid_grant_id(grant) {
         return None;
     }
+    // Any positive remaining count is legitimate — nothing bounds how
+    // many resets a grant can bank.
     match left.parse::<u32>() {
-        Ok(n) if (1..=1000).contains(&n) => Some(grant),
+        Ok(n) if n >= 1 => Some(grant),
         _ => None,
     }
 }
@@ -847,7 +849,8 @@ mod tests {
         assert_eq!(parse_reset_credit_id("opus55-launch-promax-20260921"), None);
         assert_eq!(parse_reset_credit_id("g-1~0"), None);
         assert_eq!(parse_reset_credit_id("g-1~abc"), None);
-        assert_eq!(parse_reset_credit_id("g-1~1001"), None);
+        // No cap on how many resets a grant can bank.
+        assert_eq!(parse_reset_credit_id("g-1~1001"), Some("g-1"));
         assert_eq!(parse_reset_credit_id("G_1~2"), None);
         assert_eq!(parse_reset_credit_id("~2"), None);
         // Multiple '~': the last wins, so the grant part keeps a '~'
