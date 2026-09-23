@@ -23,6 +23,7 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::providers;
 use crate::providers::onenewapi::store::atomic_write;
+use crate::spend::{self, WindowTotals};
 
 /// History depth per provider — enough to average over, small enough to
 /// stay readable in the popover and cheap on disk.
@@ -76,15 +77,15 @@ pub struct Entry {
 }
 
 /// Advance one provider's ledger by one usage poll. `totals` is the
-/// spend scan's (cost, tokens, scan-started-ms) inside the window, or
-/// None when no scan has completed yet — an unknown scan result updates
-/// the progress peak but never touches the money.
+/// spend scan's bounded WindowTotals inside the window, or None when no
+/// scan has completed yet — an unknown scan result updates the progress
+/// peak but never touches the money.
 pub fn update(
     entry: &Entry,
     window_start_ms: i64,
     resets_at_ms: i64,
     used_pct: f64,
-    totals: Option<(f64, f64, i64)>,
+    totals: Option<WindowTotals>,
     now_ms: i64,
 ) -> Entry {
     let mut out = entry.clone();
@@ -122,8 +123,8 @@ pub fn update(
             start_ms: window_start_ms,
             end_ms: resets_at_ms,
             peak_pct: used_pct,
-            tokens: totals.map(|(_, t, _)| t).unwrap_or(0.0),
-            cost: totals.map(|(c, _, _)| c).unwrap_or(0.0),
+            tokens: totals.map(|t| t.tokens).unwrap_or(0.0),
+            cost: totals.map(|t| t.cost).unwrap_or(0.0),
             status: Status::Active,
             observed_at_ms: None,
             hit_full_at_ms: None,
@@ -137,21 +138,22 @@ pub fn update(
     if c.status != Status::Observed {
         c.peak_pct = c.peak_pct.max(used_pct);
         c.end_ms = resets_at_ms;
-        if let Some((cost, tokens, _)) = totals {
-            c.cost = cost;
-            c.tokens = tokens;
+        if let Some(t) = totals {
+            c.cost = t.cost;
+            c.tokens = t.tokens;
         }
         if used_pct >= 100.0 && c.hit_full_at_ms.is_none() {
             c.hit_full_at_ms = Some(now_ms);
         }
-        // Sealing needs totals from a scan STARTED at-or-after the
-        // moment 100% was first seen — possibly this same poll if the
-        // scan is already newer — so files read before the hit can't
-        // freeze an under-count into the permanent sample. Scan-start
-        // (not scan-end) is the strict bound: a scan that began before
-        // the hit may still have read this card's files early.
-        if let (Some(hit), Some((_, _, scan_started))) = (c.hit_full_at_ms, totals) {
-            if scan_started >= hit {
+        // Sealing needs totals from a COMPLETE scan STARTED at-or-after
+        // the moment 100% was first seen — possibly this same poll if
+        // the scan is already newer — while the window's hours are
+        // still reconstructible (always true for a ≤7-day window; the
+        // same rule resolve_pending applies to archived cycles). A
+        // scan with a swallowed read gap, or files read before the
+        // hit, can't prove the final usage.
+        if let (Some(hit), Some(t)) = (c.hit_full_at_ms, totals) {
+            if t.complete && t.scan_started_ms >= hit && reconstructible(c, now_ms) {
                 c.status = Status::Observed;
                 c.peak_pct = c.peak_pct.max(100.0);
                 c.observed_at_ms = Some(now_ms);
@@ -168,30 +170,39 @@ fn is_pending(c: &Cycle) -> bool {
     c.status == Status::Observed && c.observed_at_ms.is_none()
 }
 
-/// Once hour buckets are this far past a window's end they're gone for
-/// good — a still-pending cycle's money can never be confirmed.
-const HOUR_BUCKETS_GONE_MS: i64 = 8 * 86_400_000;
+/// A cycle's totals are only recomputable while its start hour is still
+/// inside the spend scan's retention window (spend::HOURS_WINDOW_MS;
+/// +1 h slack for the floored start bucket). Past that, a pending cycle
+/// can never be confirmed and must give up.
+fn reconstructible(c: &Cycle, now_ms: i64) -> bool {
+    now_ms - spend::HOURS_WINDOW_MS + 3_600_000 <= c.start_ms
+}
 
 /// Retry sealing a pending (rolled-over unsealed) cycle against a
 /// newer scan. `totals` must be window_totals bounded to the cycle's
-/// own [start, end] hours. Seals when the scan STARTED at-or-after
-/// hit_full_at_ms; past end + 8 days the buckets are gone and the
-/// cycle gives up as incomplete.
-pub fn resolve_pending(c: &Cycle, totals: Option<(f64, f64, i64)>, now_ms: i64) -> Cycle {
+/// own [start, end] hours — any scan refines the displayed numbers,
+/// but sealing needs a COMPLETE scan STARTED at-or-after hit_full_at_ms.
+/// Once the start hour ages out of retention the money can never be
+/// confirmed: give up as incomplete with its last totals.
+pub fn resolve_pending(c: &Cycle, totals: Option<WindowTotals>, now_ms: i64) -> Cycle {
     let mut out = c.clone();
     if !is_pending(&out) {
         return out;
     }
-    if let (Some(hit), Some((cost, tokens, started))) = (out.hit_full_at_ms, totals) {
-        if started >= hit {
-            out.cost = cost;
-            out.tokens = tokens;
-            out.observed_at_ms = Some(now_ms);
-            return out;
-        }
+    // Fresher scans improve the displayed totals even when they can't
+    // confirm them.
+    if let Some(t) = totals {
+        out.cost = t.cost;
+        out.tokens = t.tokens;
     }
-    if now_ms > out.end_ms + HOUR_BUCKETS_GONE_MS {
+    if !reconstructible(&out, now_ms) {
         out.status = Status::Incomplete;
+        return out;
+    }
+    if let (Some(hit), Some(t)) = (out.hit_full_at_ms, totals) {
+        if t.complete && t.scan_started_ms >= hit {
+            out.observed_at_ms = Some(now_ms);
+        }
     }
     out
 }
@@ -406,7 +417,7 @@ pub fn note_weekly_window(
     window_start_ms: i64,
     resets_at_ms: i64,
     used_pct: f64,
-    totals: Option<(f64, f64, i64)>,
+    totals: Option<WindowTotals>,
     now_ms: i64,
 ) -> Entry {
     let mut guard = ledger().lock().unwrap_or_else(|e| e.into_inner());
@@ -420,7 +431,7 @@ pub fn note_weekly_window(
     for c in next.history.iter_mut() {
         *c = resolve_pending(
             c,
-            crate::spend::window_totals(spend_id, c.start_ms, c.end_ms),
+            spend::window_totals(spend_id, c.start_ms, c.end_ms),
             now_ms,
         );
     }
@@ -453,15 +464,20 @@ mod tests {
     const WEEK: i64 = 7 * 86_400_000;
     const T0: i64 = 1_800_000_000_000; // fixed epoch ms
 
-    /// A poll at T0+1s whose totals come from a scan STARTED at T0 —
-    /// always an "older" scan, so a 100% seen here stays pending.
+    /// Totals as a complete scan reports them.
+    fn wt(cost: f64, tokens: f64, started_ms: i64) -> WindowTotals {
+        WindowTotals { cost, tokens, scan_started_ms: started_ms, complete: true }
+    }
+
+    /// A poll at T0+1s whose totals come from a complete scan STARTED
+    /// at T0 — always an "older" scan, so a 100% seen here stays pending.
     fn poll(entry: &Entry, start: i64, pct: f64, totals: Option<(f64, f64)>) -> Entry {
         update(
             entry,
             start,
             start + WEEK,
             pct,
-            totals.map(|(c, t)| (c, t, T0)),
+            totals.map(|(c, t)| wt(c, t, T0)),
             T0 + 1_000,
         )
     }
@@ -509,7 +525,7 @@ mod tests {
         // its newer totals — and nothing reprices it afterwards.
         let e = update(
             &e, T0, T0 + WEEK, 100.0,
-            Some((230.0, 1_400_000_000.0, T0 + 2_000)),
+            Some(wt(230.0, 1_400_000_000.0, T0 + 2_000)),
             T0 + 3_000,
         );
         let cur = e.current.as_ref().unwrap();
@@ -520,7 +536,7 @@ mod tests {
 
         let e2 = update(
             &e, T0, T0 + WEEK, 100.0,
-            Some((300.0, 9_000_000_000.0, T0 + 4_000)),
+            Some(wt(300.0, 9_000_000_000.0, T0 + 4_000)),
             T0 + 5_000,
         );
         let cur2 = e2.current.as_ref().unwrap();
@@ -541,14 +557,14 @@ mod tests {
         let e = poll(&Entry::default(), T0, 40.0, Some((40.0, 400_000_000.0)));
         let e = update(
             &e, T0, T0 + WEEK, 100.0,
-            Some((218.0, 1_300_000_000.0, T0 - 5_000)),
+            Some(wt(218.0, 1_300_000_000.0, T0 - 5_000)),
             T0 + 1_000,
         );
         assert_eq!(e.current.as_ref().unwrap().status, Status::Active);
         // A scan started after the hit seals, with its newer totals.
         let e = update(
             &e, T0, T0 + WEEK, 100.0,
-            Some((230.0, 1_400_000_000.0, T0 + 2_000)),
+            Some(wt(230.0, 1_400_000_000.0, T0 + 2_000)),
             T0 + 3_000,
         );
         let cur = e.current.as_ref().unwrap();
@@ -556,14 +572,40 @@ mod tests {
         assert_eq!(cur.cost, 230.0);
     }
 
+    /// A scan with a swallowed read gap still feeds the live estimate —
+    /// but a permanent sample only seals on a COMPLETE scan.
+    #[test]
+    fn an_incomplete_scan_updates_but_cannot_seal() {
+        let e = poll(&Entry::default(), T0, 40.0, Some((40.0, 400_000_000.0)));
+        let e = update(
+            &e, T0, T0 + WEEK, 100.0,
+            Some(WindowTotals {
+                cost: 218.0, tokens: 1_300_000_000.0,
+                scan_started_ms: T0 + 2_000, complete: false,
+            }),
+            T0 + 3_000,
+        );
+        let cur = e.current.as_ref().unwrap();
+        assert_eq!(cur.status, Status::Active, "gapped scan can't seal");
+        assert_eq!(cur.cost, 218.0, "totals still update the estimate");
+        // The next complete post-hit scan seals.
+        let e = update(
+            &e, T0, T0 + WEEK, 100.0,
+            Some(wt(230.0, 1_400_000_000.0, T0 + 4_000)),
+            T0 + 5_000,
+        );
+        assert_eq!(e.current.as_ref().unwrap().status, Status::Observed);
+        assert_eq!(e.current.as_ref().unwrap().cost, 230.0);
+    }
+
     /// When the totals on the very poll that sees 100% already come
-    /// from a scan started at-or-after that moment, the cycle seals
-    /// immediately.
+    /// from a complete scan started at-or-after that moment, the cycle
+    /// seals immediately.
     #[test]
     fn observing_100_seals_same_poll_when_the_scan_is_newer() {
         let e = update(
             &Entry::default(), T0, T0 + WEEK, 100.0,
-            Some((218.0, 1_300_000_000.0, T0 + 1_000)),
+            Some(wt(218.0, 1_300_000_000.0, T0 + 1_000)),
             T0 + 1_000,
         );
         let cur = e.current.as_ref().unwrap();
@@ -589,34 +631,56 @@ mod tests {
     }
 
     /// resolve_pending retries a pending history cycle against newer
-    /// scans: a scan started after the hit seals it with bounded
-    /// totals; an older one leaves it pending; once the hour buckets
-    /// are gone it gives up as incomplete.
+    /// scans: a COMPLETE scan started after the hit seals it with
+    /// bounded totals; a pre-hit or gapped scan only refines the
+    /// display; once the start hour leaves retention it gives up as
+    /// incomplete.
     #[test]
     fn resolve_pending_seals_then_gives_up() {
         let e = poll(&Entry::default(), T0, 100.0, Some((218.0, 1_300_000_000.0)));
         let e = poll(&e, T0 + WEEK, 2.0, Some((0.5, 5_000_000.0)));
         let c = e.history[0].clone();
         assert!(is_pending(&c));
+        assert_eq!(c.hit_full_at_ms, Some(T0 + 1_000));
 
-        // Scan started before the hit → stays pending.
-        let still = resolve_pending(&c, Some((999.0, 9e9, T0 - 1)), T0 + 9_000);
-        assert!(is_pending(&still));
-        assert_eq!(still.cost, 218.0, "unconfirmed totals untouched");
-
-        // Scan started after the hit → seals with ITS totals.
-        let sealed = resolve_pending(&c, Some((240.0, 1_500_000_000.0, T0 + 2_000)), T0 + 9_000);
+        // One day after the window's end the start hour is still
+        // retained — a post-hit complete scan seals.
+        let day_ms = 86_400_000;
+        let sealed = resolve_pending(&c, Some(wt(240.0, 1_500_000_000.0, T0 + 2_000)), c.end_ms + day_ms);
         assert_eq!(sealed.status, Status::Observed);
-        assert_eq!(sealed.observed_at_ms, Some(T0 + 9_000));
+        assert_eq!(sealed.observed_at_ms, Some(c.end_ms + day_ms));
         assert_eq!(sealed.cost, 240.0);
         assert_eq!(sealed.tokens, 1_500_000_000.0);
 
-        // Past end + 8 days the hour buckets are gone → incomplete.
-        let old = Cycle { end_ms: T0, ..c.clone() };
-        let gave_up = resolve_pending(&old, None, T0 + HOUR_BUCKETS_GONE_MS + 1);
+        // A scan started before the hit → stays pending; its totals
+        // still refresh the display.
+        let still = resolve_pending(&c, Some(wt(999.0, 9e9, T0 - 1)), T0 + 9_000);
+        assert!(is_pending(&still));
+        assert_eq!(still.cost, 999.0);
+        // A gapped post-hit scan can't confirm either.
+        let gapped = resolve_pending(
+            &c,
+            Some(WindowTotals {
+                cost: 300.0, tokens: 2e9,
+                scan_started_ms: T0 + 5_000, complete: false,
+            }),
+            T0 + 9_000,
+        );
+        assert!(is_pending(&gapped));
+        assert_eq!(gapped.cost, 300.0, "display totals update anyway");
+
+        // Three days after end the start hour is gone (9-day retention
+        // − 7-day window ≈ 2 days of retry room) — even a post-hit
+        // complete scan can't seal anymore.
+        let gave_up = resolve_pending(
+            &c,
+            Some(wt(240.0, 1_500_000_000.0, c.end_ms + 3 * day_ms)),
+            c.end_ms + 3 * day_ms,
+        );
         assert_eq!(gave_up.status, Status::Incomplete);
+
         // A sealed cycle is immune to resolve_pending.
-        let immune = resolve_pending(&sealed, Some((1.0, 1.0, 0)), T0 + 9_000);
+        let immune = resolve_pending(&sealed, Some(wt(1.0, 1.0, 0)), T0 + 9_000);
         assert_eq!(immune.cost, 240.0);
     }
 
@@ -626,11 +690,11 @@ mod tests {
     fn average_excludes_pending_observed_weeks() {
         let mut e = Entry::default();
         // Week 1 seals in place (scan stamp = its poll's now).
-        e = update(&e, T0, T0 + WEEK, 100.0, Some((200.0, 1_000_000_000.0, T0)), T0);
+        e = update(&e, T0, T0 + WEEK, 100.0, Some(wt(200.0, 1_000_000_000.0, T0)), T0);
         // Week 2 hits 100% with a pre-hit scan → pending; week 3's
         // rollover archives it finalizing.
-        e = update(&e, T0 + WEEK, T0 + 2 * WEEK, 100.0, Some((260.0, 1_600_000_000.0, T0)), T0 + WEEK);
-        e = update(&e, T0 + 2 * WEEK, T0 + 3 * WEEK, 10.0, Some((20.0, 0.0, T0)), T0 + 2 * WEEK);
+        e = update(&e, T0 + WEEK, T0 + 2 * WEEK, 100.0, Some(wt(260.0, 1_600_000_000.0, T0)), T0 + WEEK);
+        e = update(&e, T0 + 2 * WEEK, T0 + 3 * WEEK, 10.0, Some(wt(20.0, 0.0, T0)), T0 + 2 * WEEK);
         assert!(is_pending(&e.history[0]));
         let (_, _, n) = observed_average(&e).unwrap();
         assert_eq!(n, 1, "the finalizing week isn't evidence yet");
@@ -666,7 +730,7 @@ mod tests {
     #[test]
     fn reset_jitter_within_thirty_minutes_is_the_same_cycle() {
         let e = poll(&Entry::default(), T0, 40.0, Some((40.0, 400_000_000.0)));
-        let e = update(&e, T0 + 20 * 60_000, T0 + WEEK + 20 * 60_000, 41.0, Some((41.0, 410_000_000.0, T0)), T0 + 2_000);
+        let e = update(&e, T0 + 20 * 60_000, T0 + WEEK + 20 * 60_000, 41.0, Some(wt(41.0, 410_000_000.0, T0)), T0 + 2_000);
         assert!(e.history.is_empty(), "jitter must not archive the cycle");
         assert_eq!(e.current.as_ref().unwrap().peak_pct, 41.0);
         // Beyond the slack it's a genuinely different window.
@@ -678,7 +742,7 @@ mod tests {
     fn history_is_newest_first_and_capped_at_twelve() {
         let mut e = Entry::default();
         for w in 0..15i64 {
-            e = update(&e, T0 + w * WEEK, T0 + (w + 1) * WEEK, 10.0, Some((w as f64, 0.0, T0)), T0);
+            e = update(&e, T0 + w * WEEK, T0 + (w + 1) * WEEK, 10.0, Some(wt(w as f64, 0.0, T0)), T0);
         }
         assert_eq!(e.history.len(), 12);
         // The 15th poll is the active current; history holds w13..w2.
@@ -692,10 +756,10 @@ mod tests {
         // Week 1 observed at $200/1B, week 2 incomplete at $150, week 3
         // observed at $260/1.6B, week 4 (current) active. Scans stamp
         // at-or-after their poll so the observed weeks seal in place.
-        e = update(&e, T0, T0 + WEEK, 100.0, Some((200.0, 1_000_000_000.0, T0)), T0);
-        e = update(&e, T0 + WEEK, T0 + 2 * WEEK, 60.0, Some((150.0, 0.0, T0)), T0);
-        e = update(&e, T0 + 2 * WEEK, T0 + 3 * WEEK, 100.0, Some((260.0, 1_600_000_000.0, T0)), T0);
-        e = update(&e, T0 + 3 * WEEK, T0 + 4 * WEEK, 10.0, Some((20.0, 0.0, T0)), T0);
+        e = update(&e, T0, T0 + WEEK, 100.0, Some(wt(200.0, 1_000_000_000.0, T0)), T0);
+        e = update(&e, T0 + WEEK, T0 + 2 * WEEK, 60.0, Some(wt(150.0, 0.0, T0)), T0);
+        e = update(&e, T0 + 2 * WEEK, T0 + 3 * WEEK, 100.0, Some(wt(260.0, 1_600_000_000.0, T0)), T0);
+        e = update(&e, T0 + 3 * WEEK, T0 + 4 * WEEK, 10.0, Some(wt(20.0, 0.0, T0)), T0);
         let (cost, tokens, n) = observed_average(&e).unwrap();
         assert_eq!(n, 2);
         assert!((cost - 230.0).abs() < 1e-9);
@@ -710,8 +774,8 @@ mod tests {
     #[test]
     fn average_includes_the_current_observed_cycle() {
         let mut e = Entry::default();
-        e = update(&e, T0, T0 + WEEK, 100.0, Some((200.0, 1_000_000_000.0, T0)), T0);
-        e = update(&e, T0 + WEEK, T0 + 2 * WEEK, 100.0, Some((260.0, 1_600_000_000.0, T0 + WEEK)), T0 + WEEK);
+        e = update(&e, T0, T0 + WEEK, 100.0, Some(wt(200.0, 1_000_000_000.0, T0)), T0);
+        e = update(&e, T0 + WEEK, T0 + 2 * WEEK, 100.0, Some(wt(260.0, 1_600_000_000.0, T0 + WEEK)), T0 + WEEK);
         assert_eq!(e.history.len(), 1);
         assert_eq!(e.current.as_ref().unwrap().status, Status::Observed);
         let (cost, tokens, n) = observed_average(&e).unwrap();
@@ -742,7 +806,7 @@ mod tests {
         let e = poll(&Entry::default(), T0, 8.0, Some((5.0, 50_000_000.0)));
         let e = update(
             &e, T0 + 20 * 60_000, T0 + WEEK + 20 * 60_000, 0.5,
-            Some((0.0, 0.0, T0)), T0 + 2_000,
+            Some(wt(0.0, 0.0, T0)), T0 + 2_000,
         );
         assert_eq!(e.history.len(), 1);
         assert_eq!(e.history[0].status, Status::Incomplete);
@@ -756,18 +820,18 @@ mod tests {
         // +20 min, usage unchanged or rising → jitter, same cycle.
         let e = update(
             &e, T0 + 20 * 60_000, T0 + WEEK + 20 * 60_000, 8.0,
-            Some((5.0, 50_000_000.0, T0)), T0 + 2_000,
+            Some(wt(5.0, 50_000_000.0, T0)), T0 + 2_000,
         );
         assert!(e.history.is_empty());
         let e = update(
             &e, T0 + 25 * 60_000, T0 + WEEK + 25 * 60_000, 9.0,
-            Some((5.0, 50_000_000.0, T0)), T0 + 3_000,
+            Some(wt(5.0, 50_000_000.0, T0)), T0 + 3_000,
         );
         assert!(e.history.is_empty());
         // A small dip inside the slack isn't a restart either.
         let e = update(
             &e, T0 + 28 * 60_000, T0 + WEEK + 28 * 60_000, 8.5,
-            Some((5.0, 50_000_000.0, T0)), T0 + 4_000,
+            Some(wt(5.0, 50_000_000.0, T0)), T0 + 4_000,
         );
         assert!(e.history.is_empty());
     }
@@ -779,7 +843,7 @@ mod tests {
         // a window can't have restarted in the past, so don't split.
         let e = update(
             &e, T0 - 10 * 60_000, T0 + WEEK - 10 * 60_000, 0.5,
-            Some((0.0, 0.0, T0)), T0 + 2_000,
+            Some(wt(0.0, 0.0, T0)), T0 + 2_000,
         );
         assert!(e.history.is_empty(), "backward shift + drop is jitter");
     }

@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
@@ -104,7 +105,10 @@ struct FileData {
 /// Hourly buckets exist to price an arbitrary weekly-quota window: nine
 /// days covers a 7-day window plus boundary slack, nothing older is asked
 /// for, and persisting any more would just grow spend_cache.json.
-const HOURS_WINDOW_SECS: i64 = 9 * 86_400;
+/// Shared with capacity.rs — a cycle is only reconstructible from the
+/// buckets while its start hour is still inside this retention window.
+pub const HOURS_WINDOW_MS: i64 = 9 * 86_400_000;
+const HOURS_WINDOW_SECS: i64 = HOURS_WINDOW_MS / 1_000;
 
 /// Distinct (hour, model) keys one file may admit before extras fold into
 /// OVERFLOW_MODEL_KEY — the hours analogue of MAX_MODELS_PER_FILE, so a
@@ -602,25 +606,59 @@ fn staged_hours() -> &'static Mutex<HashMap<String, HashMap<i64, (f64, f64)>>> {
 /// the bound that proves it (capacity.rs compares the stamp). `None`
 /// until collect() finishes once: callers asking earlier must see None,
 /// not a partial map.
-fn recent_hours() -> &'static Mutex<Option<(HashMap<String, HashMap<i64, (f64, f64)>>, i64)>> {
+fn recent_hours() -> &'static Mutex<Option<(HashMap<String, HashMap<i64, (f64, f64)>>, i64, bool)>> {
     static RECENT: OnceLock<
-        Mutex<Option<(HashMap<String, HashMap<i64, (f64, f64)>>, i64)>>,
+        Mutex<Option<(HashMap<String, HashMap<i64, (f64, f64)>>, i64, bool)>>,
     > = OnceLock::new();
     RECENT.get_or_init(|| Mutex::new(None))
 }
 
-/// (cost, tokens, scan-started-ms) `id` logged in hours whose
+/// `id`'s totals inside a bounded window plus the scan they came from.
+/// `complete` is false when the scan swallowed a transient read failure
+/// — the numbers are fine for a live estimate but must not seal a
+/// permanent sample. The flag is global per scan, deliberately
+/// conservative: one unrelated provider's bad file delays sealing by a
+/// refresh rather than freezing an under-count forever.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowTotals {
+    pub cost: f64,
+    pub tokens: f64,
+    pub scan_started_ms: i64,
+    pub complete: bool,
+}
+
+/// A read the scan expected to succeed failed transiently — the file
+/// exists but its bytes didn't make it into this pass's totals.
+fn note_scan_gap() {
+    SCAN_INCOMPLETE.store(true, Ordering::Relaxed);
+}
+
+/// Set when any provider's file/dir was listed but couldn't be opened
+/// or read mid-scan; reset at the start of every collect(). Published
+/// as `WindowTotals.complete` so permanent samples (quota cycles) only
+/// seal on scans that saw every file.
+static SCAN_INCOMPLETE: AtomicBool = AtomicBool::new(false);
+
+/// A listing/stat failure that isn't a file vanishing mid-scan (normal
+/// rotation churn) means entries may be silently skipped this pass.
+fn gap_unless_notfound(err: &std::io::Error) {
+    if err.kind() != std::io::ErrorKind::NotFound {
+        note_scan_gap();
+    }
+}
+
+/// (cost, tokens, scan-started-ms, complete) `id` logged in hours whose
 /// hour-start is at or after `since_ms` floored to the hour and before
 /// `until_ms` ceiled to the hour — hourly bucketing can pull in up to
 /// one hour of spend at EACH end of the window, which the
 /// quota-capacity estimate tolerates. `None` before the first
 /// completed scan; after that, an id nobody logged into sums to zero.
-pub fn window_totals(id: &str, since_ms: i64, until_ms: i64) -> Option<(f64, f64, i64)> {
+pub fn window_totals(id: &str, since_ms: i64, until_ms: i64) -> Option<WindowTotals> {
     let since_hour = since_ms.div_euclid(3_600_000);
     let until_hour =
         until_ms.div_euclid(3_600_000) + i64::from(until_ms.rem_euclid(3_600_000) != 0);
     let guard = recent_hours().lock().ok()?;
-    let (map, started_ms) = guard.as_ref()?;
+    let (map, started_ms, complete) = guard.as_ref()?;
     let mut out = (0.0, 0.0);
     if let Some(hours) = map.get(id) {
         for (hour, (cost, tokens)) in hours {
@@ -630,7 +668,12 @@ pub fn window_totals(id: &str, since_ms: i64, until_ms: i64) -> Option<(f64, f64
             }
         }
     }
-    Some((out.0, out.1, *started_ms))
+    Some(WindowTotals {
+        cost: out.0,
+        tokens: out.1,
+        scan_started_ms: *started_ms,
+        complete: *complete,
+    })
 }
 
 #[cfg(test)]
@@ -641,9 +684,9 @@ fn reset_recent_hours() {
 }
 
 #[cfg(test)]
-fn publish_test_hours(map: HashMap<String, HashMap<i64, (f64, f64)>>, started_ms: i64) {
+fn publish_test_hours(map: HashMap<String, HashMap<i64, (f64, f64)>>, started_ms: i64, complete: bool) {
     if let Ok(mut g) = recent_hours().lock() {
-        *g = Some((map, started_ms));
+        *g = Some((map, started_ms, complete));
     }
 }
 
@@ -787,13 +830,34 @@ fn recent_jsonl_files(root: &Path, out: &mut Vec<PathBuf>) {
             );
             return;
         }
-        let Ok(entries) = fs::read_dir(&dir) else { continue };
-        for entry in entries.flatten() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(err) => {
+                // A configured root that's absent is normal (provider not
+                // installed); one that exists but can't be listed is a gap.
+                gap_unless_notfound(&err);
+                continue;
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(err) => {
+                    gap_unless_notfound(&err);
+                    continue;
+                }
+            };
             let path = entry.path();
             // The listing itself carries the entry type (free on Windows —
             // no extra stat). Symlinks/junctions report as symlink here, not
             // as their target type.
-            let Ok(ftype) = entry.file_type() else { continue };
+            let ftype = match entry.file_type() {
+                Ok(t) => t,
+                Err(err) => {
+                    gap_unless_notfound(&err);
+                    continue;
+                }
+            };
             if ftype.is_dir() {
                 if depth + 1 > MAX_SCAN_DEPTH {
                     continue;
@@ -802,7 +866,13 @@ fn recent_jsonl_files(root: &Path, out: &mut Vec<PathBuf>) {
             } else if ftype.is_symlink() {
                 // Links still resolve (relocated logs must be found), but
                 // only they pay for canonicalize and the seen-set gate.
-                let Ok(meta) = fs::metadata(&path) else { continue };
+                let meta = match fs::metadata(&path) {
+                    Ok(m) => m,
+                    Err(err) => {
+                        gap_unless_notfound(&err);
+                        continue;
+                    }
+                };
                 if meta.is_dir() {
                     if depth + 1 > MAX_SCAN_DEPTH {
                         continue;
@@ -825,7 +895,13 @@ fn recent_jsonl_files(root: &Path, out: &mut Vec<PathBuf>) {
                     out.push(path);
                 }
             } else if path.extension().is_some_and(|e| e == "jsonl") {
-                let Ok(meta) = entry.metadata() else { continue };
+                let meta = match entry.metadata() {
+                    Ok(m) => m,
+                    Err(err) => {
+                        gap_unless_notfound(&err);
+                        continue;
+                    }
+                };
                 if meta.len() > MAX_LOG_FILE_BYTES {
                     oversized_log(&path, meta.len());
                     continue;
@@ -1173,6 +1249,7 @@ fn file_days_inner(
             PROBES.with(|p| {
                 p.borrow_mut().take();
             });
+            note_scan_gap();
             return FileData::default();
         }
     };
@@ -1200,6 +1277,7 @@ fn file_days_inner(
                         PROBES.with(|p| {
                             p.borrow_mut().take();
                         });
+                        note_scan_gap();
                         return data;
                     }
                 }
@@ -1210,6 +1288,7 @@ fn file_days_inner(
                     PROBES.with(|p| {
                         p.borrow_mut().take();
                     });
+                    note_scan_gap();
                     return data;
                 }
             }
@@ -1220,13 +1299,16 @@ fn file_days_inner(
         PROBES.with(|p| {
             p.borrow_mut().take();
         });
+        note_scan_gap();
         return data;
     }
     let (read_ok, last_complete) = parse_jsonl_reader(&mut reader, parse, &mut data, from, None);
     let probes = PROBES.with(|p| p.borrow_mut().take()).unwrap_or_default();
     if !read_ok {
         // Prefix `data` is already correct. A full retry would reuse
-        // warmed/restored parser state and drop those events.
+        // warmed/restored parser state and drop those events. The tail
+        // this pass never saw stays uncached — flag the gap.
+        note_scan_gap();
         return data;
     }
 
@@ -1248,12 +1330,14 @@ fn file_days_full(
         PROBES.with(|p| {
             p.borrow_mut().take();
         });
+        note_scan_gap();
         return FileData::default();
     };
     let mut reader = BufReader::new(file);
     let (read_ok, last_complete) = parse_jsonl_reader(&mut reader, parse, &mut data, 0, None);
     let probes = PROBES.with(|p| p.borrow_mut().take()).unwrap_or_default();
     if !read_ok {
+        note_scan_gap();
         return data;
     }
     remember_file(path, mtime, last_complete, gen, probes, data.clone());
@@ -3096,6 +3180,7 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
     // it so a quota cycle can only be sealed by a scan every byte of
     // which postdates the event being proven (see capacity.rs).
     let scan_started_ms = Utc::now().timestamp_millis();
+    SCAN_INCOMPLETE.store(false, Ordering::Relaxed);
     providers::sweep_temp_sqlite_copies();
     pricing::ensure_fresh();
     load_persisted_cache();
@@ -3194,7 +3279,7 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
         .map(|mut s| std::mem::take(&mut *s))
         .unwrap_or_default();
     if let Ok(mut recent) = recent_hours().lock() {
-        *recent = Some((staged, scan_started_ms));
+        *recent = Some((staged, scan_started_ms, !SCAN_INCOMPLETE.load(Ordering::Relaxed)));
     }
     list.into_iter().filter(ProviderSpend::has_data).collect()
 }
@@ -4635,27 +4720,21 @@ mod tests {
         let mut map: HashMap<String, HashMap<i64, (f64, f64)>> = HashMap::new();
         map.insert("claude".into(), claude);
         map.insert("codex".into(), HashMap::from([(101i64, (5.0, 500.0))]));
-        publish_test_hours(map, 999);
+        publish_test_hours(map, 999, true);
+        let wt = |cost, tokens| {
+            Some(WindowTotals { cost, tokens, scan_started_ms: 999, complete: true })
+        };
 
         // since_ms mid-hour-101 floors to hour 101 → hours 101+102 count.
         // The stamp tells callers which scan these totals came from.
-        assert_eq!(
-            window_totals("claude", 101 * hour_ms + 1_234, i64::MAX),
-            Some((50.0, 5_000.0, 999))
-        );
+        assert_eq!(window_totals("claude", 101 * hour_ms + 1_234, i64::MAX), wt(50.0, 5_000.0));
         // until_ms bounds the top end: hour 102 excluded at an exact
         // boundary, included when until lands mid-hour-102 (ceil).
-        assert_eq!(
-            window_totals("claude", 0, 102 * hour_ms),
-            Some((30.0, 3_000.0, 999))
-        );
-        assert_eq!(
-            window_totals("claude", 0, 102 * hour_ms + 1),
-            Some((60.0, 6_000.0, 999))
-        );
-        assert_eq!(window_totals("codex", 101 * hour_ms, i64::MAX), Some((5.0, 500.0, 999)));
+        assert_eq!(window_totals("claude", 0, 102 * hour_ms), wt(30.0, 3_000.0));
+        assert_eq!(window_totals("claude", 0, 102 * hour_ms + 1), wt(60.0, 6_000.0));
+        assert_eq!(window_totals("codex", 101 * hour_ms, i64::MAX), wt(5.0, 500.0));
         // A card nobody logged into sums to zero once a scan ran.
-        assert_eq!(window_totals("grok", 0, i64::MAX), Some((0.0, 0.0, 999)));
+        assert_eq!(window_totals("grok", 0, i64::MAX), wt(0.0, 0.0));
 
         reset_recent_hours();
     }
