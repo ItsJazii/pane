@@ -76,6 +76,26 @@ pub struct Entry {
     pub history: Vec<Cycle>,
 }
 
+/// Which account currently owns a default card's log dir, and since
+/// when. Spend in the shared dir before `since_ms` belongs to a
+/// previous sign-in and must not count toward this account's cycle.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct IdentityStamp {
+    pub tag: String,
+    pub since_ms: i64,
+}
+
+/// On-disk shape of quota_cycles.json: the cycle ledgers plus the
+/// default-card identity stamps. Older files were the bare cycles map
+/// — load() migrates them on first read.
+#[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct LedgerFile {
+    #[serde(default)]
+    cycles: HashMap<String, Entry>,
+    #[serde(default)]
+    identities: HashMap<String, IdentityStamp>,
+}
+
 /// Advance one provider's ledger by one usage poll. `totals` is the
 /// spend scan's bounded WindowTotals inside the window, or None when no
 /// scan has completed yet — an unknown scan result updates the progress
@@ -327,56 +347,99 @@ fn path() -> std::path::PathBuf {
     providers::config_dir().join("quota_cycles.json")
 }
 
-/// Ledger key for a snapshot. A default card keeps the bare `claude` /
-/// `codex` id across a sign-in change, so two different accounts would
-/// otherwise share one cycle history — key it by `{id}|{identity8}`
-/// (the same first-8 non-dash truncation the `claude@<hash8>` scoped
-/// ids use, and never a raw email). Scoped cards already embed their
-/// account, and an unreadable identity falls back to the bare id: a
-/// transient failure mustn't orphan the ledger mid-session. Switching
-/// back to an earlier account restores ITS ledger naturally.
-fn ledger_key_from(id: &str, identity: Option<&str>) -> String {
-    if id.contains('@') {
-        return id.to_string();
-    }
-    let Some(raw) = identity else {
-        return id.to_string();
-    };
-    let tag: String = raw.chars().filter(|c| *c != '-').take(8).collect();
-    if tag.is_empty() {
-        id.to_string()
-    } else {
-        format!("{id}|{tag}")
-    }
-}
-
-/// Resolve the family's default-account identity and derive the key —
-/// the same value the snapshot-cache stamp uses to detect an account
-/// swap (providers::{claude,codex}::default_identity).
-pub fn ledger_key(id: &str, family: &str) -> String {
-    let identity = match family {
+/// The family's default-account identity — the same value the
+/// snapshot-cache stamp uses to detect an account swap
+/// (providers::{claude,codex}::default_identity).
+fn default_identity_for(family: &str) -> Option<String> {
+    match family {
         "claude" => providers::claude::default_identity(),
         "codex" => providers::codex::default_identity(),
         _ => None,
-    };
-    ledger_key_from(id, identity.as_deref())
+    }
 }
 
-/// Lazily-loaded ledger map, shared by every fetch_usage pass.
-fn ledger() -> &'static Mutex<Option<HashMap<String, Entry>>> {
-    static LEDGER: OnceLock<Mutex<Option<HashMap<String, Entry>>>> = OnceLock::new();
+/// The 8-char account tag for a bare default id — the same first-8
+/// non-dash truncation the `claude@<hash8>` scoped ids use, and never
+/// a raw email. Scoped cards already embed their account → None.
+fn identity_tag_of(id: &str, identity: Option<&str>) -> Option<String> {
+    if id.contains('@') {
+        return None;
+    }
+    let tag: String = identity?.chars().filter(|c| *c != '-').take(8).collect();
+    (!tag.is_empty()).then_some(tag)
+}
+
+/// This snapshot's account tag when it is a default card with a known
+/// identity — the stamp quota_cycles.json keys its switch tracking by.
+pub fn identity_tag(id: &str, family: &str) -> Option<String> {
+    identity_tag_of(id, default_identity_for(family).as_deref())
+}
+
+/// Ledger key for a snapshot. A default card keeps the bare `claude` /
+/// `codex` id across a sign-in change, so two different accounts would
+/// otherwise share one cycle history — key it by `{id}|{identity8}`.
+/// An unreadable identity falls back to the bare id: a transient
+/// failure mustn't orphan the ledger mid-session. Switching back to an
+/// earlier account restores ITS ledger naturally.
+fn ledger_key_from(id: &str, identity: Option<&str>) -> String {
+    match identity_tag_of(id, identity) {
+        Some(tag) => format!("{id}|{tag}"),
+        None => id.to_string(),
+    }
+}
+
+/// Resolve the family's default-account identity and derive the key.
+pub fn ledger_key(id: &str, family: &str) -> String {
+    ledger_key_from(id, default_identity_for(family).as_deref())
+}
+
+/// Lazily-loaded ledger file, shared by every fetch_usage pass.
+fn ledger() -> &'static Mutex<Option<LedgerFile>> {
+    static LEDGER: OnceLock<Mutex<Option<LedgerFile>>> = OnceLock::new();
     LEDGER.get_or_init(|| Mutex::new(None))
 }
 
-fn load(map: &mut Option<HashMap<String, Entry>>) {
+fn load(map: &mut Option<LedgerFile>) {
     if map.is_some() {
         return;
     }
     let loaded = std::fs::read_to_string(path())
         .ok()
-        .and_then(|raw| serde_json::from_str::<HashMap<String, Entry>>(&raw).ok())
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .map(|doc| {
+            // The new shape carries `cycles`/`identities`; a file that
+            // is the bare provider→Entry map is the old shape — read it
+            // as cycles with no identity stamps.
+            if doc.get("cycles").is_some() || doc.get("identities").is_some() {
+                serde_json::from_value::<LedgerFile>(doc).unwrap_or_default()
+            } else {
+                LedgerFile {
+                    cycles: serde_json::from_value(doc).unwrap_or_default(),
+                    identities: HashMap::new(),
+                }
+            }
+        })
         .unwrap_or_default();
     *map = Some(loaded);
+}
+
+/// The persisted "this default dir switched accounts at" decision.
+/// First sighting records since_ms 0 — Pane can't know about earlier
+/// switches, so nothing is excluded. A DIFFERENT tag, including a
+/// switch back to a previous account, restarts the bound at now: the
+/// shared dir holds the other account's logs in between.
+fn identity_since(stored: Option<&IdentityStamp>, tag: &str, now_ms: i64) -> IdentityStamp {
+    match stored {
+        Some(s) if s.tag == tag => s.clone(),
+        None => IdentityStamp { tag: tag.into(), since_ms: 0 },
+        _ => IdentityStamp { tag: tag.into(), since_ms: now_ms },
+    }
+}
+
+/// The window's spend bound once a sign-in switch applies: logs before
+/// the later of the two belong to another account.
+fn effective_since(window_start_ms: i64, since_ms: i64) -> i64 {
+    window_start_ms.max(since_ms)
 }
 
 /// A stored ledger entry, read without mutating — for restored/stale
@@ -385,7 +448,7 @@ fn load(map: &mut Option<HashMap<String, Entry>>) {
 pub fn peek(key: &str) -> Option<Entry> {
     let mut guard = ledger().lock().unwrap_or_else(|e| e.into_inner());
     load(&mut guard);
-    guard.as_ref()?.get(key).cloned()
+    guard.as_ref()?.cycles.get(key).cloned()
 }
 
 /// Only a live poll may advance the ledger: a restored snapshot's
@@ -410,20 +473,43 @@ fn persist_needed(changed: bool, dirty: bool) -> bool {
 
 /// One usage poll for a provider's weekly window: advance the ledger
 /// and persist it (only when it actually changed or an earlier write
-/// failed — the common steady-state poll writes nothing).
+/// failed — the common steady-state poll writes nothing). `spend_id`
+/// addresses the card's logs in the spend scan; `identity_tag` is the
+/// default card's account tag when known, so a sign-in switch bounds
+/// the scan to logs this account wrote.
 pub fn note_weekly_window(
     key: &str,
     spend_id: &str,
+    identity_tag: Option<&str>,
     window_start_ms: i64,
     resets_at_ms: i64,
     used_pct: f64,
-    totals: Option<WindowTotals>,
     now_ms: i64,
 ) -> Entry {
     let mut guard = ledger().lock().unwrap_or_else(|e| e.into_inner());
     load(&mut guard);
     let map = guard.as_mut().expect("load fills the map");
-    let prev = map.get(key).cloned().unwrap_or_default();
+    // A default dir's logs outlive sign-ins — bound every scan to when
+    // THIS account took over, or a previous login's spend would count
+    // toward this account's window.
+    let mut stamp_changed = false;
+    let since_ms = match identity_tag {
+        Some(tag) => {
+            let stamp = identity_since(map.identities.get(spend_id), tag, now_ms);
+            if map.identities.get(spend_id) != Some(&stamp) {
+                map.identities.insert(spend_id.to_string(), stamp.clone());
+                stamp_changed = true;
+            }
+            stamp.since_ms
+        }
+        None => 0,
+    };
+    let prev = map.cycles.get(key).cloned().unwrap_or_default();
+    let totals = spend::window_totals(
+        spend_id,
+        effective_since(window_start_ms, since_ms),
+        resets_at_ms,
+    );
     let mut next = update(&prev, window_start_ms, resets_at_ms, used_pct, totals, now_ms);
     // Pending history cycles (rolled over before their confirming
     // scan) retry against the newest scan, bounded to their own
@@ -431,14 +517,15 @@ pub fn note_weekly_window(
     for c in next.history.iter_mut() {
         *c = resolve_pending(
             c,
-            spend::window_totals(spend_id, c.start_ms, c.end_ms),
+            spend::window_totals(spend_id, effective_since(c.start_ms, since_ms), c.end_ms),
             now_ms,
         );
     }
-    let changed = next != prev;
-    if changed {
-        map.insert(key.to_string(), next.clone());
+    let cycles_changed = next != prev;
+    if cycles_changed {
+        map.cycles.insert(key.to_string(), next.clone());
     }
+    let changed = cycles_changed || stamp_changed;
     if persist_needed(changed, PERSIST_DIRTY.load(Ordering::Relaxed)) {
         match serde_json::to_string_pretty(map) {
             Ok(raw) => match atomic_write(&path(), &raw) {
@@ -480,6 +567,40 @@ mod tests {
             totals.map(|(c, t)| wt(c, t, T0)),
             T0 + 1_000,
         )
+    }
+
+    #[test]
+    fn identity_stamp_tracks_sign_in_switches() {
+        let a = IdentityStamp { tag: "aaaa1111".into(), since_ms: 0 };
+        // First sighting records the tag with no restriction — Pane
+        // can't know which earlier logs belong to this account.
+        assert_eq!(identity_since(None, "aaaa1111", T0), a);
+        // Same tag keeps the stored stamp untouched.
+        assert_eq!(identity_since(Some(&a), "aaaa1111", T0 + 100), a);
+        // A different tag bounds the window at the switch moment.
+        let b = identity_since(Some(&a), "bbbb2222", T0 + 500);
+        assert_eq!(b, IdentityStamp { tag: "bbbb2222".into(), since_ms: T0 + 500 });
+        // Switching BACK to the first tag still bumps since — the dir
+        // holds the other account's logs in between.
+        let a2 = identity_since(Some(&b), "aaaa1111", T0 + 900);
+        assert_eq!(a2.tag, "aaaa1111");
+        assert_eq!(a2.since_ms, T0 + 900);
+    }
+
+    #[test]
+    fn effective_since_bounds_the_window_at_the_switch() {
+        // Logs before the sign-in belong to the previous account.
+        assert_eq!(effective_since(T0, 0), T0);
+        assert_eq!(effective_since(T0, T0 + 60_000), T0 + 60_000);
+        assert_eq!(effective_since(T0 + 60_000, T0), T0 + 60_000);
+    }
+
+    #[test]
+    fn identity_tag_only_applies_to_bare_default_ids() {
+        // Scoped cards already embed their account — no switch bound.
+        assert_eq!(identity_tag_of("claude@abcd1234", Some("uuid-1")), None);
+        assert_eq!(identity_tag_of("claude", Some("aaaa1111-bbbb")), Some("aaaa1111".into()));
+        assert_eq!(identity_tag_of("claude", None), None);
     }
 
     #[test]

@@ -757,16 +757,20 @@ fn build_spend(id: impl Into<String>, name: impl Into<String>, data: FileData) -
 
 /// How deep below a scan root directories are visited. Session logs nest a
 /// handful of levels at most; the cap keeps a pathological tree from turning
-/// the walk into an unbounded crawl.
+/// the walk into an unbounded crawl. Deterministic — the same files are
+/// skipped on every scan, so it never flags SCAN_INCOMPLETE: a quota cycle
+/// may seal on a bounded scan.
 const MAX_SCAN_DEPTH: usize = 16;
 
 /// Upper bound on directories inspected per scan root, so a link into a huge
-/// tree (or `/`) can't stall the refresh thread.
+/// tree (or `/`) can't stall the refresh thread. Deterministic like the
+/// depth cap — not a transient gap, sealing is allowed.
 const MAX_SCAN_DIRS: usize = 20_000;
 
 /// Session logs larger than this are skipped whole, with a diagnostic — a
 /// multi-hundred-MB single "log" is a corrupt or hostile artifact, and
-/// reading it would stall the refresh thread.
+/// reading it would stall the refresh thread. Deterministic like the scan
+/// bounds — not a transient gap, sealing is allowed.
 const MAX_LOG_FILE_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Stored bytes per JSONL line: a longer physical line is skipped and its
@@ -3162,6 +3166,9 @@ fn take_join<T>(
 ) -> T {
     handle.join().unwrap_or_else(|_| {
         eprintln!("[pane] spend: {name} panicked — keeping the other providers");
+        // The fallback is empty data — a permanent sample must not seal
+        // on a scan that silently lost a provider.
+        note_scan_gap();
         fallback
     })
 }
@@ -3295,6 +3302,19 @@ mod tests {
 
     fn cost_sum(d: &FileData) -> f64 {
         d.days.values().map(|v| v.0).sum()
+    }
+
+    // ---- Worker join: a panic must not read as a complete scan -----
+
+    #[test]
+    fn a_panicked_worker_marks_the_scan_incomplete() {
+        SCAN_INCOMPLETE.store(false, Ordering::Relaxed);
+        std::thread::scope(|s| {
+            let h = s.spawn(|| -> i32 { panic!("boom") });
+            assert_eq!(take_join(h, "test", 42), 42);
+        });
+        assert!(SCAN_INCOMPLETE.load(Ordering::Relaxed));
+        SCAN_INCOMPLETE.store(false, Ordering::Relaxed);
     }
 
     // ---- Log scan: bounded walk ------------------------------------------
