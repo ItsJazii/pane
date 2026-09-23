@@ -1705,15 +1705,6 @@ select:focus-visible {
   color: var(--foreground);
 }
 
-/* Where an injected announcement-based reminder came from. */
-.rs-note {
-  font-size: 10.5px;
-  color: var(--muted-foreground);
-  padding: 0 8px;
-  margin-top: 6px;
-  white-space: normal;
-}
-
 /* ---------------------------------------------------------------- footer */
 
 /* Floats over the card list so content scrolls behind the glass,

@@ -146,9 +146,6 @@ fn config_with_defaults(mut cfg: Value) -> Value {
     obj.entry("starPromptLastMs").or_insert(json!(0));
     obj.entry("reduceAnimations").or_insert(json!(false));
     obj.entry("locale").or_insert(json!("auto"));
-    // Announcement-sourced reset reminders the user swore they used —
-    // the frontend hides those ids until their expiry passes.
-    obj.entry("claudeResetsDismissed").or_insert(json!([]));
     cfg
 }
 
@@ -201,7 +198,6 @@ const CONFIG_KEYS: &[&str] = &[
     "starPromptLastMs",
     "reduceAnimations",
     "locale",
-    "claudeResetsDismissed",
 ];
 
 static CONFIG_WRITE: Mutex<()> = Mutex::new(());
@@ -214,26 +210,6 @@ fn apply_config_patch(cfg: &mut Value, patch: &Value) {
                 if k == "locale" {
                     let ok = matches!(v.as_str(), Some("auto" | "en" | "zh" | "ru"));
                     target.insert(k.clone(), if ok { v.clone() } else { json!("auto") });
-                } else if k == "claudeResetsDismissed" {
-                    // Frontend-minted announcement ids — small and
-                    // charset-bound, so a hostile or buggy page can't grow
-                    // config.json unboundedly through this key.
-                    let ok = v.as_array().is_some_and(|arr| {
-                        arr.len() <= 16
-                            && arr.iter().all(|s| {
-                                s.as_str().is_some_and(|s| {
-                                    (1..=40).contains(&s.len())
-                                        && s.chars().all(|c| {
-                                            c.is_ascii_lowercase()
-                                                || c.is_ascii_digit()
-                                                || matches!(c, '.' | '_' | '-')
-                                        })
-                                })
-                            })
-                    });
-                    if ok {
-                        target.insert(k.clone(), v.clone());
-                    }
                 } else {
                     target.insert(k.clone(), v.clone());
                 }
@@ -3225,8 +3201,7 @@ mod tests {
         current_credential_scoped_generations, guarded, is_credential_scoped_card,
         is_plain_api_key_provider, set_api_key_in, stored_pane_api_key,
         cached_kimi_ok_from, cached_onenewapi_id_is_configured, card_is_disabled,
-        apply_config_patch, commit_strip_state_after_apply, config_with_defaults, fail_state,
-        load_config_from, set_config_in,
+        commit_strip_state_after_apply, fail_state, load_config_from, set_config_in,
         fold_moonshot_into_kimi, forget_onenewapi_key_ids, forget_provider_snapshot,
         is_kimi_wallet_label, last_ok, onenewapi_after_site_save,
         onenewapi_apply_zero_to_one_enable, key_card_snapshot_generations, persist_last_ok_at,
@@ -3698,35 +3673,6 @@ mod tests {
     impl Drop for TempConfig {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);
-        }
-    }
-
-    #[test]
-    fn claude_resets_dismissed_patch_is_validated() {
-        let mut cfg = config_with_defaults(json!({}));
-        assert_eq!(cfg["claudeResetsDismissed"], json!([]));
-
-        let good = json!({"claudeResetsDismissed": ["opus-5.5-2026-09", "x_y.z-1"]});
-        apply_config_patch(&mut cfg, &good);
-        assert_eq!(
-            cfg["claudeResetsDismissed"],
-            json!(["opus-5.5-2026-09", "x_y.z-1"])
-        );
-
-        // Every malformed shape is ignored wholesale — the previous good
-        // value survives.
-        let kept = cfg["claudeResetsDismissed"].clone();
-        for bad in [
-            json!({"claudeResetsDismissed": "not-an-array"}),
-            json!({"claudeResetsDismissed": ["UPPER"]}),
-            json!({"claudeResetsDismissed": ["has space"]}),
-            json!({"claudeResetsDismissed": [""]}),
-            json!({"claudeResetsDismissed": ["x".repeat(41)]}),
-            json!({"claudeResetsDismissed": [1]}),
-            json!({"claudeResetsDismissed": vec![json!("ok"); 17]}),
-        ] {
-            apply_config_patch(&mut cfg, &bad);
-            assert_eq!(cfg["claudeResetsDismissed"], kept, "accepted {bad}");
         }
     }
 
