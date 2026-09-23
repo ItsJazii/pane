@@ -2160,6 +2160,27 @@ async fn fetch_usage(
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
+        // A scoped card's id was minted from the account found at
+        // discovery (refresh start) — a re-sign-in since mints a
+        // different id, so re-run discovery and require the id to
+        // survive before trusting its poll. Discovery is a directory
+        // walk that already ran once this refresh; only repeat it for
+        // a family that actually has scoped snapshots.
+        let has_scoped = |fam: &str| {
+            all.iter().any(|s| s.id.starts_with(&format!("{fam}@")))
+        };
+        let claude_scoped_now: Option<HashSet<String>> = has_scoped("claude").then(|| {
+            providers::claude::discover_extra_accounts()
+                .into_iter()
+                .map(|a| a.id)
+                .collect()
+        });
+        let codex_scoped_now: Option<HashSet<String>> = has_scoped("codex").then(|| {
+            providers::codex::discover_extra_accounts()
+                .into_iter()
+                .map(|a| a.id)
+                .collect()
+        });
         for snap in all.iter_mut() {
             let family = family_of(&snap.id);
             if (family != "claude" && family != "codex") || snap.status != "ok" {
@@ -2187,6 +2208,16 @@ async fn fetch_usage(
             );
             let post_tag = capacity::identity_tag(&snap.id, &family);
             let key = capacity::ledger_key_for(&snap.id, pre_tag);
+            // For a scoped card the fresh discovery must still mint its
+            // id — a re-signed dir means the in-flight poll belongs to
+            // an account this id no longer names.
+            let fresh_ids = match family.as_str() {
+                "claude" => claude_scoped_now.as_ref(),
+                "codex" => codex_scoped_now.as_ref(),
+                _ => None,
+            };
+            let scoped_stable = fresh_ids
+                .map_or(true, |ids| capacity::scoped_identity_stable(&snap.id, ids));
             // A restored/stale snapshot replays an older poll's numbers,
             // and a mid-refresh sign-in swap can't be attributed to a
             // known account at all — show the stored ledger, never
@@ -2194,7 +2225,7 @@ async fn fetch_usage(
             let entry = if capacity::may_advance(
                 snap.stale,
                 snap.attempt_failed,
-                post_tag.as_deref() == pre_tag,
+                post_tag.as_deref() == pre_tag && scoped_stable,
             ) {
                 capacity::note_weekly_window(
                     &key,

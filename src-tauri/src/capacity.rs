@@ -17,7 +17,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -429,6 +429,17 @@ pub fn start_tag_for<'a>(
         "codex" => codex,
         _ => None,
     }
+}
+
+/// A scoped `claude@<hash8>` / `codex@<hash8>` id was minted from the
+/// account found at discovery time — it IS the pre-fetch identity.
+/// Re-discovered after the fetch, the same id means the dir still
+/// holds that account; a missing id means the dir re-signed-in and a
+/// different account now owns it, so the in-flight poll can't be
+/// attributed. Bare ids don't participate — the pre/post tag rule
+/// covers them.
+pub fn scoped_identity_stable(id: &str, fresh_ids: &HashSet<String>) -> bool {
+    !id.contains('@') || fresh_ids.contains(id)
 }
 
 /// The key for an ALREADY-resolved tag — when the tag was captured
@@ -843,6 +854,21 @@ mod tests {
                 start_tag_for(id, Some("a"), Some("b")) == identity_tag_of(id, Some("x")).as_deref();
             assert!(may_advance(false, false, stable), "{id} must stay advanceable");
         }
+    }
+
+    /// A scoped id is stable only while fresh discovery still mints
+    /// it; a re-signed dir produces a different id, so the in-flight
+    /// poll can't be attributed to this card's account.
+    #[test]
+    fn scoped_identity_needs_to_survive_rediscovery() {
+        let fresh: HashSet<String> =
+            ["claude@aaaa1111", "claude@bbbb2222"].iter().map(|s| s.to_string()).collect();
+        assert!(scoped_identity_stable("claude@aaaa1111", &fresh));
+        assert!(!scoped_identity_stable("claude@cccc3333", &fresh));
+        // Bare ids are covered by the pre/post tag rule — this helper
+        // never gates them, even with an empty discovery.
+        assert!(scoped_identity_stable("claude", &fresh));
+        assert!(scoped_identity_stable("claude", &HashSet::new()));
     }
 
     #[test]
