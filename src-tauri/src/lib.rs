@@ -384,18 +384,85 @@ const DIGIT_FONT: [[u8; 6]; 10] = [
     [0x6, 0x9, 0x9, 0x7, 0x1, 0x6], // 9
 ];
 
-/// Renders one or two numbers (0-100) stacked on a 32x32 RGBA tray icon —
-/// two rows mimic the Mac menu bar's "100% / 36%" pair. White digits with a
-/// black outline so they read on both light and dark taskbars.
-fn draw_tray_numbers(values: &[u32]) -> Vec<u8> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TrayInk {
+    foreground: [u8; 4],
+    outline: [u8; 4],
+}
+
+const TRAY_INK_LIGHT: TrayInk = TrayInk {
+    foreground: [20, 24, 33, 255],
+    outline: [255, 255, 255, 220],
+};
+const TRAY_INK_DARK: TrayInk = TrayInk {
+    foreground: [255, 255, 255, 255],
+    outline: [0, 0, 0, 200],
+};
+const TRAY_INK_FALLBACK: TrayInk = TrayInk {
+    foreground: [255, 255, 255, 255],
+    outline: [0, 0, 0, 230],
+};
+
+fn tray_ink_for_theme(light: Option<u32>) -> TrayInk {
+    match light {
+        Some(1) => TRAY_INK_LIGHT,
+        Some(0) => TRAY_INK_DARK,
+        _ => TRAY_INK_FALLBACK,
+    }
+}
+
+#[cfg(windows)]
+fn system_uses_light_theme() -> Option<u32> {
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
+        REG_DWORD, REG_VALUE_TYPE,
+    };
+
+    // Read once per redraw; a successful open always has one matching close.
+    unsafe {
+        let mut key = HKEY::default();
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            windows_core::w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+            None,
+            KEY_READ,
+            &mut key,
+        ) != ERROR_SUCCESS
+        {
+            return None;
+        }
+        let mut kind = REG_VALUE_TYPE::default();
+        let mut bytes = [0u8; 4];
+        let mut len = bytes.len() as u32;
+        let result = RegQueryValueExW(
+            key,
+            windows_core::w!("SystemUsesLightTheme"),
+            None,
+            Some(&mut kind),
+            Some(bytes.as_mut_ptr()),
+            Some(&mut len),
+        );
+        let _ = RegCloseKey(key);
+        (result == ERROR_SUCCESS && kind == REG_DWORD && len == 4)
+            .then(|| u32::from_le_bytes(bytes))
+    }
+}
+
+#[cfg(not(windows))]
+fn system_uses_light_theme() -> Option<u32> {
+    None
+}
+
+/// Renders one or two numbers (0-100) on a 32x32 RGBA tray icon.
+fn draw_tray_numbers_with(values: &[u32], ink: TrayInk) -> Vec<u8> {
     const SIZE: usize = 32;
     let scale = 2usize;
     let glyph_w = 4 * scale;
-    let _glyph_h = 6 * scale;
     let gap = scale;
 
     let mut mask = [false; SIZE * SIZE];
-    let rows: &[usize] = if values.len() >= 2 { &[3, 17] } else { &[10] };
+    let rows: &[usize] = if values.len() >= 2 { &[1, 18] } else { &[10] };
 
     for (value, y0) in values.iter().zip(rows) {
         let digits: Vec<usize> = value
@@ -427,7 +494,7 @@ fn draw_tray_numbers(values: &[u32]) -> Vec<u8> {
     }
 
     let mut rgba = vec![0u8; SIZE * SIZE * 4];
-    // Outline pass: black anywhere adjacent to a text pixel.
+    // Outline anywhere adjacent to a text pixel.
     for y in 0..SIZE {
         for x in 0..SIZE {
             if mask[y * SIZE + x] {
@@ -446,7 +513,7 @@ fn draw_tray_numbers(values: &[u32]) -> Vec<u8> {
             });
             if near {
                 let p = (y * SIZE + x) * 4;
-                rgba[p..p + 4].copy_from_slice(&[0, 0, 0, 230]);
+                rgba[p..p + 4].copy_from_slice(&ink.outline);
             }
         }
     }
@@ -454,11 +521,15 @@ fn draw_tray_numbers(values: &[u32]) -> Vec<u8> {
         for x in 0..SIZE {
             if mask[y * SIZE + x] {
                 let p = (y * SIZE + x) * 4;
-                rgba[p..p + 4].copy_from_slice(&[255, 255, 255, 255]);
+                rgba[p..p + 4].copy_from_slice(&ink.foreground);
             }
         }
     }
     rgba
+}
+
+fn draw_tray_numbers(values: &[u32]) -> Vec<u8> {
+    draw_tray_numbers_with(values, tray_ink_for_theme(system_uses_light_theme()))
 }
 
 fn apply_main_tray_projection(
@@ -3026,6 +3097,103 @@ fn hide_popover(app: tauri::AppHandle) {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ScreenRect {
+    x: i64,
+    y: i64,
+    width: i64,
+    height: i64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct WindowInsets {
+    left: i64,
+    top: i64,
+    right: i64,
+    bottom: i64,
+}
+
+fn popover_origin(
+    click: (i64, i64),
+    size: (i64, i64),
+    monitor: ScreenRect,
+    work: ScreenRect,
+) -> (i64, i64) {
+    enum TaskbarEdge {
+        Bottom,
+        Top,
+        Left,
+        Right,
+    }
+
+    let left = (work.x - monitor.x).max(0);
+    let top = (work.y - monitor.y).max(0);
+    let right = (monitor.x + monitor.width - work.x - work.width).max(0);
+    let bottom = (monitor.y + monitor.height - work.y - work.height).max(0);
+    let max_inset = bottom.max(top).max(left).max(right);
+    let edge = [
+        (TaskbarEdge::Bottom, bottom),
+        (TaskbarEdge::Top, top),
+        (TaskbarEdge::Left, left),
+        (TaskbarEdge::Right, right),
+    ]
+        .into_iter()
+        .find_map(|(edge, inset)| (inset == max_inset).then_some(edge))
+        .unwrap_or(TaskbarEdge::Bottom);
+
+    let (x, y) = match edge {
+        TaskbarEdge::Top => (click.0 - size.0, work.y),
+        TaskbarEdge::Left => (work.x, click.1 - size.1),
+        TaskbarEdge::Right => (work.x + work.width - size.0, click.1 - size.1),
+        TaskbarEdge::Bottom => (click.0 - size.0, work.y + work.height - size.1),
+    };
+    let clamp = |origin: i64, start: i64, extent: i64, length: i64| {
+        if length >= extent {
+            start
+        } else {
+            origin.clamp(start, start + extent - length)
+        }
+    };
+    (
+        clamp(x, work.x, work.width, size.0),
+        clamp(y, work.y, work.height, size.1),
+    )
+}
+
+fn popover_outer_origin(
+    click: (i64, i64),
+    outer_size: (i64, i64),
+    monitor: ScreenRect,
+    work: ScreenRect,
+    insets: WindowInsets,
+) -> (i64, i64) {
+    let inner_size = (
+        (outer_size.0 - insets.left - insets.right).max(0),
+        (outer_size.1 - insets.top - insets.bottom).max(0),
+    );
+    let (x, y) = popover_origin(click, inner_size, monitor, work);
+    (x - insets.left, y - insets.top)
+}
+
+fn window_insets(window: &tauri::WebviewWindow, outer_size: tauri::PhysicalSize<u32>) -> WindowInsets {
+    let (Ok(outer), Ok(inner), Ok(inner_size)) = (
+        window.outer_position(),
+        window.inner_position(),
+        window.inner_size(),
+    ) else {
+        return WindowInsets::default();
+    };
+    let valid = |value: i64| if (0..=128).contains(&value) { value } else { 0 };
+    let left = valid(i64::from(inner.x) - i64::from(outer.x));
+    let top = valid(i64::from(inner.y) - i64::from(outer.y));
+    WindowInsets {
+        left,
+        top,
+        right: valid(i64::from(outer_size.width) - i64::from(inner_size.width) - left),
+        bottom: valid(i64::from(outer_size.height) - i64::from(inner_size.height) - top),
+    }
+}
+
 fn toggle_popover(app: &tauri::AppHandle, click: tauri::PhysicalPosition<f64>) {
     let Some(window) = app.get_webview_window("main") else {
         return;
@@ -3043,14 +3211,40 @@ fn toggle_popover(app: &tauri::AppHandle, click: tauri::PhysicalPosition<f64>) {
 
     set_webview_memory_level(&window, false);
 
-    // Anchor the popover's bottom-right corner near the tray click,
-    // which sits next to the clock on a standard bottom taskbar.
     let size = window
         .outer_size()
         .unwrap_or(tauri::PhysicalSize::new(380, 600));
-    let x = (click.x - f64::from(size.width)).max(0.0);
-    let y = (click.y - f64::from(size.height) - 8.0).max(0.0);
-    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    if let Some(monitor) = window
+        .monitor_from_point(click.x, click.y)
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten())
+    {
+        let rect = ScreenRect {
+            x: i64::from(monitor.position().x),
+            y: i64::from(monitor.position().y),
+            width: i64::from(monitor.size().width),
+            height: i64::from(monitor.size().height),
+        };
+        let area = monitor.work_area();
+        let work = ScreenRect {
+            x: i64::from(area.position.x),
+            y: i64::from(area.position.y),
+            width: i64::from(area.size.width),
+            height: i64::from(area.size.height),
+        };
+        let (x, y) = popover_outer_origin(
+            (click.x as i64, click.y as i64),
+            (i64::from(size.width), i64::from(size.height)),
+            rect,
+            work,
+            window_insets(&window, size),
+        );
+        let _ = window.set_position(tauri::PhysicalPosition::new(
+            x.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+            y.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+        ));
+    }
     let _ = window.show();
     let _ = window.set_focus();
     let _ = window.emit("popover-shown", ());
@@ -5058,5 +5252,90 @@ mod tests {
         }
         assert!(!is_stable_metric_label("4.8"));
         assert!(!is_stable_metric_label("sonnet-4"));
+    }
+
+    #[test]
+    fn tray_digits_double_rows_keep_three_transparent_lines() {
+        let rgba = super::draw_tray_numbers_with(&[100, 97], super::TRAY_INK_FALLBACK);
+        for y in 14..=16 {
+            for x in 0..32 {
+                let index = (y * 32 + x) * 4;
+                assert_eq!(&rgba[index..index + 4], &[0, 0, 0, 0], "x={x} y={y}");
+            }
+        }
+    }
+
+    #[test]
+    fn tray_digits_light_palette_is_exact() {
+        let rgba = super::draw_tray_numbers_with(&[100, 97], super::TRAY_INK_LIGHT);
+        let foreground = (1 * 32 + 6) * 4;
+        let outline = (1 * 32 + 5) * 4;
+        assert_eq!(&rgba[foreground..foreground + 4], &[20, 24, 33, 255]);
+        assert_eq!(&rgba[outline..outline + 4], &[255, 255, 255, 220]);
+    }
+
+    #[test]
+    fn tray_digits_dark_and_fallback_palettes() {
+        let pixel = |ink| {
+            let rgba = super::draw_tray_numbers_with(&[100], ink);
+            (rgba[(10 * 32 + 6) * 4..(10 * 32 + 6) * 4 + 4].to_vec(),
+             rgba[(10 * 32 + 5) * 4..(10 * 32 + 5) * 4 + 4].to_vec())
+        };
+        assert_eq!(pixel(super::tray_ink_for_theme(Some(0))), (vec![255, 255, 255, 255], vec![0, 0, 0, 200]));
+        assert_eq!(pixel(super::tray_ink_for_theme(None)), (vec![255, 255, 255, 255], vec![0, 0, 0, 230]));
+        assert_eq!(pixel(super::tray_ink_for_theme(Some(2))), pixel(super::TRAY_INK_FALLBACK));
+    }
+
+    #[test]
+    fn tray_digits_keep_edges_and_empty_image_clear() {
+        let rgba = super::draw_tray_numbers_with(&[100, 100], super::TRAY_INK_DARK);
+        for y in 0..32 {
+            for x in [0, 31] {
+                assert_eq!(&rgba[(y * 32 + x) * 4..(y * 32 + x) * 4 + 4], &[0, 0, 0, 0]);
+            }
+        }
+        assert!(super::draw_tray_numbers_with(&[], super::TRAY_INK_DARK)
+            .iter().all(|channel| *channel == 0));
+        let single = super::draw_tray_numbers_with(&[97], super::TRAY_INK_DARK);
+        for y in 0..32 {
+            let has_foreground = (0..32).any(|x| &single[(y * 32 + x) * 4..(y * 32 + x) * 4 + 4] == &[255, 255, 255, 255]);
+            assert_eq!(has_foreground, (10..=21).contains(&y), "y={y}");
+        }
+    }
+
+    #[test]
+    fn tray_popover_bottom_ignores_click_height_and_offsets_outer_frame() {
+        use super::{popover_origin, popover_outer_origin, ScreenRect, WindowInsets};
+        let monitor = ScreenRect { x: 0, y: 0, width: 1920, height: 1080 };
+        let work = ScreenRect { x: 0, y: 0, width: 1920, height: 1040 };
+        assert_eq!(popover_origin((1800, 1050), (380, 600), monitor, work), (1420, 440));
+        assert_eq!(popover_origin((1800, 1070), (380, 600), monitor, work), (1420, 440));
+        let insets = WindowInsets { left: 8, top: 1, right: 8, bottom: 8 };
+        assert_eq!(popover_outer_origin((1800, 1070), (380, 600), monitor, work, insets), (1428, 448));
+    }
+
+    #[test]
+    fn tray_popover_top_and_sides_follow_work_area() {
+        use super::{popover_origin, ScreenRect};
+        let monitor = ScreenRect { x: 0, y: 0, width: 1920, height: 1080 };
+        let top = ScreenRect { x: 0, y: 48, width: 1920, height: 1032 };
+        assert_eq!(popover_origin((1800, 1000), (380, 600), monitor, top), (1420, 48));
+        let left = ScreenRect { x: 48, y: 0, width: 1872, height: 1080 };
+        assert_eq!(popover_origin((20, 950), (380, 600), monitor, left), (48, 350));
+        let right = ScreenRect { x: 0, y: 0, width: 1872, height: 1080 };
+        assert_eq!(popover_origin((1900, 100), (380, 600), monitor, right), (1492, 0));
+    }
+
+    #[test]
+    fn tray_popover_ties_and_oversized_window_have_stable_origin() {
+        use super::{popover_origin, ScreenRect};
+        let monitor = ScreenRect { x: 0, y: 0, width: 1920, height: 1080 };
+        let no_inset = monitor;
+        assert_eq!(popover_origin((1800, 1000), (380, 600), monitor, no_inset), (1420, 480));
+        let tie = ScreenRect { x: 0, y: 40, width: 1920, height: 1000 };
+        assert_eq!(popover_origin((1800, 1000), (380, 600), monitor, tie), (1420, 440));
+        let small = ScreenRect { x: 40, y: 50, width: 300, height: 200 };
+        assert_eq!(popover_origin((200, 100), (380, 600), monitor, small), (40, 50));
+        assert_eq!(popover_origin((1800, 1050), (380, 500), monitor, tie), (1420, 540));
     }
 }
