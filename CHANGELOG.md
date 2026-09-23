@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.54 — 2026-09-24
+
 ### Added
 - **Weekly capacity (#236).** Codex and Claude cards estimate what 100%
   of the weekly limit is worth in tokens and API-equivalent dollars,
@@ -9,6 +11,11 @@
 - **Claude: banked limit resets** (e.g. the Opus 5.5 launch reset) show
   in the Rate Limit Resets row with their expiry, and can be used from
   Pane like Codex's.
+
+### Fixed
+- **Tray and popover (#237, #240 by @JaminYe).** Tray digits follow the
+  Windows light/dark theme with more room between the two rows, and the
+  popover sits flush on the taskbar of the monitor you clicked.
 
 ## 0.4.53 — 2026-09-21
 
