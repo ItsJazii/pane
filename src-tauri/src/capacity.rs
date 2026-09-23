@@ -415,9 +415,14 @@ fn ledger_key_from(id: &str, identity: Option<&str>) -> String {
     }
 }
 
-/// Resolve the family's default-account identity and derive the key.
-pub fn ledger_key(id: &str, family: &str) -> String {
-    ledger_key_from(id, default_identity_for(family).as_deref())
+/// The key for an ALREADY-resolved tag — when the tag was captured
+/// earlier in the refresh (the pre-fetch read wins over a mid-refresh
+/// sign-in swap).
+pub fn ledger_key_for(id: &str, tag: Option<&str>) -> String {
+    match tag {
+        Some(t) if !id.contains('@') => format!("{id}|{t}"),
+        _ => id.to_string(),
+    }
 }
 
 /// Lazily-loaded ledger file, shared by every fetch_usage pass.
@@ -569,8 +574,11 @@ pub fn peek(key: &str) -> Option<Entry> {
 /// numbers are a replay of an older poll, and a failed attempt's
 /// restored numbers are older still — both are stale (`stale` /
 /// `attempt_failed` as restore_last_success_after_error sets them).
-pub fn may_advance(stale: bool, attempt_failed: bool) -> bool {
-    !(stale || attempt_failed)
+/// `identity_stable` is false when the default account swapped while
+/// the provider request was in flight — the poll can't be attributed
+/// to a known account at all.
+pub fn may_advance(stale: bool, attempt_failed: bool, identity_stable: bool) -> bool {
+    !(stale || attempt_failed || !identity_stable)
 }
 
 /// Set when an in-memory change (or a failed write) hasn't reached
@@ -1203,10 +1211,16 @@ mod tests {
     /// a live one may advance the ledger.
     #[test]
     fn may_advance_blocks_restored_snapshots() {
-        assert!(may_advance(false, false));
-        assert!(!may_advance(true, false));
-        assert!(!may_advance(false, true));
-        assert!(!may_advance(true, true));
+        assert!(may_advance(false, false, true));
+        assert!(!may_advance(true, false, true));
+        assert!(!may_advance(false, true, true));
+        assert!(!may_advance(true, true, true));
+        // A mid-refresh sign-in swap blocks even a fresh live poll —
+        // it can't be attributed to a known account.
+        assert!(!may_advance(false, false, false));
+        assert!(!may_advance(true, false, false));
+        assert!(!may_advance(false, true, false));
+        assert!(!may_advance(true, true, false));
     }
 
     /// A write is owed on any ledger change, and keeps being owed after

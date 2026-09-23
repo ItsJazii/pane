@@ -1572,6 +1572,12 @@ async fn fetch_usage(
     // numbers under the new identity.
     let opencode_identity_at_start = providers::opencode::default_identity();
 
+    // Same guard for the capacity families: a default Claude/Codex
+    // sign-in swap while the requests are in flight must not write
+    // account A's usage poll into account B's quota ledger.
+    let claude_tag_at_start = capacity::identity_tag("claude", "claude");
+    let codex_tag_at_start = capacity::identity_tag("codex", "codex");
+
     // Each provider future is boxed onto the heap and spawned as its own
     // task. A single tokio::join! over 28 inlined futures builds one huge
     // combined state machine on the calling thread's stack — at 28 providers
@@ -2171,14 +2177,29 @@ async fn fetch_usage(
             let resets_at = weekly.resets_at.unwrap();
             // A default card's id survives a sign-in change — key the
             // ledger by account so two logins never share cycle history.
-            let key = capacity::ledger_key(&snap.id, &family);
-            // A restored/stale snapshot replays an older poll's numbers
-            // — show the stored ledger for its account, never advance it.
-            let entry = if capacity::may_advance(snap.stale, snap.attempt_failed) {
+            // The PRE-fetch tag wins: if the default account swapped
+            // while the request was in flight, this poll's numbers
+            // belong to whoever signed the request, not the new login.
+            let pre_tag = match family.as_str() {
+                "claude" => claude_tag_at_start.as_deref(),
+                "codex" => codex_tag_at_start.as_deref(),
+                _ => None,
+            };
+            let post_tag = capacity::identity_tag(&snap.id, &family);
+            let key = capacity::ledger_key_for(&snap.id, pre_tag);
+            // A restored/stale snapshot replays an older poll's numbers,
+            // and a mid-refresh sign-in swap can't be attributed to a
+            // known account at all — show the stored ledger, never
+            // advance it.
+            let entry = if capacity::may_advance(
+                snap.stale,
+                snap.attempt_failed,
+                post_tag.as_deref() == pre_tag,
+            ) {
                 capacity::note_weekly_window(
                     &key,
                     &snap.id,
-                    capacity::identity_tag(&snap.id, &family).as_deref(),
+                    post_tag.as_deref(),
                     window_start,
                     resets_at,
                     weekly.used_percent.unwrap_or(0.0),
