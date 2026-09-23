@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+- **Claude: banked limit resets show in the Rate Limit Resets row** with
+  their expiry once Anthropic exposes them to Claude Code sign-ins; a
+  link opens Claude → Settings → Usage to use one.
+
 ## 0.4.53 — 2026-09-21
 
 ### Added

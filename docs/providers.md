@@ -31,10 +31,15 @@ Ground rules that apply to every provider:
   account in two places stays one card). Extra cards are named from the
   account's organization or email; the default login keeps the plain
   `claude` id. Each account's spend comes from its own dir's logs.
-- **Calls:** `api.anthropic.com/api/oauth/usage` (usage windows);
+- **Calls:** `api.anthropic.com/api/oauth/usage?cedar_ember=1` (usage
+  windows + banked limit resets);
   `platform.claude.com/v1/oauth/token` (refresh, written back).
 - **Shows:** Session + Weekly windows, per-model weeklies, Extra Usage
-  overage; local spend from `~\.claude\projects\` logs. Persisted
+  overage; local spend from `~\.claude\projects\` logs. Banked limit
+  resets appear in the Rate Limit Resets row with their expiry once
+  Anthropic exposes them to Claude Code sign-ins — read-only, since a
+  reset can only be spent on claude.ai; the popover links to Claude →
+  Settings → Usage for that. Persisted
   `claude -p` runs count too (`--no-session-persistence` runs write no
   log to read). Advisor work nested in a message's `usage.iterations`
   counts once under the advisor's own model; ordinary iterations stay

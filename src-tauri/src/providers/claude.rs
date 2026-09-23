@@ -1,4 +1,4 @@
-use super::{http, Metric, Snapshot};
+use super::{http, Metric, ResetCredit, Snapshot};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -264,7 +264,9 @@ async fn fetch(dir: &std::path::Path, id: &str, name: &str) -> Result<Snapshot, 
     }
 
     let resp = http()
-        .get("https://api.anthropic.com/api/oauth/usage")
+        // ?cedar_ember=1 asks for the banked limit-reset block alongside
+        // the windows — the program's internal name.
+        .get("https://api.anthropic.com/api/oauth/usage?cedar_ember=1")
         .bearer_auth(&access)
         .header("anthropic-beta", "oauth-2025-04-20")
         .send()
@@ -359,6 +361,11 @@ async fn fetch(dir: &std::path::Path, id: &str, name: &str) -> Result<Snapshot, 
     if metrics.is_empty() {
         return Err("usage response had no recognizable limit windows".into());
     }
+    // Pushed after the windowless early-return: a resets row alone must
+    // never turn a response with no windows into an ok snapshot.
+    if let Some(resets) = banked_resets(&usage) {
+        metrics.push(resets);
+    }
     Ok(Snapshot::ok(id, name, plan, metrics))
 }
 
@@ -379,6 +386,52 @@ fn push_window(metrics: &mut Vec<Metric>, node: Option<&Value>, label: &str, per
     let Some(used) = node.get("utilization").and_then(Value::as_f64) else { return };
     let resets_at = parse_reset(node.get("resets_at"));
     metrics.push(Metric::progress(label, used, None).with_reset(resets_at, Some(period_ms)));
+}
+
+/// Banked "limit resets" — Anthropic's cedar_ember program, surfaced by
+/// Claude Desktop in Settings → Usage. Spending one only works through
+/// claude.ai (Cloudflare-gated), so Pane lists them read-only like Grok's:
+/// `id` stays None, which is also what keeps the frontend's Use button —
+/// it calls codex_redeem_credit for any credit with an id — off this row.
+/// Eligibility is the gate: an ineligible block (the common case for
+/// Claude Code sign-ins) yields no row at all.
+fn banked_resets(usage: &Value) -> Option<Metric> {
+    let ember = usage.get("cedar_ember")?;
+    if !ember.is_object() || ember.get("eligible").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    const MAX_CREDITS: usize = 20;
+    let mut credits: Vec<ResetCredit> = Vec::new();
+    let grants = ember.get("grants").and_then(Value::as_array);
+    'grants: for grant in grants.map(Vec::as_slice).unwrap_or(&[]) {
+        // The same drops Claude Desktop applies before offering a grant:
+        // no id, fewer than one total reset, a missing resets_left, or an
+        // unparseable ends_at.
+        let id = grant.get("id").and_then(Value::as_str).unwrap_or_default();
+        if id.is_empty() {
+            continue;
+        }
+        let total = grant.get("resets_total").and_then(Value::as_i64).unwrap_or(0);
+        if total < 1 {
+            continue;
+        }
+        let Some(left) = grant.get("resets_left").and_then(Value::as_i64) else {
+            continue;
+        };
+        let Some(ends_at) = parse_reset(grant.get("ends_at")) else {
+            continue;
+        };
+        for _ in 0..left.clamp(0, total) {
+            if credits.len() >= MAX_CREDITS {
+                break 'grants;
+            }
+            credits.push(ResetCredit {
+                id: None,
+                expires_at: Some(ends_at),
+            });
+        }
+    }
+    Some(Metric::resets(credits.len(), Some(credits)))
 }
 
 /// The account uuid becomes `claude@<hash8>`, which the frontend
@@ -452,7 +505,7 @@ fn backup_credentials(path: &std::path::Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::{identity_from, scoped_id_charset};
+    use super::{banked_resets, identity_from, scoped_id_charset};
     use serde_json::json;
 
     #[test]
@@ -468,6 +521,102 @@ mod tests {
         // account never becomes one).
         assert_eq!(identity_from(&json!({"oauthAccount": {}})), None);
         assert_eq!(identity_from(&json!({})), None);
+    }
+
+    /// The exact body the usage endpoint returns for Claude Code OAuth
+    /// tokens today.
+    #[test]
+    fn banked_resets_ineligible_block_yields_no_row() {
+        let usage = json!({"cedar_ember": {
+            "eligible": false,
+            "ineligible_reason": "surface",
+            "at_limit": false,
+            "exhausted": [],
+            "grants": [],
+            "next_grant_id": null,
+            "weekly_resets_at": null,
+            "cooldown_until": null,
+            "event_props": null
+        }});
+        assert!(banked_resets(&usage).is_none());
+    }
+
+    #[test]
+    fn banked_resets_absent_or_null_yields_no_row() {
+        assert!(banked_resets(&json!({"five_hour": {}})).is_none());
+        assert!(banked_resets(&json!({"cedar_ember": null})).is_none());
+    }
+
+    #[test]
+    fn banked_resets_one_grant_lists_its_expiry() {
+        let usage = json!({"cedar_ember": {"eligible": true, "grants": [{
+            "id": "g-1",
+            "label": null,
+            "resets_total": 1,
+            "resets_left": 1,
+            "starts_at": null,
+            "ends_at": "2026-10-22T07:00:00Z",
+            "clears": [],
+            "paused": false,
+            "usable_now": true,
+            "use_requires_limit": true,
+            "percent_used": {},
+            "blocking": []
+        }]}});
+        let m = banked_resets(&usage).expect("eligible grant should yield a row");
+        assert_eq!(m.kind, "resets");
+        assert_eq!(m.value.as_deref(), Some("1"));
+        let ends_ms = chrono::DateTime::parse_from_rfc3339("2026-10-22T07:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(m.resets_at, Some(ends_ms));
+        // Read-only credits carry no id — the frontend's Use button calls
+        // codex_redeem_credit for any credit with one.
+        let credits = serde_json::from_str::<serde_json::Value>(&m.detail.unwrap()).unwrap();
+        let list = credits.as_array().unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list[0].get("id").is_none());
+        assert_eq!(list[0]["expires_at"], ends_ms);
+    }
+
+    #[test]
+    fn banked_resets_drops_unusable_grants_and_expands_left() {
+        let a = "2026-10-22T07:00:00Z";
+        let b = "2026-11-01T00:00:00Z";
+        let usage = json!({"cedar_ember": {"eligible": true, "grants": [
+            {"id": "g-a", "resets_total": 2, "resets_left": 2, "ends_at": a},
+            {"id": "g-b", "resets_total": 1, "resets_left": 0, "ends_at": b},
+            {"id": "g-c", "resets_total": 1, "resets_left": 1, "ends_at": "not-a-date"},
+            {"id": "",    "resets_total": 1, "resets_left": 1, "ends_at": b}
+        ]}});
+        let m = banked_resets(&usage).unwrap();
+        assert_eq!(m.value.as_deref(), Some("2"));
+        let a_ms = chrono::DateTime::parse_from_rfc3339(a).unwrap().timestamp_millis();
+        assert_eq!(m.resets_at, Some(a_ms));
+        let credits = serde_json::from_str::<serde_json::Value>(&m.detail.unwrap()).unwrap();
+        assert!(credits
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["expires_at"] == a_ms));
+    }
+
+    #[test]
+    fn banked_resets_eligible_with_zero_grants_shows_zero() {
+        let usage = json!({"cedar_ember": {"eligible": true, "grants": []}});
+        let m = banked_resets(&usage).expect("eligible with no grants still rows");
+        assert_eq!(m.value.as_deref(), Some("0"));
+        assert_eq!(m.resets_at, None);
+    }
+
+    #[test]
+    fn banked_resets_left_is_clamped_to_total() {
+        let usage = json!({"cedar_ember": {"eligible": true, "grants": [
+            {"id": "g-1", "resets_total": 1, "resets_left": 5,
+             "ends_at": "2026-10-22T07:00:00Z"}
+        ]}});
+        let m = banked_resets(&usage).unwrap();
+        assert_eq!(m.value.as_deref(), Some("1"));
     }
 
     #[test]

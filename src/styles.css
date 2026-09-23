@@ -1684,6 +1684,27 @@ select:focus-visible {
   font-size: 10.5px;
 }
 
+/* Read-only reset providers (Claude): the reset can only be spent on the
+   vendor's own site, so the popover links out instead of offering Use. */
+.rs-link {
+  display: block;
+  align-self: flex-start;
+  background: none;
+  border: none;
+  font-family: inherit;
+  font-size: 10.5px;
+  color: var(--muted-foreground);
+  text-decoration: underline;
+  text-align: left;
+  padding: 4px 8px;
+  margin-top: 6px;
+  cursor: pointer;
+}
+
+.rs-link:hover {
+  color: var(--foreground);
+}
+
 /* ---------------------------------------------------------------- footer */
 
 /* Floats over the card list so content scrolls behind the glass,

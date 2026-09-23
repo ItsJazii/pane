@@ -3079,6 +3079,15 @@ const resetsPopover = (() => {
     } else {
       html += `<div class="rs-empty">${CLOCK_SVG}<div>${escapeHtml(t("resets.none"))}</div></div>`;
     }
+    // Claude's banked resets are spent on claude.ai only — the row is
+    // read-only, so when credits exist the popover links to the one place
+    // that can use them.
+    if (
+      (providerId === "claude" || providerId.startsWith("claude@")) &&
+      (visible.length > 0 || count > 0)
+    ) {
+      html += `<button class="rs-link" data-rs-link>${escapeHtml(t("resets.useInClaude"))}</button>`;
+    }
     el.innerHTML = html;
     position();
   }
@@ -3190,6 +3199,15 @@ const resetsPopover = (() => {
     },
     /// Click delegation inside the popover.
     click(target: HTMLElement): void {
+      const link = target.closest<HTMLElement>("[data-rs-link]");
+      if (link) {
+        void invoke("open_link", { url: "https://claude.ai/settings/usage" }).catch((err) => {
+          document.querySelector("#status")!.textContent = t("footer.openLinkFailed", {
+            err: String(err),
+          });
+        });
+        return;
+      }
       const use = target.closest<HTMLElement>("[data-rs-use]");
       if (use) {
         const key = use.dataset.rsUse!;
