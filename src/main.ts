@@ -1214,6 +1214,19 @@ function renderMetric(m: Metric, providerId: string): string {
         </span>
       </div>`;
   }
+  // Weekly capacity (#236): a text row whose value chip opens the
+  // per-week breakdown tooltip. The display value is rebuilt from the
+  // detail JSON so it localizes; the backend's `value` is the fallback
+  // (and what the local HTTP API serves).
+  if (m.kind === "text" && m.label === "Weekly capacity") {
+    const detail = parseCapacityDetail(m.detail);
+    const text = detail ? capacityRowText(detail) : displayMetricDetail(m.value ?? "");
+    return `
+      <div class="metric-text">
+        <span>${escapeHtml(displayMetricLabel(m.label))}</span>
+        <span class="detail clickable" data-cap="${escapeHtml(providerId)}|${escapeHtml(m.label)}">${escapeHtml(text)}</span>
+      </div>`;
+  }
   return `
     <div class="metric-text">
       <span>${escapeHtml(displayMetricLabel(m.label))}</span>
@@ -2835,6 +2848,121 @@ function showModelTip(row: HTMLElement): void {
   }
 
   const rect = row.getBoundingClientRect();
+  tip.hidden = false;
+  const top = Math.min(rect.bottom + 4, window.innerHeight - tip.offsetHeight - 8);
+  tip.style.top = `${Math.max(4, top)}px`;
+  tip.style.left = `${Math.max(8, Math.min(rect.left + 20, window.innerWidth - tip.offsetWidth - 8))}px`;
+}
+
+// ---------------------------------------------------------------------------
+// Weekly capacity tooltip
+// ---------------------------------------------------------------------------
+
+/// One quota cycle in the "Weekly capacity" row's detail JSON. History
+/// entries carry `peak_pct` instead of `used_pct`.
+interface CapacityCycle {
+  start_ms: number;
+  end_ms: number;
+  used_pct?: number;
+  peak_pct?: number;
+  tokens: number;
+  cost: number;
+  est_tokens?: number;
+  est_cost?: number;
+  status: "active" | "observed" | "incomplete";
+}
+
+interface CapacityDetail {
+  current?: CapacityCycle;
+  history?: CapacityCycle[];
+  avg?: { tokens: number; cost: number; n: number };
+}
+
+function parseCapacityDetail(detail: string | null): CapacityDetail | null {
+  if (!detail) return null;
+  try {
+    const parsed = JSON.parse(detail);
+    return parsed && typeof parsed === "object" ? (parsed as CapacityDetail) : null;
+  } catch {
+    return null;
+  }
+}
+
+/// Whole-dollar rounding for estimates — "≈ $218" reads as the guess it
+/// is; observed figures keep cents.
+function fmtEstMoney(v: number): string {
+  if (v >= 1000) return `$${(v / 1000).toFixed(1)}K`;
+  if (v >= 100) return `$${v.toFixed(0)}`;
+  return `$${v.toFixed(2)}`;
+}
+
+/// The row's right-hand value, localized from the detail JSON.
+function capacityRowText(d: CapacityDetail): string {
+  const cur = d.current;
+  if (!cur) return "";
+  const known = cur.tokens > 0 || cur.cost > 0;
+  if (cur.status === "observed") {
+    return t("cap.valueObserved", { cost: fmtMoney(cur.cost), n: fmtTokens(cur.tokens) });
+  }
+  if (cur.est_cost !== undefined && cur.est_tokens !== undefined) {
+    return t("cap.valueEst", { cost: fmtEstMoney(cur.est_cost), n: fmtTokens(cur.est_tokens) });
+  }
+  if (!known) return t("cap.collecting");
+  return t("cap.valueSoFar", { cost: fmtMoney(cur.cost), n: fmtTokens(cur.tokens) });
+}
+
+/// "Sep 12" — the date half of a past-week line.
+function fmtWeekDay(ms: number): string {
+  return new Date(ms).toLocaleDateString(localeTag(), { month: "short", day: "numeric" });
+}
+
+/// Hover tooltip on the capacity value chip: current cycle, past weeks,
+/// observed average, and the API-equivalent disclaimer. Same surface and
+/// typography as the spend rows' per-model breakdown (#model-tip).
+function showCapacityTip(el: HTMLElement): void {
+  const tip = document.querySelector<HTMLElement>("#model-tip")!;
+  const [id] = (el.dataset.cap ?? "").split("|");
+  const metric = lastSnapshots
+    .find((s) => s.id === id)
+    ?.metrics.find((m) => m.label === "Weekly capacity");
+  const d = metric ? parseCapacityDetail(metric.detail) : null;
+  const cur = d?.current;
+  if (!cur) return;
+
+  const known = cur.tokens > 0 || cur.cost > 0;
+  const hasEst = cur.est_tokens !== undefined && cur.est_cost !== undefined;
+  const lines: string[] = [
+    `<div class="tip-line"><span class="tip-name">${escapeHtml(t("cap.thisWeek"))}</span><span>${escapeHtml(t("card.pctUsed", { n: Math.round(cur.used_pct ?? cur.peak_pct ?? 0) }))}</span></div>`,
+    `<div class="tip-line"><span class="tip-name">${escapeHtml(t("cap.observedSoFar"))}</span><span>${
+      known ? `${escapeHtml(fmtTokens(cur.tokens))} · ${escapeHtml(fmtMoney(cur.cost))}` : "—"
+    }</span></div>`,
+    `<div class="tip-line"><span class="tip-name">${escapeHtml(t("cap.estAt100"))}</span><span>${
+      hasEst ? `~${escapeHtml(fmtTokens(cur.est_tokens!))} · ~${escapeHtml(fmtEstMoney(cur.est_cost!))}` : "—"
+    }</span></div>`,
+  ];
+
+  const history = (d!.history ?? []).slice(0, 6);
+  if (history.length) {
+    lines.push(`<div class="tip-line detail cap-gap"><span>${escapeHtml(t("cap.pastWeeks"))}</span></div>`);
+    for (const c of history) {
+      const status =
+        c.status === "observed"
+          ? t("cap.observed")
+          : t("cap.incompletePeak", { n: Math.round(c.peak_pct ?? 0) });
+      lines.push(
+        `<div class="tip-line detail"><span>${escapeHtml(fmtWeekDay(c.start_ms))} – ${escapeHtml(fmtWeekDay(c.end_ms))} · ${escapeHtml(status)}</span><span>${escapeHtml(fmtTokens(c.tokens))} · ${escapeHtml(fmtMoney(c.cost))}</span></div>`,
+      );
+    }
+  }
+  if (d!.avg) {
+    lines.push(
+      `<div class="tip-line"><span class="tip-name">${escapeHtml(t("cap.avg"))}</span><span>~${escapeHtml(fmtTokens(d!.avg.tokens))} · ~${escapeHtml(fmtEstMoney(d!.avg.cost))} (${d!.avg.n})</span></div>`,
+    );
+  }
+  lines.push(`<div class="tip-foot">${escapeHtml(t("cap.footnote"))}</div>`);
+  tip.innerHTML = lines.join("");
+
+  const rect = el.getBoundingClientRect();
   tip.hidden = false;
   const top = Math.min(rect.bottom + 4, window.innerHeight - tip.offsetHeight - 8);
   tip.style.top = `${Math.max(4, top)}px`;
@@ -5251,6 +5379,11 @@ window.addEventListener("DOMContentLoaded", () => {
       showTrendTip(bar);
       return;
     }
+    const cap = target.closest<HTMLElement>("[data-cap]");
+    if (cap) {
+      showCapacityTip(cap);
+      return;
+    }
     const row = target.closest<HTMLElement>("[data-spend]");
     if (row) showModelTip(row);
   });
@@ -5259,7 +5392,7 @@ window.addEventListener("DOMContentLoaded", () => {
     const to = e.relatedTarget as HTMLElement | null;
     const resets = target.closest<HTMLElement>("[data-resets]");
     if (resets && (!to || !resets.contains(to))) resetsPopover.inlineLeave();
-    const hovered = target.closest<HTMLElement>("[data-spend], [data-trend]");
+    const hovered = target.closest<HTMLElement>("[data-spend], [data-trend], [data-cap]");
     if (hovered && (!to || !hovered.contains(to))) tip.hidden = true;
   });
   let scrollRaf = 0;

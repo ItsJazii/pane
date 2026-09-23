@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+- **Weekly capacity (#236).** Codex and Claude cards estimate what 100%
+  of the weekly limit is worth in tokens and API-equivalent dollars,
+  and keep a history of weeks Pane saw reach 100%.
+
 ## 0.4.53 — 2026-09-21
 
 ### Added

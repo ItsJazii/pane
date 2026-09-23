@@ -1,4 +1,5 @@
 mod alerts;
+mod capacity;
 mod httpapi;
 mod i18n;
 mod pricing;
@@ -2141,6 +2142,48 @@ async fn fetch_usage(
         .map(|ids| ids.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>())
         .unwrap_or_default();
     all.retain(|snapshot| !card_is_disabled(&snapshot.id, &publish_disabled));
+    // Weekly capacity (#236): advance each Codex/Claude card's quota
+    // cycle from the spend scan's hourly buckets and expose the estimate
+    // as a text row. The spend scan can lag this fetch by one refresh —
+    // the ledger keeps the last totals until it catches up. Snapshot ids
+    // equal spend ids for both families (providers mint `codex@<hash8>` /
+    // `claude@<hash8>`; spend::build_spend is keyed by the same acct.id),
+    // so window_totals(id, …) always addresses this card's own logs.
+    {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        for snap in all.iter_mut() {
+            let family = family_of(&snap.id);
+            if (family != "claude" && family != "codex") || snap.status != "ok" {
+                continue;
+            }
+            let Some(weekly) = snap.metrics.iter().find(|m| {
+                m.label == "Weekly"
+                    && m.kind == "progress"
+                    && m.resets_at.is_some()
+                    && m.period_ms.is_some()
+            }) else {
+                continue;
+            };
+            let window_start = weekly.resets_at.unwrap() - weekly.period_ms.unwrap();
+            let totals = spend::window_totals(&snap.id, window_start);
+            let entry = capacity::note_weekly_window(
+                &snap.id,
+                window_start,
+                weekly.resets_at.unwrap(),
+                weekly.used_percent.unwrap_or(0.0),
+                totals,
+                now_ms,
+            );
+            // Restored/stale snapshots can already carry an older row.
+            snap.metrics.retain(|m| m.label != "Weekly capacity");
+            if let Some(m) = capacity::metric(&entry) {
+                snap.metrics.push(m);
+            }
+        }
+    }
     httpapi::publish(&all);
     // Anonymous daily-rollup telemetry — always on, no in-app switch.
     // Fire-and-forget: it must never delay or fail a refresh.
