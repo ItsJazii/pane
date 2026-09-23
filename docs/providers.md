@@ -52,6 +52,14 @@ Ground rules that apply to every provider:
   (`~\.pi\agent\sessions`, providers `anthropic`/`claude-agent-sdk`)
   fold into this card's spend — pi's own recorded cost when present,
   catalog pricing otherwise.
+- **Weekly capacity row:** while the Weekly window runs, Pane sums what
+  this card's logs recorded inside it and estimates what 100% of the
+  limit is worth — tokens plus API-equivalent dollars (list prices, not
+  what you pay). A week Pane actually sees reach 100% is saved as an
+  observed sample, frozen at completion; a week that resets first is
+  marked incomplete. Hover the value for history and the observed
+  average. Usage on other devices or a shared account isn't counted, so
+  an incomplete week can just mean this PC didn't see all of it.
 
 ## Codex (Codex CLI)
 
@@ -84,6 +92,11 @@ Ground rules that apply to every provider:
   `openai-codex`) fold into this card's spend the same way they do for
   Claude. Turns logged as `kimi-oauth/…` or `moonshot-ai/…` (a router
   pointed at the Kimi plan) move to the Kimi Code card instead.
+- **Weekly capacity row:** same as Claude — an in-window estimate of
+  what 100% of the weekly limit is worth (tokens + API-equivalent
+  dollars), a frozen "observed" sample once Pane sees the window hit
+  100%, an "incomplete" mark when it resets first, and a per-week
+  history with the observed average on hover.
 
 ## Cursor
 

@@ -1,4 +1,5 @@
 mod alerts;
+mod capacity;
 mod httpapi;
 mod i18n;
 mod pricing;
@@ -1642,6 +1643,12 @@ async fn fetch_usage(
     // numbers under the new identity.
     let opencode_identity_at_start = providers::opencode::default_identity();
 
+    // Same guard for the capacity families: a default Claude/Codex
+    // sign-in swap while the requests are in flight must not write
+    // account A's usage poll into account B's quota ledger.
+    let claude_tag_at_start = capacity::identity_tag("claude", "claude");
+    let codex_tag_at_start = capacity::identity_tag("codex", "codex");
+
     // Each provider future is boxed onto the heap and spawned as its own
     // task. A single tokio::join! over 28 inlined futures builds one huge
     // combined state machine on the calling thread's stack — at 28 providers
@@ -2212,6 +2219,107 @@ async fn fetch_usage(
         .map(|ids| ids.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>())
         .unwrap_or_default();
     all.retain(|snapshot| !card_is_disabled(&snapshot.id, &publish_disabled));
+    // Weekly capacity (#236): advance each Codex/Claude card's quota
+    // cycle from the spend scan's hourly buckets and expose the estimate
+    // as a text row. The spend scan can lag this fetch by one refresh —
+    // the ledger keeps the last totals until it catches up. Snapshot ids
+    // equal spend ids for both families (providers mint `codex@<hash8>` /
+    // `claude@<hash8>`; spend::build_spend is keyed by the same acct.id),
+    // so window_totals(id, …) always addresses this card's own logs.
+    {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        // A scoped card's id was minted from the account found at
+        // discovery (refresh start) — a re-sign-in since mints a
+        // different id, so re-run discovery and require the id to
+        // survive before trusting its poll. Discovery is a directory
+        // walk that already ran once this refresh; only repeat it for
+        // a family that actually has scoped snapshots.
+        let has_scoped = |fam: &str| {
+            all.iter().any(|s| s.id.starts_with(&format!("{fam}@")))
+        };
+        let claude_scoped_now: Option<HashSet<String>> = has_scoped("claude").then(|| {
+            providers::claude::discover_extra_accounts()
+                .into_iter()
+                .map(|a| a.id)
+                .collect()
+        });
+        let codex_scoped_now: Option<HashSet<String>> = has_scoped("codex").then(|| {
+            providers::codex::discover_extra_accounts()
+                .into_iter()
+                .map(|a| a.id)
+                .collect()
+        });
+        for snap in all.iter_mut() {
+            let family = family_of(&snap.id);
+            if (family != "claude" && family != "codex") || snap.status != "ok" {
+                continue;
+            }
+            let Some(weekly) = snap.metrics.iter().find(|m| {
+                m.label == "Weekly"
+                    && m.kind == "progress"
+                    && m.resets_at.is_some()
+                    && m.period_ms.is_some()
+            }) else {
+                continue;
+            };
+            let window_start = weekly.resets_at.unwrap() - weekly.period_ms.unwrap();
+            let resets_at = weekly.resets_at.unwrap();
+            // A default card's id survives a sign-in change — key the
+            // ledger by account so two logins never share cycle history.
+            // The PRE-fetch tag wins: if the default account swapped
+            // while the request was in flight, this poll's numbers
+            // belong to whoever signed the request, not the new login.
+            let pre_tag = capacity::start_tag_for(
+                &snap.id,
+                claude_tag_at_start.as_deref(),
+                codex_tag_at_start.as_deref(),
+            );
+            let post_tag = capacity::identity_tag(&snap.id, &family);
+            let key = capacity::ledger_key_for(&snap.id, pre_tag);
+            // For a scoped card the fresh discovery must still mint its
+            // id — a re-signed dir means the in-flight poll belongs to
+            // an account this id no longer names.
+            let fresh_ids = match family.as_str() {
+                "claude" => claude_scoped_now.as_ref(),
+                "codex" => codex_scoped_now.as_ref(),
+                _ => None,
+            };
+            let scoped_stable = fresh_ids
+                .map_or(true, |ids| capacity::scoped_identity_stable(&snap.id, ids));
+            // A restored/stale snapshot replays an older poll's numbers,
+            // and a mid-refresh sign-in swap can't be attributed to a
+            // known account at all — show the stored ledger, never
+            // advance it.
+            let entry = if capacity::may_advance(
+                snap.stale,
+                snap.attempt_failed,
+                post_tag.as_deref() == pre_tag && scoped_stable,
+            ) {
+                capacity::note_weekly_window(
+                    &key,
+                    &snap.id,
+                    post_tag.as_deref(),
+                    window_start,
+                    resets_at,
+                    weekly.used_percent.unwrap_or(0.0),
+                    now_ms,
+                )
+            } else {
+                match capacity::peek(&key) {
+                    Some(e) => e,
+                    None => continue,
+                }
+            };
+            // Restored/stale snapshots can already carry an older row.
+            snap.metrics.retain(|m| m.label != "Weekly capacity");
+            if let Some(m) = capacity::metric(&entry) {
+                snap.metrics.push(m);
+            }
+        }
+    }
     httpapi::publish(&all);
     // Anonymous daily-rollup telemetry — always on, no in-app switch.
     // Fire-and-forget: it must never delay or fail a refresh.
