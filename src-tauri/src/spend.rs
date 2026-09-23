@@ -610,19 +610,21 @@ fn recent_hours() -> &'static Mutex<Option<(HashMap<String, HashMap<i64, (f64, f
 }
 
 /// (cost, tokens, scan-started-ms) `id` logged in hours whose
-/// hour-start is at or after `since_ms` floored to the hour. Hourly
-/// bucketing means a window that began mid-hour can pull in up to one
-/// hour of spend from just before its start — the quota-capacity
-/// estimate tolerates that. `None` before the first completed scan;
-/// after that, an id nobody logged into sums to zero.
-pub fn window_totals(id: &str, since_ms: i64) -> Option<(f64, f64, i64)> {
+/// hour-start is at or after `since_ms` floored to the hour and before
+/// `until_ms` ceiled to the hour — hourly bucketing can pull in up to
+/// one hour of spend at EACH end of the window, which the
+/// quota-capacity estimate tolerates. `None` before the first
+/// completed scan; after that, an id nobody logged into sums to zero.
+pub fn window_totals(id: &str, since_ms: i64, until_ms: i64) -> Option<(f64, f64, i64)> {
     let since_hour = since_ms.div_euclid(3_600_000);
+    let until_hour =
+        until_ms.div_euclid(3_600_000) + i64::from(until_ms.rem_euclid(3_600_000) != 0);
     let guard = recent_hours().lock().ok()?;
     let (map, started_ms) = guard.as_ref()?;
     let mut out = (0.0, 0.0);
     if let Some(hours) = map.get(id) {
         for (hour, (cost, tokens)) in hours {
-            if *hour >= since_hour {
+            if *hour >= since_hour && *hour < until_hour {
                 out.0 += cost;
                 out.1 += tokens;
             }
@@ -4623,7 +4625,7 @@ mod tests {
     #[test]
     fn window_totals_sums_hours_from_the_floored_start() {
         reset_recent_hours();
-        assert!(window_totals("claude", 0).is_none(), "no scan yet → None");
+        assert!(window_totals("claude", 0, i64::MAX).is_none(), "no scan yet → None");
 
         let hour_ms = 3_600_000i64;
         let mut claude = HashMap::new();
@@ -4638,12 +4640,22 @@ mod tests {
         // since_ms mid-hour-101 floors to hour 101 → hours 101+102 count.
         // The stamp tells callers which scan these totals came from.
         assert_eq!(
-            window_totals("claude", 101 * hour_ms + 1_234),
+            window_totals("claude", 101 * hour_ms + 1_234, i64::MAX),
             Some((50.0, 5_000.0, 999))
         );
-        assert_eq!(window_totals("codex", 101 * hour_ms), Some((5.0, 500.0, 999)));
+        // until_ms bounds the top end: hour 102 excluded at an exact
+        // boundary, included when until lands mid-hour-102 (ceil).
+        assert_eq!(
+            window_totals("claude", 0, 102 * hour_ms),
+            Some((30.0, 3_000.0, 999))
+        );
+        assert_eq!(
+            window_totals("claude", 0, 102 * hour_ms + 1),
+            Some((60.0, 6_000.0, 999))
+        );
+        assert_eq!(window_totals("codex", 101 * hour_ms, i64::MAX), Some((5.0, 500.0, 999)));
         // A card nobody logged into sums to zero once a scan ran.
-        assert_eq!(window_totals("grok", 0), Some((0.0, 0.0, 999)));
+        assert_eq!(window_totals("grok", 0, i64::MAX), Some((0.0, 0.0, 999)));
 
         reset_recent_hours();
     }

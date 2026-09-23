@@ -2870,6 +2870,9 @@ interface CapacityCycle {
   est_tokens?: number;
   est_cost?: number;
   status: "active" | "observed" | "incomplete";
+  /// Null on a finalizing cycle: it reached 100% and rolled over, but
+  /// no post-hit scan has confirmed its totals yet.
+  observed_at_ms?: number | null;
 }
 
 interface CapacityDetail {
@@ -2947,7 +2950,9 @@ function showCapacityTip(el: HTMLElement): void {
     for (const c of history) {
       const status =
         c.status === "observed"
-          ? t("cap.observed")
+          ? c.observed_at_ms == null
+            ? `${t("cap.observed")} · ${t("cap.finalizing")}`
+            : t("cap.observed")
           : t("cap.incompletePeak", { n: Math.round(c.peak_pct ?? 0) });
       lines.push(
         `<div class="tip-line detail"><span>${escapeHtml(fmtWeekDay(c.start_ms))} – ${escapeHtml(fmtWeekDay(c.end_ms))} · ${escapeHtml(status)}</span><span>${escapeHtml(fmtTokens(c.tokens))} · ${escapeHtml(fmtMoney(c.cost))}</span></div>`,

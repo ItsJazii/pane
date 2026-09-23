@@ -2168,18 +2168,29 @@ async fn fetch_usage(
                 continue;
             };
             let window_start = weekly.resets_at.unwrap() - weekly.period_ms.unwrap();
-            let totals = spend::window_totals(&snap.id, window_start);
+            let resets_at = weekly.resets_at.unwrap();
+            let totals = spend::window_totals(&snap.id, window_start, resets_at);
             // A default card's id survives a sign-in change — key the
             // ledger by account so two logins never share cycle history.
             let key = capacity::ledger_key(&snap.id, &family);
-            let entry = capacity::note_weekly_window(
-                &key,
-                window_start,
-                weekly.resets_at.unwrap(),
-                weekly.used_percent.unwrap_or(0.0),
-                totals,
-                now_ms,
-            );
+            // A restored/stale snapshot replays an older poll's numbers
+            // — show the stored ledger for its account, never advance it.
+            let entry = if capacity::may_advance(snap.stale, snap.attempt_failed) {
+                capacity::note_weekly_window(
+                    &key,
+                    &snap.id,
+                    window_start,
+                    resets_at,
+                    weekly.used_percent.unwrap_or(0.0),
+                    totals,
+                    now_ms,
+                )
+            } else {
+                match capacity::peek(&key) {
+                    Some(e) => e,
+                    None => continue,
+                }
+            };
             // Restored/stale snapshots can already carry an older row.
             snap.metrics.retain(|m| m.label != "Weekly capacity");
             if let Some(m) = capacity::metric(&entry) {

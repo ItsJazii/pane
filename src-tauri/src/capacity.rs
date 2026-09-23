@@ -105,17 +105,15 @@ pub fn update(
         // open the new cycle.
         if let Some(mut c) = out.current.take() {
             if c.status != Status::Observed {
-                // A cycle Pane saw reach 100% but never sealed (the
-                // confirming scan didn't land before rollover) still
-                // counts as observed — best effort, at its last totals.
+                // A cycle Pane saw reach 100% but never sealed keeps
+                // hit_full_at_ms and no observed_at_ms — "finalizing":
+                // it reached 100%, but a scan started after the hit may
+                // still confirm the money (resolve_pending retries it).
                 c.status = if c.hit_full_at_ms.is_some() {
                     Status::Observed
                 } else {
                     Status::Incomplete
                 };
-                if c.status == Status::Observed && c.observed_at_ms.is_none() {
-                    c.observed_at_ms = c.hit_full_at_ms;
-                }
             }
             out.history.insert(0, c);
             out.history.truncate(HISTORY_MAX);
@@ -163,15 +161,51 @@ pub fn update(
     out
 }
 
-/// Mean of the observed samples only — active and incomplete weeks are
-/// never evidence of a full quota's worth. The running cycle counts
-/// once it's observed; it needn't wait for rollover into history.
+/// An observed cycle with no observed_at_ms is "finalizing": it
+/// reached 100% and rolled over, but no scan started after the hit has
+/// confirmed its totals yet.
+fn is_pending(c: &Cycle) -> bool {
+    c.status == Status::Observed && c.observed_at_ms.is_none()
+}
+
+/// Once hour buckets are this far past a window's end they're gone for
+/// good — a still-pending cycle's money can never be confirmed.
+const HOUR_BUCKETS_GONE_MS: i64 = 8 * 86_400_000;
+
+/// Retry sealing a pending (rolled-over unsealed) cycle against a
+/// newer scan. `totals` must be window_totals bounded to the cycle's
+/// own [start, end] hours. Seals when the scan STARTED at-or-after
+/// hit_full_at_ms; past end + 8 days the buckets are gone and the
+/// cycle gives up as incomplete.
+pub fn resolve_pending(c: &Cycle, totals: Option<(f64, f64, i64)>, now_ms: i64) -> Cycle {
+    let mut out = c.clone();
+    if !is_pending(&out) {
+        return out;
+    }
+    if let (Some(hit), Some((cost, tokens, started))) = (out.hit_full_at_ms, totals) {
+        if started >= hit {
+            out.cost = cost;
+            out.tokens = tokens;
+            out.observed_at_ms = Some(now_ms);
+            return out;
+        }
+    }
+    if now_ms > out.end_ms + HOUR_BUCKETS_GONE_MS {
+        out.status = Status::Incomplete;
+    }
+    out
+}
+
+/// Mean of the sealed observed samples only — active, incomplete, and
+/// still-finalizing weeks are never evidence of a full quota's worth.
+/// The running cycle counts once it's observed; it needn't wait for
+/// rollover into history.
 fn observed_average(entry: &Entry) -> Option<(f64, f64, usize)> {
     let mut cost = 0.0;
     let mut tokens = 0.0;
     let mut n = 0usize;
     for c in entry.current.iter().chain(entry.history.iter()) {
-        if c.status == Status::Observed {
+        if c.status == Status::Observed && c.observed_at_ms.is_some() {
             cost += c.cost;
             tokens += c.tokens;
             n += 1;
@@ -334,6 +368,23 @@ fn load(map: &mut Option<HashMap<String, Entry>>) {
     *map = Some(loaded);
 }
 
+/// A stored ledger entry, read without mutating — for restored/stale
+/// snapshots, which may carry a stale Weekly % and must never advance
+/// the ledger.
+pub fn peek(key: &str) -> Option<Entry> {
+    let mut guard = ledger().lock().unwrap_or_else(|e| e.into_inner());
+    load(&mut guard);
+    guard.as_ref()?.get(key).cloned()
+}
+
+/// Only a live poll may advance the ledger: a restored snapshot's
+/// numbers are a replay of an older poll, and a failed attempt's
+/// restored numbers are older still — both are stale (`stale` /
+/// `attempt_failed` as restore_last_success_after_error sets them).
+pub fn may_advance(stale: bool, attempt_failed: bool) -> bool {
+    !(stale || attempt_failed)
+}
+
 /// Set when an in-memory change (or a failed write) hasn't reached
 /// disk. An observed sample exists nowhere else — a dropped write would
 /// lose it permanently, so every call retries while the flag is up,
@@ -350,7 +401,8 @@ fn persist_needed(changed: bool, dirty: bool) -> bool {
 /// and persist it (only when it actually changed or an earlier write
 /// failed — the common steady-state poll writes nothing).
 pub fn note_weekly_window(
-    id: &str,
+    key: &str,
+    spend_id: &str,
     window_start_ms: i64,
     resets_at_ms: i64,
     used_pct: f64,
@@ -360,11 +412,21 @@ pub fn note_weekly_window(
     let mut guard = ledger().lock().unwrap_or_else(|e| e.into_inner());
     load(&mut guard);
     let map = guard.as_mut().expect("load fills the map");
-    let prev = map.get(id).cloned().unwrap_or_default();
-    let next = update(&prev, window_start_ms, resets_at_ms, used_pct, totals, now_ms);
+    let prev = map.get(key).cloned().unwrap_or_default();
+    let mut next = update(&prev, window_start_ms, resets_at_ms, used_pct, totals, now_ms);
+    // Pending history cycles (rolled over before their confirming
+    // scan) retry against the newest scan, bounded to their own
+    // window's hours — a fresh poll is also their next chance to seal.
+    for c in next.history.iter_mut() {
+        *c = resolve_pending(
+            c,
+            crate::spend::window_totals(spend_id, c.start_ms, c.end_ms),
+            now_ms,
+        );
+    }
     let changed = next != prev;
     if changed {
-        map.insert(id.to_string(), next.clone());
+        map.insert(key.to_string(), next.clone());
     }
     if persist_needed(changed, PERSIST_DIRTY.load(Ordering::Relaxed)) {
         match serde_json::to_string_pretty(map) {
@@ -511,15 +573,74 @@ mod tests {
     }
 
     /// A window that rolls over while a 100% seal is still pending is
-    /// archived as observed — it did reach 100% — with its last totals.
+    /// archived as observed but UNSEALED — it reached 100%, yet no
+    /// post-hit scan has confirmed the money: observed_at stays empty,
+    /// hit_full_at survives for resolve_pending's retries.
     #[test]
-    fn rollover_while_pending_counts_as_observed() {
+    fn rollover_while_pending_archives_as_finalizing() {
         let e = poll(&Entry::default(), T0, 100.0, Some((218.0, 1_300_000_000.0)));
         assert_eq!(e.current.as_ref().unwrap().status, Status::Active);
         let e = poll(&e, T0 + WEEK, 2.0, Some((0.5, 5_000_000.0)));
-        assert_eq!(e.history[0].status, Status::Observed);
-        assert_eq!(e.history[0].cost, 218.0);
-        assert_eq!(e.history[0].observed_at_ms, Some(T0 + 1_000));
+        let h = &e.history[0];
+        assert_eq!(h.status, Status::Observed);
+        assert_eq!(h.observed_at_ms, None);
+        assert_eq!(h.hit_full_at_ms, Some(T0 + 1_000));
+        assert_eq!(h.cost, 218.0);
+    }
+
+    /// resolve_pending retries a pending history cycle against newer
+    /// scans: a scan started after the hit seals it with bounded
+    /// totals; an older one leaves it pending; once the hour buckets
+    /// are gone it gives up as incomplete.
+    #[test]
+    fn resolve_pending_seals_then_gives_up() {
+        let e = poll(&Entry::default(), T0, 100.0, Some((218.0, 1_300_000_000.0)));
+        let e = poll(&e, T0 + WEEK, 2.0, Some((0.5, 5_000_000.0)));
+        let c = e.history[0].clone();
+        assert!(is_pending(&c));
+
+        // Scan started before the hit → stays pending.
+        let still = resolve_pending(&c, Some((999.0, 9e9, T0 - 1)), T0 + 9_000);
+        assert!(is_pending(&still));
+        assert_eq!(still.cost, 218.0, "unconfirmed totals untouched");
+
+        // Scan started after the hit → seals with ITS totals.
+        let sealed = resolve_pending(&c, Some((240.0, 1_500_000_000.0, T0 + 2_000)), T0 + 9_000);
+        assert_eq!(sealed.status, Status::Observed);
+        assert_eq!(sealed.observed_at_ms, Some(T0 + 9_000));
+        assert_eq!(sealed.cost, 240.0);
+        assert_eq!(sealed.tokens, 1_500_000_000.0);
+
+        // Past end + 8 days the hour buckets are gone → incomplete.
+        let old = Cycle { end_ms: T0, ..c.clone() };
+        let gave_up = resolve_pending(&old, None, T0 + HOUR_BUCKETS_GONE_MS + 1);
+        assert_eq!(gave_up.status, Status::Incomplete);
+        // A sealed cycle is immune to resolve_pending.
+        let immune = resolve_pending(&sealed, Some((1.0, 1.0, 0)), T0 + 9_000);
+        assert_eq!(immune.cost, 240.0);
+    }
+
+    /// Only SEALED observed weeks are evidence — a finalizing one keeps
+    /// its numbers out of the average until a post-hit scan confirms.
+    #[test]
+    fn average_excludes_pending_observed_weeks() {
+        let mut e = Entry::default();
+        // Week 1 seals in place (scan stamp = its poll's now).
+        e = update(&e, T0, T0 + WEEK, 100.0, Some((200.0, 1_000_000_000.0, T0)), T0);
+        // Week 2 hits 100% with a pre-hit scan → pending; week 3's
+        // rollover archives it finalizing.
+        e = update(&e, T0 + WEEK, T0 + 2 * WEEK, 100.0, Some((260.0, 1_600_000_000.0, T0)), T0 + WEEK);
+        e = update(&e, T0 + 2 * WEEK, T0 + 3 * WEEK, 10.0, Some((20.0, 0.0, T0)), T0 + 2 * WEEK);
+        assert!(is_pending(&e.history[0]));
+        let (_, _, n) = observed_average(&e).unwrap();
+        assert_eq!(n, 1, "the finalizing week isn't evidence yet");
+        let m = metric(&e).unwrap();
+        let detail: Value = serde_json::from_str(m.detail.as_deref().unwrap()).unwrap();
+        assert_eq!(detail["avg"]["n"], 1);
+        // The finalizing row still ships to the frontend as observed
+        // with no observed_at — the popover labels it "finalizing".
+        assert_eq!(detail["history"][0]["status"], "observed");
+        assert!(detail["history"][0]["observed_at_ms"].is_null());
     }
 
     #[test]
@@ -682,6 +803,16 @@ mod tests {
         // orphan the ledger mid-session.
         assert_eq!(ledger_key_from("claude", None), "claude");
         assert_eq!(ledger_key_from("codex", Some("-")), "codex");
+    }
+
+    /// Restored and failed-attempt snapshots replay older polls — only
+    /// a live one may advance the ledger.
+    #[test]
+    fn may_advance_blocks_restored_snapshots() {
+        assert!(may_advance(false, false));
+        assert!(!may_advance(true, false));
+        assert!(!may_advance(false, true));
+        assert!(!may_advance(true, true));
     }
 
     /// A write is owed on any ledger change, and keeps being owed after
