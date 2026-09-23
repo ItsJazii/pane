@@ -415,6 +415,22 @@ fn ledger_key_from(id: &str, identity: Option<&str>) -> String {
     }
 }
 
+/// The pre-fetch tag for THIS snapshot: only a bare default id owns
+/// the shared dir a tag was captured for — a scoped `claude@<hash8>`
+/// card must not inherit the default account's tag (its post-fetch
+/// tag is always None, so that pairing would read as a swap forever).
+pub fn start_tag_for<'a>(
+    id: &str,
+    claude: Option<&'a str>,
+    codex: Option<&'a str>,
+) -> Option<&'a str> {
+    match id {
+        "claude" => claude,
+        "codex" => codex,
+        _ => None,
+    }
+}
+
 /// The key for an ALREADY-resolved tag — when the tag was captured
 /// earlier in the refresh (the pre-fetch read wins over a mid-refresh
 /// sign-in swap).
@@ -810,6 +826,23 @@ mod tests {
         ]);
         assert!(!gapped.complete, "one gapped range unseals the whole window");
         assert_eq!(gapped.scan_started_ms, T0);
+    }
+
+    /// The pre-fetch tag is picked by exact id, not family — a scoped
+    /// card's post-fetch tag is always None, so handing it the default
+    /// account's tag would freeze its capacity row as a perpetual swap.
+    #[test]
+    fn start_tag_matches_bare_default_ids_only() {
+        assert_eq!(start_tag_for("claude", Some("a"), Some("b")), Some("a"));
+        assert_eq!(start_tag_for("codex", Some("a"), Some("b")), Some("b"));
+        assert_eq!(start_tag_for("claude@abcd1234", Some("a"), Some("b")), None);
+        assert_eq!(start_tag_for("codex@abcd1234", Some("a"), Some("b")), None);
+        // Scoped pairing: None/None is stable → a live poll advances.
+        for id in ["claude@abcd1234", "codex@abcd1234"] {
+            let stable =
+                start_tag_for(id, Some("a"), Some("b")) == identity_tag_of(id, Some("x")).as_deref();
+            assert!(may_advance(false, false, stable), "{id} must stay advanceable");
+        }
     }
 
     #[test]

@@ -2180,11 +2180,11 @@ async fn fetch_usage(
             // The PRE-fetch tag wins: if the default account swapped
             // while the request was in flight, this poll's numbers
             // belong to whoever signed the request, not the new login.
-            let pre_tag = match family.as_str() {
-                "claude" => claude_tag_at_start.as_deref(),
-                "codex" => codex_tag_at_start.as_deref(),
-                _ => None,
-            };
+            let pre_tag = capacity::start_tag_for(
+                &snap.id,
+                claude_tag_at_start.as_deref(),
+                codex_tag_at_start.as_deref(),
+            );
             let post_tag = capacity::identity_tag(&snap.id, &family);
             let key = capacity::ledger_key_for(&snap.id, pre_tag);
             // A restored/stale snapshot replays an older poll's numbers,
