@@ -39,7 +39,9 @@ Ground rules that apply to every provider:
   resets appear in the Rate Limit Resets row with their expiry once
   Anthropic exposes them to Claude Code sign-ins — read-only, since a
   reset can only be spent on claude.ai; the popover links to Claude →
-  Settings → Usage for that. Persisted
+  Settings → Usage for that. Until the API can see them, Pro/Max/Team
+  cards carry an announcement-based reminder for the Opus 5.5 reset
+  (valid until Oct 22) that "I used it" dismisses for good. Persisted
   `claude -p` runs count too (`--no-session-persistence` runs write no
   log to read). Advisor work nested in a message's `usage.iterations`
   counts once under the advisor's own model; ordinary iterations stay

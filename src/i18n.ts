@@ -377,6 +377,8 @@ const en: Dict = {
   "resets.none": "You have no rate limit resets",
   "resets.expiryUnknown": "Expiry times unavailable",
   "resets.useInClaude": "Use it in Claude → Settings → Usage",
+  "resets.announcedNote": "From Anthropic's Sep 22 announcement. Pane can't see if you've used it.",
+  "resets.usedIt": "I used it",
 
   "share.tagline": "Monitor Your AI Subscriptions with Pane",
   "tray.left": "{label}: {n}% left",
@@ -753,6 +755,8 @@ const zh: Dict = {
   "resets.none": "你没有可用的速率限制重置",
   "resets.expiryUnknown": "无法获取过期时间",
   "resets.useInClaude": "在 Claude → 设置 → 用量 中使用",
+  "resets.announcedNote": "来自 Anthropic 9 月 22 日的公告，Pane 无法得知你是否已使用。",
+  "resets.usedIt": "我已使用",
 
   "share.tagline": "用 Pane 盯紧你的 AI 订阅",
   "tray.left": "{label}：剩余 {n}%",
@@ -1080,6 +1084,8 @@ const ru: Dict = {
   "resets.none": "У вас нет сбросов лимитов",
   "resets.expiryUnknown": "Время истечения недоступно",
   "resets.useInClaude": "Применить в Claude → Настройки → Использование",
+  "resets.announcedNote": "Из объявления Anthropic от 22 сентября. Pane не видит, использовали ли вы его.",
+  "resets.usedIt": "Я его использовал",
 
   "share.tagline": "Следите за подписками ИИ с Pane",
   "tray.left": "{label}: осталось {n}%",

@@ -223,6 +223,7 @@ interface Config {
   starPromptLastMs: number;
   reduceAnimations: boolean;
   locale: LocalePref;
+  claudeResetsDismissed: string[];
 }
 
 const FRONTEND_CONFIG_KEYS = [
@@ -257,6 +258,7 @@ const FRONTEND_CONFIG_KEYS = [
   "starPromptLastMs",
   "reduceAnimations",
   "locale",
+  "claudeResetsDismissed",
 ] as const satisfies readonly (keyof Config)[];
 type _AssertAllConfigKeys = Exclude<keyof Config, (typeof FRONTEND_CONFIG_KEYS)[number]> extends never
   ? true
@@ -446,6 +448,7 @@ let config: Config = {
   starPromptLastMs: 0,
   reduceAnimations: false,
   locale: "auto",
+  claudeResetsDismissed: [],
 };
 let lastFetch = 0;
 let refreshing = false;
@@ -3079,6 +3082,12 @@ const resetsPopover = (() => {
     } else {
       html += `<div class="rs-empty">${CLOCK_SVG}<div>${escapeHtml(t("resets.none"))}</div></div>`;
     }
+    // An injected announcement reminder explains where the row came from
+    // and offers a way out — Pane can't see the reset being spent.
+    if (announcedResetFor(providerId) !== null) {
+      html += `<div class="rs-note detail">${escapeHtml(t("resets.announcedNote"))}</div>`;
+      html += `<button class="rs-link" data-rs-dismiss>${escapeHtml(t("resets.usedIt"))}</button>`;
+    }
     // Claude's banked resets are spent on claude.ai only — the row is
     // read-only, so when credits exist the popover links to the one place
     // that can use them.
@@ -3199,6 +3208,22 @@ const resetsPopover = (() => {
     },
     /// Click delegation inside the popover.
     click(target: HTMLElement): void {
+      const dismiss = target.closest<HTMLElement>("[data-rs-dismiss]");
+      if (dismiss) {
+        const id = announcedResetFor(providerId);
+        if (id !== null) {
+          const dismissed = config.claudeResetsDismissed.includes(id)
+            ? config.claudeResetsDismissed
+            : [...config.claudeResetsDismissed, id];
+          void patchConfig({ claudeResetsDismissed: dismissed }).catch(() => {});
+          // Re-derive the row against the new dismissal right away — the
+          // reminder is gone this frame, not next refresh.
+          lastSnapshots = withAnnouncedClaudeResets(lastSnapshots, dismissed, Date.now());
+          renderIfVisible();
+        }
+        close();
+        return;
+      }
       const link = target.closest<HTMLElement>("[data-rs-link]");
       if (link) {
         void invoke("open_link", { url: "https://claude.ai/settings/usage" }).catch((err) => {
@@ -3279,6 +3304,86 @@ function hideFoldedMoonshot(snapshots: Snapshot[]): Snapshot[] {
   return snapshots;
 }
 
+// Banked resets Anthropic announced but the usage API can't see for
+// Claude Code sign-ins (cedar_ember comes back eligible:false "surface").
+// Announcement-based reminders — remove each entry once it has expired.
+const ANNOUNCED_CLAUDE_RESETS = [
+  {
+    // Opus 5.5 banked reset, announced Sep 22 for Pro/Max/Team; ends at
+    // local end of day Oct 22.
+    id: "opus-5.5-2026-09",
+    expiresAt: new Date(2026, 9, 22, 23, 59, 59).getTime(),
+    plans: /^(pro|max|team)/i,
+  },
+];
+
+/// The provider ids the last injection pass stamped a reminder onto, and
+/// which announcement each carries — resetsPopover keys its dismiss
+/// button off this rather than re-deriving eligibility.
+const injectedAnnouncedResets = new Map<string, string>();
+
+/// A resets metric our own injection produced — used to strip it on the
+/// next pass so dismissal and expiry actually take the row away.
+function isAnnouncedResetsMetric(m: Metric): boolean {
+  return (
+    m.kind === "resets" &&
+    ANNOUNCED_CLAUDE_RESETS.some(
+      (a) =>
+        m.resets_at === a.expiresAt &&
+        m.detail === JSON.stringify([{ expires_at: a.expiresAt }]),
+    )
+  );
+}
+
+/// Inject the announcement-based Rate Limit Resets row into Claude cards
+/// that qualify: ok snapshot, a matching plan, no real resets metric (the
+/// API always wins), unexpired, and not dismissed. Never mutates `snaps`;
+/// re-running is idempotent — a previously injected row is stripped and
+/// re-derived, which is what makes "I used it" and expiry work.
+function withAnnouncedClaudeResets(
+  snaps: Snapshot[],
+  dismissed: string[],
+  now: number,
+): Snapshot[] {
+  injectedAnnouncedResets.clear();
+  return snaps.map((s) => {
+    if (s.id !== "claude" && !s.id.startsWith("claude@")) return s;
+    const metrics = s.metrics.filter((m) => !isAnnouncedResetsMetric(m));
+    const base = metrics.length === s.metrics.length ? s : { ...s, metrics };
+    if (base.status !== "ok") return base;
+    if (metrics.some((m) => m.kind === "resets")) return base;
+    const announced = ANNOUNCED_CLAUDE_RESETS.find(
+      (a) =>
+        now < a.expiresAt &&
+        a.plans.test(base.plan ?? "") &&
+        !dismissed.includes(a.id),
+    );
+    if (!announced) return base;
+    injectedAnnouncedResets.set(s.id, announced.id);
+    return {
+      ...base,
+      metrics: [
+        ...metrics,
+        {
+          label: "Rate Limit Resets",
+          kind: "resets",
+          used_percent: null,
+          detail: JSON.stringify([{ expires_at: announced.expiresAt }]),
+          value: "1",
+          resets_at: announced.expiresAt,
+          period_ms: null,
+        },
+      ],
+    };
+  });
+}
+
+/// The announcement id currently injected into this provider's card, or
+/// null — the popover shows its note/dismiss affordance only for these.
+function announcedResetFor(providerId: string): string | null {
+  return injectedAnnouncedResets.get(providerId) ?? null;
+}
+
 /// First paint from the previous run's snapshots (disk cache): numbers on
 /// screen in milliseconds instead of a blank "Refreshing…" while the
 /// slowest provider answers — at boot that wait ran 30-40 seconds. Cards
@@ -3294,7 +3399,7 @@ async function paintCachedSnapshots(): Promise<void> {
     );
     // The live fetch may have already landed — never paint over it.
     if (!cached.length || lastSnapshots.length) return;
-    lastSnapshots = cached;
+    lastSnapshots = withAnnouncedClaudeResets(cached, config.claudeResetsDismissed, Date.now());
     scheduleResetRefresh();
     ensureLayout();
     renderIfVisible();
@@ -3434,7 +3539,7 @@ async function refresh(force = false, usageOnly = false): Promise<void> {
     }
     const firstData = lastSnapshots.length === 0;
     lastFetch = Date.now();
-    lastSnapshots = snapshots;
+    lastSnapshots = withAnnouncedClaudeResets(snapshots, config.claudeResetsDismissed, Date.now());
     scheduleResetRefresh();
     ensureLayout();
     if (!lastLayoutSnapshot && config.layout) {
