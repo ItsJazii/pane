@@ -596,25 +596,28 @@ fn staged_hours() -> &'static Mutex<HashMap<String, HashMap<i64, (f64, f64)>>> {
     STAGED.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Per-spend-id hourly totals from the last completed scan. `None` until
-/// collect() finishes once — callers asking earlier must see None, not a
-/// partial map.
-fn recent_hours() -> &'static Mutex<Option<HashMap<String, HashMap<i64, (f64, f64)>>>> {
-    static RECENT: OnceLock<Mutex<Option<HashMap<String, HashMap<i64, (f64, f64)>>>>> =
-        OnceLock::new();
+/// Per-spend-id hourly totals from the last completed scan, plus when
+/// that scan finished — a window that hit 100% may only be sealed by
+/// totals from a scan that could have seen it (capacity.rs compares the
+/// stamp). `None` until collect() finishes once: callers asking earlier
+/// must see None, not a partial map.
+fn recent_hours() -> &'static Mutex<Option<(HashMap<String, HashMap<i64, (f64, f64)>>, i64)>> {
+    static RECENT: OnceLock<
+        Mutex<Option<(HashMap<String, HashMap<i64, (f64, f64)>>, i64)>>,
+    > = OnceLock::new();
     RECENT.get_or_init(|| Mutex::new(None))
 }
 
-/// (cost, tokens) `id` logged in hours whose hour-start is at or after
-/// `since_ms` floored to the hour. Hourly bucketing means a window that
-/// began mid-hour can pull in up to one hour of spend from just before
-/// its start — the quota-capacity estimate tolerates that. `None` before
-/// the first completed scan; after that, an id nobody logged into sums
-/// to zero.
-pub fn window_totals(id: &str, since_ms: i64) -> Option<(f64, f64)> {
+/// (cost, tokens, scan-completed-ms) `id` logged in hours whose
+/// hour-start is at or after `since_ms` floored to the hour. Hourly
+/// bucketing means a window that began mid-hour can pull in up to one
+/// hour of spend from just before its start — the quota-capacity
+/// estimate tolerates that. `None` before the first completed scan;
+/// after that, an id nobody logged into sums to zero.
+pub fn window_totals(id: &str, since_ms: i64) -> Option<(f64, f64, i64)> {
     let since_hour = since_ms.div_euclid(3_600_000);
     let guard = recent_hours().lock().ok()?;
-    let map = guard.as_ref()?;
+    let (map, completed_ms) = guard.as_ref()?;
     let mut out = (0.0, 0.0);
     if let Some(hours) = map.get(id) {
         for (hour, (cost, tokens)) in hours {
@@ -624,7 +627,7 @@ pub fn window_totals(id: &str, since_ms: i64) -> Option<(f64, f64)> {
             }
         }
     }
-    Some(out)
+    Some((out.0, out.1, *completed_ms))
 }
 
 #[cfg(test)]
@@ -635,9 +638,9 @@ fn reset_recent_hours() {
 }
 
 #[cfg(test)]
-fn publish_test_hours(map: HashMap<String, HashMap<i64, (f64, f64)>>) {
+fn publish_test_hours(map: HashMap<String, HashMap<i64, (f64, f64)>>, completed_ms: i64) {
     if let Ok(mut g) = recent_hours().lock() {
-        *g = Some(map);
+        *g = Some((map, completed_ms));
     }
 }
 
@@ -3184,7 +3187,7 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
         .map(|mut s| std::mem::take(&mut *s))
         .unwrap_or_default();
     if let Ok(mut recent) = recent_hours().lock() {
-        *recent = Some(staged);
+        *recent = Some((staged, Utc::now().timestamp_millis()));
     }
     list.into_iter().filter(ProviderSpend::has_data).collect()
 }
@@ -4625,16 +4628,17 @@ mod tests {
         let mut map: HashMap<String, HashMap<i64, (f64, f64)>> = HashMap::new();
         map.insert("claude".into(), claude);
         map.insert("codex".into(), HashMap::from([(101i64, (5.0, 500.0))]));
-        publish_test_hours(map);
+        publish_test_hours(map, 999);
 
         // since_ms mid-hour-101 floors to hour 101 → hours 101+102 count.
+        // The stamp tells callers which scan these totals came from.
         assert_eq!(
             window_totals("claude", 101 * hour_ms + 1_234),
-            Some((50.0, 5_000.0))
+            Some((50.0, 5_000.0, 999))
         );
-        assert_eq!(window_totals("codex", 101 * hour_ms), Some((5.0, 500.0)));
+        assert_eq!(window_totals("codex", 101 * hour_ms), Some((5.0, 500.0, 999)));
         // A card nobody logged into sums to zero once a scan ran.
-        assert_eq!(window_totals("grok", 0), Some((0.0, 0.0)));
+        assert_eq!(window_totals("grok", 0), Some((0.0, 0.0, 999)));
 
         reset_recent_hours();
     }
