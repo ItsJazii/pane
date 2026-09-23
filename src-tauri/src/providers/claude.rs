@@ -451,15 +451,21 @@ fn banked_resets(usage: &Value) -> Option<Metric> {
             && grant.get("paused").and_then(Value::as_bool) != Some(true)
             && !cooling
             && valid_grant_id(id);
+        let left_clamped = left.clamp(0, total);
+        // The claimable copy's id carries the grant's remaining count
+        // (`{grant}~{left}`): every claim spends one reset, so the
+        // refreshed grant~N-1 must not look like the already-claimed
+        // grant~N to the popover's claimed-set/idempotency-key map —
+        // those assume each id is a one-time credit.
         let mut id_spent = false;
-        for _ in 0..left.clamp(0, total) {
+        for _ in 0..left_clamped {
             if credits.len() >= MAX_CREDITS {
                 break 'grants;
             }
             credits.push(ResetCredit {
                 id: if claimable && !id_spent {
                     id_spent = true;
-                    Some(id.to_string())
+                    Some(format!("{id}~{left_clamped}"))
                 } else {
                     None
                 },
@@ -477,6 +483,21 @@ fn valid_grant_id(id: &str) -> bool {
         && id
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+/// A claimable credit id is `{grant_id}~{resets_left}` — the suffix is
+/// the grant's remaining count at offer time (see banked_resets). Split
+/// on the LAST '~': grant ids can't contain one (valid_grant_id rejects
+/// it), so anything left of it either is the grant or fails validation.
+fn parse_reset_credit_id(credit_id: &str) -> Option<&str> {
+    let (grant, left) = credit_id.rsplit_once('~')?;
+    if !valid_grant_id(grant) {
+        return None;
+    }
+    match left.parse::<u32>() {
+        Ok(n) if (1..=1000).contains(&n) => Some(grant),
+        _ => None,
+    }
 }
 
 /// The frontend's per-credit idempotency key, reused on retries.
@@ -533,9 +554,9 @@ pub async fn redeem_credit(
     credit_id: &str,
     redeem_request_id: Option<&str>,
 ) -> Result<RedeemOutcome, String> {
-    if !valid_grant_id(credit_id) {
+    let Some(grant_id) = parse_reset_credit_id(credit_id) else {
         return Err("unknown Claude reset".into());
-    }
+    };
     // Route the redeem to the account whose card offered the reset — an
     // extra account's Use button must spend ITS grant, same routing the
     // usage fetch uses.
@@ -586,7 +607,7 @@ pub async fn redeem_credit(
         .header("User-Agent", CLAUDE_CLI_UA)
         .json(&json!({
             "program": "cedar_ember",
-            "grant_id": credit_id,
+            "grant_id": grant_id,
             "request_id": request_id,
         }))
         .send()
@@ -668,7 +689,7 @@ fn backup_credentials(path: &std::path::Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::{banked_resets, identity_from, scoped_id_charset};
+    use super::{banked_resets, identity_from, parse_reset_credit_id, scoped_id_charset};
     use serde_json::json;
 
     #[test]
@@ -750,7 +771,7 @@ mod tests {
         let credits = serde_json::from_str::<serde_json::Value>(&m.detail.unwrap()).unwrap();
         let list = credits.as_array().unwrap();
         assert_eq!(list.len(), 1);
-        assert_eq!(list[0]["id"], "opus55-launch-promax-20260921");
+        assert_eq!(list[0]["id"], "opus55-launch-promax-20260921~1");
         assert_eq!(list[0]["expires_at"], ends_ms);
     }
 
@@ -787,7 +808,7 @@ mod tests {
         // A past cooldown doesn't bench anything.
         ember = json!({"eligible": true, "next_grant_id": "opus55-launch-promax-20260921",
             "cooldown_until": "2020-01-01T00:00:00Z", "grants": [grant]});
-        assert_eq!(credit_id(ember), Some(json!("opus55-launch-promax-20260921")));
+        assert_eq!(credit_id(ember), Some(json!("opus55-launch-promax-20260921~1")));
     }
 
     /// resets_left 2 banks two credits, but each claim spends one reset
@@ -806,7 +827,32 @@ mod tests {
         assert_eq!(list.len(), 2);
         let with_id: Vec<_> = list.iter().filter(|c| c.get("id").is_some()).collect();
         assert_eq!(with_id.len(), 1);
-        assert_eq!(with_id[0]["id"], "g-1");
+        // resets_left 2 → the offered id is g-1~2; after one claim the
+        // refreshed g-1~1 is a different id, so the popover shows it
+        // as still available with a fresh idempotency key.
+        assert_eq!(with_id[0]["id"], "g-1~2");
+    }
+
+    /// The claimable id is `{grant}~{resets_left}`; the redeem call
+    /// recovers the bare grant by splitting on the LAST '~'.
+    #[test]
+    fn parse_reset_credit_id_requires_the_left_suffix() {
+        assert_eq!(
+            parse_reset_credit_id("opus55-launch-promax-20260921~1"),
+            Some("opus55-launch-promax-20260921")
+        );
+        assert_eq!(parse_reset_credit_id("g-1~42"), Some("g-1"));
+        // No suffix, a zero or non-numeric suffix, or a grant part that
+        // fails the charset/length rules all reject the click.
+        assert_eq!(parse_reset_credit_id("opus55-launch-promax-20260921"), None);
+        assert_eq!(parse_reset_credit_id("g-1~0"), None);
+        assert_eq!(parse_reset_credit_id("g-1~abc"), None);
+        assert_eq!(parse_reset_credit_id("g-1~1001"), None);
+        assert_eq!(parse_reset_credit_id("G_1~2"), None);
+        assert_eq!(parse_reset_credit_id("~2"), None);
+        // Multiple '~': the last wins, so the grant part keeps a '~'
+        // and fails validation.
+        assert_eq!(parse_reset_credit_id("g~1~2"), None);
     }
 
     #[test]
