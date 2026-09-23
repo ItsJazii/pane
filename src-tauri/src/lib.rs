@@ -3214,7 +3214,12 @@ fn toggle_popover(app: &tauri::AppHandle, click: tauri::PhysicalPosition<f64>) {
     let size = window
         .outer_size()
         .unwrap_or(tauri::PhysicalSize::new(380, 600));
-    if let Some(monitor) = window.primary_monitor().ok().flatten() {
+    if let Some(monitor) = window
+        .monitor_from_point(click.x, click.y)
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten())
+    {
         let rect = ScreenRect {
             x: i64::from(monitor.position().x),
             y: i64::from(monitor.position().y),
