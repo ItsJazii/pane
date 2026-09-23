@@ -76,13 +76,40 @@ pub struct Entry {
     pub history: Vec<Cycle>,
 }
 
-/// Which account currently owns a default card's log dir, and since
-/// when. Spend in the shared dir before `since_ms` belongs to a
-/// previous sign-in and must not count toward this account's cycle.
+/// One stretch of time a default card's shared log dir belonged to one
+/// account. `to_ms` is None while the account is still signed in.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct IdentityStamp {
+pub struct Interval {
     pub tag: String,
-    pub since_ms: i64,
+    pub from_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_ms: Option<i64>,
+}
+
+/// Ownership history of a default card's log dir — a single account
+/// can hold several disjoint stretches (A → B → A), and each must
+/// count only the logs it wrote.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct IdentityRecord {
+    pub intervals: Vec<Interval>,
+}
+
+impl<'de> serde::Deserialize<'de> for IdentityRecord {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Intervals { intervals: Vec<Interval> },
+            // The round-5 shape: one switch timestamp per account.
+            Stamp { tag: String, since_ms: i64 },
+        }
+        Ok(match Repr::deserialize(d)? {
+            Repr::Intervals { intervals } => IdentityRecord { intervals },
+            Repr::Stamp { tag, since_ms } => IdentityRecord {
+                intervals: vec![Interval { tag, from_ms: since_ms, to_ms: None }],
+            },
+        })
+    }
 }
 
 /// On-disk shape of quota_cycles.json: the cycle ledgers plus the
@@ -93,7 +120,7 @@ struct LedgerFile {
     #[serde(default)]
     cycles: HashMap<String, Entry>,
     #[serde(default)]
-    identities: HashMap<String, IdentityStamp>,
+    identities: HashMap<String, IdentityRecord>,
 }
 
 /// Advance one provider's ledger by one usage poll. `totals` is the
@@ -423,23 +450,110 @@ fn load(map: &mut Option<LedgerFile>) {
     *map = Some(loaded);
 }
 
-/// The persisted "this default dir switched accounts at" decision.
-/// First sighting records since_ms 0 — Pane can't know about earlier
-/// switches, so nothing is excluded. A DIFFERENT tag, including a
-/// switch back to a previous account, restarts the bound at now: the
-/// shared dir holds the other account's logs in between.
-fn identity_since(stored: Option<&IdentityStamp>, tag: &str, now_ms: i64) -> IdentityStamp {
-    match stored {
-        Some(s) if s.tag == tag => s.clone(),
-        None => IdentityStamp { tag: tag.into(), since_ms: 0 },
-        _ => IdentityStamp { tag: tag.into(), since_ms: now_ms },
+/// Cap on stored ownership intervals per default card — a switcher
+/// can't grow quota_cycles.json without bound.
+const IDENTITY_INTERVALS_MAX: usize = 32;
+
+/// Fold this poll's account tag into the ownership history. First
+/// sighting opens `[0, ∞)` — Pane can't know about earlier switches,
+/// so nothing is excluded. A different tag, including a switch BACK
+/// to a previous account, closes the open interval at now and starts
+/// a fresh one — the shared dir holds the other account's logs in
+/// between. Closed intervals older than the spend scan's retention
+/// can't bound any window anymore and are dropped.
+fn observe_identity(intervals: &[Interval], tag: &str, now_ms: i64) -> Vec<Interval> {
+    let mut out = intervals.to_vec();
+    match out.last_mut() {
+        Some(open) if open.to_ms.is_none() && open.tag == tag => {}
+        Some(open) if open.to_ms.is_none() => {
+            open.to_ms = Some(now_ms);
+            out.push(Interval { tag: tag.into(), from_ms: now_ms, to_ms: None });
+        }
+        _ => out.push(Interval {
+            tag: tag.into(),
+            from_ms: if out.is_empty() { 0 } else { now_ms },
+            to_ms: None,
+        }),
+    }
+    out.retain(|i| i.to_ms.map_or(true, |to| to >= now_ms - spend::HOURS_WINDOW_MS));
+    if out.len() > IDENTITY_INTERVALS_MAX {
+        out.drain(..out.len() - IDENTITY_INTERVALS_MAX);
+    }
+    out
+}
+
+/// The stretches of `[win_start, win_end)` this account owned the
+/// shared dir — several when it signed out and back inside the window.
+fn owned_ranges(
+    intervals: &[Interval],
+    tag: &str,
+    win_start: i64,
+    win_end: i64,
+) -> Vec<(i64, i64)> {
+    intervals
+        .iter()
+        .filter(|i| i.tag == tag)
+        .map(|i| (i.from_ms.max(win_start), i.to_ms.unwrap_or(i64::MAX).min(win_end)))
+        .filter(|(a, b)| a < b)
+        .collect()
+}
+
+/// Where this poll may read spend inside the window: just the ranges
+/// the current account owned. A scoped id or unreadable identity owns
+/// the whole window (the card's logs are already per-account).
+fn ranges_for(
+    identity_tag: Option<&str>,
+    intervals: &[Interval],
+    win_start: i64,
+    win_end: i64,
+) -> Vec<(i64, i64)> {
+    match identity_tag {
+        Some(tag) => owned_ranges(intervals, tag, win_start, win_end),
+        None => vec![(win_start, win_end)],
     }
 }
 
-/// The window's spend bound once a sign-in switch applies: logs before
-/// the later of the two belong to another account.
-fn effective_since(window_start_ms: i64, since_ms: i64) -> i64 {
-    window_start_ms.max(since_ms)
+/// Sum a window's hourly totals over the ranges this account owned.
+/// Adjacent owners both count the hour holding the switch moment —
+/// buckets are whole hours, so the boundary hour lands in both
+/// ledgers' ranges.
+fn owned_window_totals(
+    spend_id: &str,
+    identity_tag: Option<&str>,
+    intervals: &[Interval],
+    win_start: i64,
+    win_end: i64,
+) -> Option<WindowTotals> {
+    let ranges = ranges_for(identity_tag, intervals, win_start, win_end);
+    if ranges.is_empty() {
+        // This account owned none of the window — a zero total, but
+        // still report the scan's freshness so a 100% can seal.
+        return spend::window_totals(spend_id, win_start, win_end)
+            .map(|t| WindowTotals { cost: 0.0, tokens: 0.0, ..t });
+    }
+    let mut parts = Vec::with_capacity(ranges.len());
+    for (a, b) in ranges {
+        parts.push(spend::window_totals(spend_id, a, b)?);
+    }
+    Some(combine_window_totals(parts))
+}
+
+/// Fold per-range totals into one: the scan fields all come from the
+/// same publish, but take the conservative min/AND anyway.
+fn combine_window_totals(parts: Vec<WindowTotals>) -> WindowTotals {
+    let mut out = WindowTotals {
+        cost: 0.0,
+        tokens: 0.0,
+        scan_started_ms: i64::MAX,
+        complete: true,
+    };
+    for t in parts {
+        out.cost += t.cost;
+        out.tokens += t.tokens;
+        out.scan_started_ms = out.scan_started_ms.min(t.scan_started_ms);
+        out.complete &= t.complete;
+    }
+    out
 }
 
 /// A stored ledger entry, read without mutating — for restored/stale
@@ -489,25 +603,32 @@ pub fn note_weekly_window(
     let mut guard = ledger().lock().unwrap_or_else(|e| e.into_inner());
     load(&mut guard);
     let map = guard.as_mut().expect("load fills the map");
-    // A default dir's logs outlive sign-ins — bound every scan to when
-    // THIS account took over, or a previous login's spend would count
-    // toward this account's window.
+    // A default dir's logs outlive sign-ins — every scan is bounded to
+    // the stretches THIS account owned the dir, or a previous login's
+    // spend would count toward this account's window.
     let mut stamp_changed = false;
-    let since_ms = match identity_tag {
+    let intervals = match identity_tag {
         Some(tag) => {
-            let stamp = identity_since(map.identities.get(spend_id), tag, now_ms);
-            if map.identities.get(spend_id) != Some(&stamp) {
-                map.identities.insert(spend_id.to_string(), stamp.clone());
+            let empty = IdentityRecord { intervals: Vec::new() };
+            let stored = map.identities.get(spend_id).unwrap_or(&empty);
+            let next = observe_identity(&stored.intervals, tag, now_ms);
+            if next != stored.intervals {
+                map.identities.insert(
+                    spend_id.to_string(),
+                    IdentityRecord { intervals: next.clone() },
+                );
                 stamp_changed = true;
             }
-            stamp.since_ms
+            next
         }
-        None => 0,
+        None => Vec::new(),
     };
     let prev = map.cycles.get(key).cloned().unwrap_or_default();
-    let totals = spend::window_totals(
+    let totals = owned_window_totals(
         spend_id,
-        effective_since(window_start_ms, since_ms),
+        identity_tag,
+        &intervals,
+        window_start_ms,
         resets_at_ms,
     );
     let mut next = update(&prev, window_start_ms, resets_at_ms, used_pct, totals, now_ms);
@@ -517,7 +638,7 @@ pub fn note_weekly_window(
     for c in next.history.iter_mut() {
         *c = resolve_pending(
             c,
-            spend::window_totals(spend_id, effective_since(c.start_ms, since_ms), c.end_ms),
+            owned_window_totals(spend_id, identity_tag, &intervals, c.start_ms, c.end_ms),
             now_ms,
         );
     }
@@ -569,30 +690,118 @@ mod tests {
         )
     }
 
-    #[test]
-    fn identity_stamp_tracks_sign_in_switches() {
-        let a = IdentityStamp { tag: "aaaa1111".into(), since_ms: 0 };
-        // First sighting records the tag with no restriction — Pane
-        // can't know which earlier logs belong to this account.
-        assert_eq!(identity_since(None, "aaaa1111", T0), a);
-        // Same tag keeps the stored stamp untouched.
-        assert_eq!(identity_since(Some(&a), "aaaa1111", T0 + 100), a);
-        // A different tag bounds the window at the switch moment.
-        let b = identity_since(Some(&a), "bbbb2222", T0 + 500);
-        assert_eq!(b, IdentityStamp { tag: "bbbb2222".into(), since_ms: T0 + 500 });
-        // Switching BACK to the first tag still bumps since — the dir
-        // holds the other account's logs in between.
-        let a2 = identity_since(Some(&b), "aaaa1111", T0 + 900);
-        assert_eq!(a2.tag, "aaaa1111");
-        assert_eq!(a2.since_ms, T0 + 900);
+    fn iv(tag: &str, from_ms: i64, to_ms: Option<i64>) -> Interval {
+        Interval { tag: tag.into(), from_ms, to_ms }
     }
 
     #[test]
-    fn effective_since_bounds_the_window_at_the_switch() {
-        // Logs before the sign-in belong to the previous account.
-        assert_eq!(effective_since(T0, 0), T0);
-        assert_eq!(effective_since(T0, T0 + 60_000), T0 + 60_000);
-        assert_eq!(effective_since(T0 + 60_000, T0), T0 + 60_000);
+    fn observe_identity_tracks_ownership_switches() {
+        // First sighting owns everything — Pane can't know about
+        // earlier switches.
+        let v = observe_identity(&[], "aaaa1111", T0);
+        assert_eq!(v, vec![iv("aaaa1111", 0, None)]);
+        // Same tag keeps the open interval untouched.
+        assert_eq!(observe_identity(&v, "aaaa1111", T0 + 100), v);
+        // A different tag closes the open interval and starts a fresh
+        // one — the shared dir holds the other account's logs between.
+        let v = observe_identity(&v, "bbbb2222", T0 + 500);
+        assert_eq!(
+            v,
+            vec![iv("aaaa1111", 0, Some(T0 + 500)), iv("bbbb2222", T0 + 500, None)]
+        );
+        // Switching BACK to the first tag opens a SECOND interval for
+        // it — the earlier stretch is preserved, not resurrected.
+        let v = observe_identity(&v, "aaaa1111", T0 + 900);
+        assert_eq!(
+            v,
+            vec![
+                iv("aaaa1111", 0, Some(T0 + 500)),
+                iv("bbbb2222", T0 + 500, Some(T0 + 900)),
+                iv("aaaa1111", T0 + 900, None),
+            ]
+        );
+        // Closed intervals beyond the spend scan's retention can't
+        // bound any window anymore — dropped; the open one stays. The
+        // cutoff lands between the two closed ends (500 and 900).
+        let pruned = observe_identity(&v, "aaaa1111", T0 + spend::HOURS_WINDOW_MS + 700);
+        assert_eq!(
+            pruned,
+            vec![
+                iv("bbbb2222", T0 + 500, Some(T0 + 900)),
+                iv("aaaa1111", T0 + 900, None),
+            ],
+            "the first A stretch closed at +500 is older than retention"
+        );
+        // The cap drops the oldest intervals first.
+        let mut many = Vec::new();
+        for i in 0..IDENTITY_INTERVALS_MAX + 3 {
+            many = observe_identity(&many, &format!("t{i:02}"), T0 + i as i64);
+        }
+        assert_eq!(many.len(), IDENTITY_INTERVALS_MAX);
+        assert_eq!(many.last().unwrap().tag, format!("t{:02}", IDENTITY_INTERVALS_MAX + 2));
+    }
+
+    #[test]
+    fn owned_ranges_clip_the_window_to_ownership() {
+        // A owns [0, 500) and [900, ∞), B owns [500, 900). A week
+        // spanning all three gives the current account TWO ranges —
+        // A's first stretch counts toward A's ledger, B's toward B's.
+        let owned = vec![
+            iv("aaaa1111", 0, Some(500)),
+            iv("bbbb2222", 500, Some(900)),
+            iv("aaaa1111", 900, None),
+        ];
+        assert_eq!(
+            owned_ranges(&owned, "aaaa1111", 0, 2000),
+            vec![(0, 500), (900, 2000)]
+        );
+        // A window fully inside B's ownership gives A nothing — its
+        // cycle totals are zero, not B's spend.
+        assert_eq!(owned_ranges(&owned, "aaaa1111", 600, 800), Vec::<(i64, i64)>::new());
+        // Ranges clip to the window's ends.
+        assert_eq!(
+            owned_ranges(&owned, "bbbb2222", 400, 700),
+            vec![(500, 700)]
+        );
+        // No tag (scoped card or unreadable identity) owns the whole
+        // window — the card's logs are already per-account.
+        assert_eq!(ranges_for(None, &owned, 100, 600), vec![(100, 600)]);
+        assert_eq!(
+            ranges_for(Some("aaaa1111"), &owned, 100, 600),
+            vec![(100, 500)]
+        );
+    }
+
+    #[test]
+    fn identity_record_migrates_the_single_stamp_shape() {
+        // Round-5 files stored one {tag, since_ms} per card — it loads
+        // as one open interval; the intervals shape round-trips.
+        let rec: IdentityRecord =
+            serde_json::from_str(r#"{"tag":"aaaa1111","since_ms":42}"#).unwrap();
+        assert_eq!(rec.intervals, vec![iv("aaaa1111", 42, None)]);
+        let rec: IdentityRecord = serde_json::from_str(
+            r#"{"intervals":[{"tag":"bbbb2222","from_ms":1,"to_ms":2}]}"#,
+        )
+        .unwrap();
+        assert_eq!(rec.intervals, vec![iv("bbbb2222", 1, Some(2))]);
+    }
+
+    #[test]
+    fn combine_window_totals_sums_and_keeps_the_worst_scan_flag() {
+        let out = combine_window_totals(vec![
+            wt(10.0, 100.0, T0 + 5),
+            wt(4.5, 50.0, T0 + 2),
+        ]);
+        assert_eq!(out.cost, 14.5);
+        assert_eq!(out.tokens, 150.0);
+        assert_eq!(out.scan_started_ms, T0 + 2, "earliest scan start wins");
+        assert!(out.complete);
+        let gapped = combine_window_totals(vec![
+            wt(1.0, 1.0, T0),
+            WindowTotals { cost: 2.0, tokens: 2.0, scan_started_ms: T0 + 1, complete: false },
+        ]);
+        assert!(!gapped.complete, "one gapped range unseals the whole window");
+        assert_eq!(gapped.scan_started_ms, T0);
     }
 
     #[test]
