@@ -3101,7 +3101,13 @@ const resetsPopover = (() => {
     render();
     const status = document.querySelector("#status")!;
     status.textContent = t("footer.redeeming");
-    invoke<RedeemOutcome>("codex_redeem_credit", {
+    // Claude's banked resets redeem through its own endpoint; the claim
+    // flow and outcome vocabulary are otherwise identical to Codex's.
+    const command =
+      providerId === "claude" || providerId.startsWith("claude@")
+        ? "claude_redeem_credit"
+        : "codex_redeem_credit";
+    invoke<RedeemOutcome>(command, {
       creditId: credit?.id ?? key,
       providerId,
       redeemRequestId: keys.get(key),
