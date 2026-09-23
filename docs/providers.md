@@ -32,14 +32,17 @@ Ground rules that apply to every provider:
   account's organization or email; the default login keeps the plain
   `claude` id. Each account's spend comes from its own dir's logs.
 - **Calls:** `api.anthropic.com/api/oauth/usage?cedar_ember=1` (usage
-  windows + banked limit resets);
+  windows + banked limit resets — the `cedar_ember` block only reports
+  eligibility when the request carries Claude Code's own User-Agent);
+  `api.anthropic.com/api/oauth/profile` (org uuid, at redeem time);
+  `api.anthropic.com/api/organizations/<org>/reset_rate_limits`
+  (spending a banked reset);
   `platform.claude.com/v1/oauth/token` (refresh, written back).
 - **Shows:** Session + Weekly windows, per-model weeklies, Extra Usage
   overage; local spend from `~\.claude\projects\` logs. Banked limit
-  resets appear in the Rate Limit Resets row with their expiry once
-  Anthropic exposes them to Claude Code sign-ins — read-only, since a
-  reset can only be spent on claude.ai; the popover links to Claude →
-  Settings → Usage for that. Persisted
+  resets appear in the Rate Limit Resets row with their expiry and can
+  be claimed from the popover exactly like Codex's — the server-selected
+  grant is the only claimable one. Persisted
   `claude -p` runs count too (`--no-session-persistence` runs write no
   log to read). Advisor work nested in a message's `usage.iterations`
   counts once under the advisor's own model; ordinary iterations stay

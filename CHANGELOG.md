@@ -3,9 +3,9 @@
 ## Unreleased
 
 ### Added
-- **Claude: banked limit resets show in the Rate Limit Resets row** with
-  their expiry once Anthropic exposes them to Claude Code sign-ins; a
-  link opens Claude → Settings → Usage to use one.
+- **Claude: banked limit resets** (e.g. the Opus 5.5 launch reset) show
+  in the Rate Limit Resets row with their expiry, and can be used from
+  Pane like Codex's.
 
 ## 0.4.53 — 2026-09-21
 

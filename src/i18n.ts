@@ -376,7 +376,6 @@ const en: Dict = {
   "resets.failed": "Couldn't reset usage. Please try again.",
   "resets.none": "You have no rate limit resets",
   "resets.expiryUnknown": "Expiry times unavailable",
-  "resets.useInClaude": "Use it in Claude → Settings → Usage",
 
   "share.tagline": "Monitor Your AI Subscriptions with Pane",
   "tray.left": "{label}: {n}% left",
@@ -752,7 +751,6 @@ const zh: Dict = {
   "resets.failed": "重置失败，请重试。",
   "resets.none": "你没有可用的速率限制重置",
   "resets.expiryUnknown": "无法获取过期时间",
-  "resets.useInClaude": "在 Claude → 设置 → 用量 中使用",
 
   "share.tagline": "用 Pane 盯紧你的 AI 订阅",
   "tray.left": "{label}：剩余 {n}%",
@@ -1079,7 +1077,6 @@ const ru: Dict = {
   "resets.failed": "Не удалось сбросить лимиты. Попробуйте ещё раз.",
   "resets.none": "У вас нет сбросов лимитов",
   "resets.expiryUnknown": "Время истечения недоступно",
-  "resets.useInClaude": "Применить в Claude → Настройки → Использование",
 
   "share.tagline": "Следите за подписками ИИ с Pane",
   "tray.left": "{label}: осталось {n}%",

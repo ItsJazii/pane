@@ -1,4 +1,4 @@
-use super::{http, Metric, ResetCredit, Snapshot};
+use super::{codex::RedeemOutcome, http, Metric, ResetCredit, Snapshot};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -7,6 +7,10 @@ use std::path::PathBuf;
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const ID: &str = "claude";
 const NAME: &str = "Claude";
+// Anthropic gates cedar_ember (banked resets) eligibility by User-Agent:
+// without the CLI's UA the usage endpoint answers eligible:false
+// "surface"; with it the same token reports real grants.
+const CLAUDE_CLI_UA: &str = "claude-cli/2.1.280 (external, cli)";
 const MAX_CRED_BYTES: u64 = 64 * 1024;
 
 fn default_dir() -> PathBuf {
@@ -164,111 +168,17 @@ async fn fetch(dir: &std::path::Path, id: &str, name: &str) -> Result<Snapshot, 
         ));
     }
 
-    let raw = super::read_small_text(&path, MAX_CRED_BYTES, "credentials")?;
-    let mut doc: Value = serde_json::from_str(&raw).map_err(|e| format!("parse credentials: {e}"))?;
-    let oauth = doc
-        .get("claudeAiOauth")
-        .cloned()
-        .ok_or("credentials file has no claudeAiOauth entry")?;
-
-    let mut access = oauth
-        .get("accessToken")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let refresh = oauth
-        .get("refreshToken")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let expires_at = oauth.get("expiresAt").and_then(Value::as_i64).unwrap_or(0);
-    let plan = oauth
-        .get("subscriptionType")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-
-    // Tokens go stale; swap the refresh token for a fresh access token when needed.
-    let now_ms = Utc::now().timestamp_millis();
-    if access.is_empty() || expires_at <= now_ms + 60_000 {
-        if refresh.is_empty() {
-            return Err("token expired and no refresh token present — run `claude` and log in again".into());
-        }
-        // Refresh rotates the CLI's refresh token. Stage the write-back
-        // BEFORE the token call: if the refreshed pair can't replace the
-        // live file, the rotation would sign the CLI out from under the
-        // user. Only a token whose expiry is still in the future may skip
-        // the refresh; an expired one would just earn a vendor rejection.
-        let staged = stage_credentials_tmp(&path);
-        if staged.is_none() && (access.is_empty() || expires_at <= now_ms) {
-            return Err(
-                "Claude credentials cannot be updated safely — run `claude` in a terminal".into(),
-            );
-        }
-        if let Some(staged) = staged {
-            let resp = http()
-                .post("https://platform.claude.com/v1/oauth/token")
-                .json(&json!({
-                    "grant_type": "refresh_token",
-                    "refresh_token": refresh,
-                    "client_id": CLIENT_ID,
-                }))
-                .send()
-                .await
-                .map_err(|e| format!("token refresh: {e}"))?;
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                // A rejected refresh token isn't transient: another app (Claude
-                // Code itself, or a second machine) rotated it and this copy is
-                // dead. Only a fresh CLI sign-in mints a working pair — say so
-                // instead of leaving a bare HTTP code on the card.
-                if body.contains("invalid_grant") {
-                    return Err(
-                        "Claude sign-in was rotated by another app — run `claude` in a terminal once and Pane recovers automatically"
-                            .into(),
-                    );
-                }
-                return Err(format!("token refresh failed: HTTP {status}"));
-            }
-            let tok: Value = resp.json().await.map_err(|e| format!("token refresh parse: {e}"))?;
-            let new_access = tok
-                .get("access_token")
-                .and_then(Value::as_str)
-                .ok_or("refresh response missing access_token")?
-                .to_string();
-            let new_refresh = tok
-                .get("refresh_token")
-                .and_then(Value::as_str)
-                .unwrap_or(&refresh)
-                .to_string();
-            let expires_in = tok.get("expires_in").and_then(Value::as_i64).unwrap_or(3600);
-
-            access = new_access.clone();
-
-            // Refresh tokens rotate on use — write the new pair back so Claude Code
-            // itself stays logged in.
-            if let Some(entry) = doc.get_mut("claudeAiOauth").filter(|v| v.is_object()) {
-                entry["accessToken"] = Value::from(new_access);
-                entry["refreshToken"] = Value::from(new_refresh);
-                entry["expiresAt"] = Value::from(now_ms + expires_in * 1000);
-                backup_credentials(&path);
-                // The tmp was created fresh and owner-locked at staging.
-                staged
-                    .write(&serde_json::to_string_pretty(&doc).unwrap_or(raw))
-                    .map_err(|e| format!("write refreshed credentials: {e}"))?;
-                staged
-                    .commit(&path)
-                    .map_err(|e| format!("write refreshed credentials: {e}"))?;
-            }
-        }
-    }
+    let (access, plan) = oauth_access(dir).await?;
 
     let resp = http()
         // ?cedar_ember=1 asks for the banked limit-reset block alongside
-        // the windows — the program's internal name.
+        // the windows — the program's internal name. The CLI's User-Agent
+        // is required too: Anthropic gates cedar_ember eligibility on it
+        // (without it, every token answers eligible:false "surface").
         .get("https://api.anthropic.com/api/oauth/usage?cedar_ember=1")
         .bearer_auth(&access)
         .header("anthropic-beta", "oauth-2025-04-20")
+        .header("User-Agent", CLAUDE_CLI_UA)
         .send()
         .await
         .map_err(|e| format!("usage request: {e}"))?;
@@ -369,6 +279,115 @@ async fn fetch(dir: &std::path::Path, id: &str, name: &str) -> Result<Snapshot, 
     Ok(Snapshot::ok(id, name, plan, metrics))
 }
 
+/// Read the OAuth pair in dir's `.credentials.json`, refreshing it when
+/// stale — the exact flow fetch() ran, shared with redeem_credit.
+/// Refresh rotates the CLI's tokens, so the new pair is staged and
+/// written back BEFORE it can be used; a pair that can't replace the
+/// live file is never returned (that would sign the CLI out).
+/// Returns (access token, subscriptionType).
+async fn oauth_access(dir: &std::path::Path) -> Result<(String, Option<String>), String> {
+    let path = dir.join(".credentials.json");
+    let raw = super::read_small_text(&path, MAX_CRED_BYTES, "credentials")?;
+    let mut doc: Value = serde_json::from_str(&raw).map_err(|e| format!("parse credentials: {e}"))?;
+    let oauth = doc
+        .get("claudeAiOauth")
+        .cloned()
+        .ok_or("credentials file has no claudeAiOauth entry")?;
+
+    let mut access = oauth
+        .get("accessToken")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let refresh = oauth
+        .get("refreshToken")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let expires_at = oauth.get("expiresAt").and_then(Value::as_i64).unwrap_or(0);
+    let plan = oauth
+        .get("subscriptionType")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    // Tokens go stale; swap the refresh token for a fresh access token when needed.
+    let now_ms = Utc::now().timestamp_millis();
+    if access.is_empty() || expires_at <= now_ms + 60_000 {
+        if refresh.is_empty() {
+            return Err("token expired and no refresh token present — run `claude` and log in again".into());
+        }
+        // Refresh rotates the CLI's refresh token. Stage the write-back
+        // BEFORE the token call: if the refreshed pair can't replace the
+        // live file, the rotation would sign the CLI out from under the
+        // user. Only a token whose expiry is still in the future may skip
+        // the refresh; an expired one would just earn a vendor rejection.
+        let staged = stage_credentials_tmp(&path);
+        if staged.is_none() && (access.is_empty() || expires_at <= now_ms) {
+            return Err(
+                "Claude credentials cannot be updated safely — run `claude` in a terminal".into(),
+            );
+        }
+        if let Some(staged) = staged {
+            let resp = http()
+                .post("https://platform.claude.com/v1/oauth/token")
+                .json(&json!({
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh,
+                    "client_id": CLIENT_ID,
+                }))
+                .send()
+                .await
+                .map_err(|e| format!("token refresh: {e}"))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                // A rejected refresh token isn't transient: another app (Claude
+                // Code itself, or a second machine) rotated it and this copy is
+                // dead. Only a fresh CLI sign-in mints a working pair — say so
+                // instead of leaving a bare HTTP code on the card.
+                if body.contains("invalid_grant") {
+                    return Err(
+                        "Claude sign-in was rotated by another app — run `claude` in a terminal once and Pane recovers automatically"
+                            .into(),
+                    );
+                }
+                return Err(format!("token refresh failed: HTTP {status}"));
+            }
+            let tok: Value = resp.json().await.map_err(|e| format!("token refresh parse: {e}"))?;
+            let new_access = tok
+                .get("access_token")
+                .and_then(Value::as_str)
+                .ok_or("refresh response missing access_token")?
+                .to_string();
+            let new_refresh = tok
+                .get("refresh_token")
+                .and_then(Value::as_str)
+                .unwrap_or(&refresh)
+                .to_string();
+            let expires_in = tok.get("expires_in").and_then(Value::as_i64).unwrap_or(3600);
+
+            access = new_access.clone();
+
+            // Refresh tokens rotate on use — write the new pair back so Claude Code
+            // itself stays logged in.
+            if let Some(entry) = doc.get_mut("claudeAiOauth").filter(|v| v.is_object()) {
+                entry["accessToken"] = Value::from(new_access);
+                entry["refreshToken"] = Value::from(new_refresh);
+                entry["expiresAt"] = Value::from(now_ms + expires_in * 1000);
+                backup_credentials(&path);
+                // The tmp was created fresh and owner-locked at staging.
+                staged
+                    .write(&serde_json::to_string_pretty(&doc).unwrap_or(raw))
+                    .map_err(|e| format!("write refreshed credentials: {e}"))?;
+                staged
+                    .commit(&path)
+                    .map_err(|e| format!("write refreshed credentials: {e}"))?;
+            }
+        }
+    }
+    Ok((access, plan))
+}
+
 /// `resets_at` arrives as ISO-8601 or epoch (seconds when < 1e10, else ms).
 fn parse_reset(v: Option<&Value>) -> Option<i64> {
     match v? {
@@ -389,17 +408,21 @@ fn push_window(metrics: &mut Vec<Metric>, node: Option<&Value>, label: &str, per
 }
 
 /// Banked "limit resets" — Anthropic's cedar_ember program, surfaced by
-/// Claude Desktop in Settings → Usage. Spending one only works through
-/// claude.ai (Cloudflare-gated), so Pane lists them read-only like Grok's:
-/// `id` stays None, which is also what keeps the frontend's Use button —
-/// it calls codex_redeem_credit for any credit with an id — off this row.
-/// Eligibility is the gate: an ineligible block (the common case for
-/// Claude Code sign-ins) yields no row at all.
+/// Claude Desktop in Settings → Usage. Eligibility is the gate: an
+/// ineligible block (the answer when the CLI User-Agent isn't sent)
+/// yields no row at all. Only the grant the server would actually spend
+/// gets a claimable credit — `id` set on exactly one copy per grant,
+/// since each claim consumes one reset from it; the rest of its banked
+/// resets (and every other grant's) stay display-only.
 fn banked_resets(usage: &Value) -> Option<Metric> {
     let ember = usage.get("cedar_ember")?;
     if !ember.is_object() || ember.get("eligible").and_then(Value::as_bool) != Some(true) {
         return None;
     }
+    let next_grant = ember.get("next_grant_id").and_then(Value::as_str);
+    // An active cooldown benches claims until it passes.
+    let cooling = parse_reset(ember.get("cooldown_until"))
+        .is_some_and(|until| until > Utc::now().timestamp_millis());
     const MAX_CREDITS: usize = 20;
     let mut credits: Vec<ResetCredit> = Vec::new();
     let grants = ember.get("grants").and_then(Value::as_array);
@@ -421,17 +444,157 @@ fn banked_resets(usage: &Value) -> Option<Metric> {
         let Some(ends_at) = parse_reset(grant.get("ends_at")) else {
             continue;
         };
+        // The redeem endpoint only accepts the server-selected grant —
+        // offer Use on it alone, and only while it says it's usable.
+        let claimable = Some(id) == next_grant
+            && grant.get("usable_now").and_then(Value::as_bool) == Some(true)
+            && grant.get("paused").and_then(Value::as_bool) != Some(true)
+            && !cooling
+            && valid_grant_id(id);
+        let mut id_spent = false;
         for _ in 0..left.clamp(0, total) {
             if credits.len() >= MAX_CREDITS {
                 break 'grants;
             }
             credits.push(ResetCredit {
-                id: None,
+                id: if claimable && !id_spent {
+                    id_spent = true;
+                    Some(id.to_string())
+                } else {
+                    None
+                },
                 expires_at: Some(ends_at),
             });
         }
     }
     Some(Metric::resets(credits.len(), Some(credits)))
+}
+
+/// Grant ids go into a redeem POST body — bound the shape so a malformed
+/// (or hostile) response can't smuggle arbitrary strings into the call.
+fn valid_grant_id(id: &str) -> bool {
+    (1..=40).contains(&id.len())
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+/// The frontend's per-credit idempotency key, reused on retries.
+fn valid_request_id(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// The redeem endpoint answers {result, reason?, cleared?} — map it onto
+/// the same outcome vocabulary the popover already shows for Codex.
+fn claude_redeem_outcome(status: u16, body: &Value) -> Result<RedeemOutcome, String> {
+    if status == 429 {
+        return Err("rate limited — try again in a few minutes".into());
+    }
+    if !(200..300).contains(&status) {
+        return Err(format!("HTTP {status}"));
+    }
+    let cleared = body
+        .get("cleared")
+        .and_then(Value::as_array)
+        .map_or(0, |c| c.len() as i64);
+    match body.get("result").and_then(Value::as_str) {
+        // already_used is the idempotency-key retry landing — the reset
+        // was spent (by us, earlier), which for the UI is a success.
+        Some("reset") | Some("already_used") => Ok(RedeemOutcome {
+            outcome: "success",
+            message: "Claude limits reset".into(),
+            windows_reset: cleared,
+        }),
+        Some("not_limited") => Ok(RedeemOutcome {
+            outcome: "nothing_to_reset",
+            message: "Your usage doesn't need a reset yet".into(),
+            windows_reset: cleared,
+        }),
+        Some("ineligible") | Some("unavailable") => Ok(RedeemOutcome {
+            outcome: "no_credit",
+            message: "No Claude reset available".into(),
+            windows_reset: cleared,
+        }),
+        Some("cooldown") => Err("Claude resets are cooling down — try later".into()),
+        other => Err(format!(
+            "unexpected reset response (HTTP {status}, result {})",
+            other.unwrap_or("<none>")
+        )),
+    }
+}
+
+/// Spends one banked Claude limit reset — irreversible; the UI confirms
+/// first, and the POST is sent exactly once (never retried here).
+pub async fn redeem_credit(
+    provider_id: &str,
+    credit_id: &str,
+    redeem_request_id: Option<&str>,
+) -> Result<RedeemOutcome, String> {
+    if !valid_grant_id(credit_id) {
+        return Err("unknown Claude reset".into());
+    }
+    // Route the redeem to the account whose card offered the reset — an
+    // extra account's Use button must spend ITS grant, same routing the
+    // usage fetch uses.
+    let dir = if provider_id == ID {
+        default_dir()
+    } else {
+        discover_extra_accounts()
+            .into_iter()
+            .find(|a| a.id == provider_id)
+            .map(|a| a.dir)
+            .ok_or_else(|| format!("unknown Claude account: {provider_id}"))?
+    };
+    let (access, _) = oauth_access(&dir).await?;
+    let request_id = match redeem_request_id {
+        Some(r) if valid_request_id(r) => r.to_string(),
+        Some(_) => return Err("invalid redeem request id".into()),
+        None => format!("pane-{}-{}", Utc::now().timestamp_millis(), std::process::id()),
+    };
+    // The reset endpoint is org-scoped; the profile is where the org
+    // uuid lives.
+    let resp = http()
+        .get("https://api.anthropic.com/api/oauth/profile")
+        .bearer_auth(&access)
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .header("User-Agent", CLAUDE_CLI_UA)
+        .send()
+        .await
+        .map_err(|e| format!("profile request: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("profile request: HTTP {}", resp.status()));
+    }
+    let profile: Value = resp.json().await.map_err(|e| format!("profile parse: {e}"))?;
+    let org = profile
+        .pointer("/organization/uuid")
+        .and_then(Value::as_str)
+        .filter(|u| {
+            !u.is_empty()
+                && u.len() <= 128
+                && u.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
+        .ok_or("profile has no organization uuid")?;
+    let resp = http()
+        .post(format!(
+            "https://api.anthropic.com/api/organizations/{org}/reset_rate_limits"
+        ))
+        .bearer_auth(&access)
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .header("User-Agent", CLAUDE_CLI_UA)
+        .json(&json!({
+            "program": "cedar_ember",
+            "grant_id": credit_id,
+            "request_id": request_id,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("reset request: {e}"))?;
+    let status = resp.status().as_u16();
+    let body: Value = resp.json().await.unwrap_or_else(|_| json!({}));
+    claude_redeem_outcome(status, &body)
 }
 
 /// The account uuid becomes `claude@<hash8>`, which the frontend
@@ -547,36 +710,103 @@ mod tests {
         assert!(banked_resets(&json!({"cedar_ember": null})).is_none());
     }
 
+    /// The live body jazii's account answers with the CLI User-Agent.
     #[test]
-    fn banked_resets_one_grant_lists_its_expiry() {
-        let usage = json!({"cedar_ember": {"eligible": true, "grants": [{
-            "id": "g-1",
-            "label": null,
-            "resets_total": 1,
-            "resets_left": 1,
-            "starts_at": null,
-            "ends_at": "2026-10-22T07:00:00Z",
-            "clears": [],
-            "paused": false,
-            "usable_now": true,
-            "use_requires_limit": true,
-            "percent_used": {},
-            "blocking": []
-        }]}});
+    fn banked_resets_live_body_offers_the_grant() {
+        let usage = json!({"cedar_ember": {
+            "eligible": true,
+            "ineligible_reason": null,
+            "at_limit": false,
+            "exhausted": [],
+            "grants": [{
+                "id": "opus55-launch-promax-20260921",
+                "label": "Claude Opus 5.5 launch: one usage-limit reset for Pro and Max",
+                "resets_total": 1,
+                "resets_left": 1,
+                "starts_at": "2026-09-22T16:00:00+00:00",
+                "ends_at": "2026-10-22T16:00:00+00:00",
+                "clears": ["five_hour", "seven_day", "seven_day_overage_included"],
+                "paused": false,
+                "usable_now": true,
+                "use_requires_limit": false,
+                "percent_used": {"five_hour": 1, "seven_day": 23},
+                "blocking": [],
+                "arm": null
+            }],
+            "next_grant_id": "opus55-launch-promax-20260921",
+            "weekly_resets_at": "2026-09-23T21:00:00+00:00",
+            "cooldown_until": null,
+            "event_props": {}
+        }});
         let m = banked_resets(&usage).expect("eligible grant should yield a row");
         assert_eq!(m.kind, "resets");
         assert_eq!(m.value.as_deref(), Some("1"));
-        let ends_ms = chrono::DateTime::parse_from_rfc3339("2026-10-22T07:00:00Z")
+        let ends_ms = chrono::DateTime::parse_from_rfc3339("2026-10-22T16:00:00+00:00")
             .unwrap()
             .timestamp_millis();
         assert_eq!(m.resets_at, Some(ends_ms));
-        // Read-only credits carry no id — the frontend's Use button calls
-        // codex_redeem_credit for any credit with one.
+        // The server-selected grant is claimable — its id is what the
+        // redeem POST needs.
         let credits = serde_json::from_str::<serde_json::Value>(&m.detail.unwrap()).unwrap();
         let list = credits.as_array().unwrap();
         assert_eq!(list.len(), 1);
-        assert!(list[0].get("id").is_none());
+        assert_eq!(list[0]["id"], "opus55-launch-promax-20260921");
         assert_eq!(list[0]["expires_at"], ends_ms);
+    }
+
+    /// Only the grant the server would spend is claimable — no
+    /// next_grant_id, paused, or an active cooldown leaves every credit
+    /// display-only (no id → no Use button).
+    #[test]
+    fn banked_resets_only_the_spendable_grant_gets_an_id() {
+        let grant = json!({
+            "id": "opus55-launch-promax-20260921",
+            "resets_total": 1, "resets_left": 1,
+            "ends_at": "2026-10-22T16:00:00+00:00",
+            "paused": false, "usable_now": true
+        });
+        let credit_id = |ember: serde_json::Value| {
+            let m = banked_resets(&json!({"cedar_ember": ember})).unwrap();
+            serde_json::from_str::<serde_json::Value>(&m.detail.unwrap()).unwrap()[0]
+                .get("id")
+                .cloned()
+        };
+        // next_grant_id null → display-only.
+        let mut ember = json!({"eligible": true, "next_grant_id": null, "grants": [grant.clone()]});
+        assert!(credit_id(ember.clone()).is_none());
+        // paused → display-only.
+        let mut paused = grant.clone();
+        paused["paused"] = json!(true);
+        ember = json!({"eligible": true, "next_grant_id": "opus55-launch-promax-20260921",
+            "grants": [paused]});
+        assert!(credit_id(ember.clone()).is_none());
+        // cooldown_until in the future → display-only.
+        ember = json!({"eligible": true, "next_grant_id": "opus55-launch-promax-20260921",
+            "cooldown_until": "2999-01-01T00:00:00Z", "grants": [grant.clone()]});
+        assert!(credit_id(ember.clone()).is_none());
+        // A past cooldown doesn't bench anything.
+        ember = json!({"eligible": true, "next_grant_id": "opus55-launch-promax-20260921",
+            "cooldown_until": "2020-01-01T00:00:00Z", "grants": [grant]});
+        assert_eq!(credit_id(ember), Some(json!("opus55-launch-promax-20260921")));
+    }
+
+    /// resets_left 2 banks two credits, but each claim spends one reset
+    /// from the server-selected grant — only the first copy is claimable.
+    #[test]
+    fn banked_resets_one_claimable_credit_per_grant() {
+        let usage = json!({"cedar_ember": {"eligible": true,
+            "next_grant_id": "g-1",
+            "grants": [{"id": "g-1", "resets_total": 2, "resets_left": 2,
+                "ends_at": "2026-10-22T16:00:00+00:00",
+                "paused": false, "usable_now": true}]}});
+        let m = banked_resets(&usage).unwrap();
+        assert_eq!(m.value.as_deref(), Some("2"));
+        let credits = serde_json::from_str::<serde_json::Value>(&m.detail.unwrap()).unwrap();
+        let list = credits.as_array().unwrap();
+        assert_eq!(list.len(), 2);
+        let with_id: Vec<_> = list.iter().filter(|c| c.get("id").is_some()).collect();
+        assert_eq!(with_id.len(), 1);
+        assert_eq!(with_id[0]["id"], "g-1");
     }
 
     #[test]
@@ -599,6 +829,36 @@ mod tests {
             .unwrap()
             .iter()
             .all(|c| c["expires_at"] == a_ms));
+        // No next_grant_id → nothing claimable.
+        assert!(credits
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c.get("id").is_none()));
+    }
+
+    #[test]
+    fn claude_redeem_outcome_maps_every_result() {
+        use super::claude_redeem_outcome;
+        let ok = |result: &str| claude_redeem_outcome(200, &json!({"result": result, "cleared": ["five_hour", "seven_day"]}));
+        let o = ok("reset").unwrap();
+        assert_eq!((o.outcome, o.windows_reset), ("success", 2));
+        assert_eq!(o.message, "Claude limits reset");
+        let o = ok("already_used").unwrap();
+        assert_eq!(o.outcome, "success");
+        let o = ok("not_limited").unwrap();
+        assert_eq!(o.outcome, "nothing_to_reset");
+        for r in ["ineligible", "unavailable"] {
+            assert_eq!(ok(r).unwrap().outcome, "no_credit", "{r}");
+        }
+        assert!(ok("cooldown").is_err());
+        for r in ["stamp_indeterminate", "reset_unconfirmed", "whatever"] {
+            assert!(ok(r).is_err(), "{r}");
+        }
+        // Rate limit and non-2xx are errors; malformed bodies too.
+        assert!(claude_redeem_outcome(429, &json!({})).is_err());
+        assert!(claude_redeem_outcome(500, &json!({"result": "reset"})).is_err());
+        assert!(claude_redeem_outcome(200, &json!({})).is_err());
     }
 
     #[test]

@@ -2875,6 +2875,19 @@ async fn codex_redeem_credit(
     providers::codex::redeem_credit(&pid, &credit_id, redeem_request_id).await
 }
 
+/// Spends one banked Claude limit reset (cedar_ember grant). Irreversible
+/// — the frontend shows the same confirm dialog as Codex's before
+/// calling this.
+#[tauri::command]
+async fn claude_redeem_credit(
+    credit_id: String,
+    provider_id: Option<String>,
+    redeem_request_id: Option<String>,
+) -> Result<providers::codex::RedeemOutcome, String> {
+    let pid = provider_id.unwrap_or_else(|| "claude".into());
+    providers::claude::redeem_credit(&pid, &credit_id, redeem_request_id.as_deref()).await
+}
+
 /// Updater with the app version stamped into the endpoint by us. Tauri's
 /// `{{current_version}}` template arrives percent-encoded and never gets
 /// substituted in query strings, so 0.4.17 installs literally reported
@@ -3106,6 +3119,7 @@ pub fn run() {
             copy_share_image,
             set_shortcut,
             codex_redeem_credit,
+            claude_redeem_credit,
             install_update,
             check_update,
             hide_popover
