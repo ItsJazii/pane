@@ -4,9 +4,10 @@
 //! While a weekly window runs, the cycle's tokens/cost come from the
 //! spend scan's hourly buckets (spend::window_totals) — a live estimate
 //! of what 100% would cost. When Pane observes a window at 100% the
-//! cycle is frozen once a scan completed at-or-after that moment lands
-//! (the scan runs concurrently, so earlier totals can't prove the final
-//! usage); those totals become an "observed" sample, never repriced.
+//! cycle is frozen once a scan STARTED at-or-after that moment lands
+//! (the scan runs concurrently, so files read before the hit can't
+//! prove the final usage); those totals become an "observed" sample,
+//! never repriced.
 //! A window that resets before 100% is
 //! recorded "incomplete" — partial coverage (usage on other devices or a
 //! shared account) can only under-count, so it never counts as a sample.
@@ -58,7 +59,7 @@ pub struct Cycle {
     pub observed_at_ms: Option<i64>,
     /// When a poll first saw this window at ≥100%. Set while the cycle
     /// stays Active: the spend scan runs concurrently with the usage
-    /// fetch, so totals from a scan completed BEFORE this moment can't
+    /// fetch, so totals from a scan STARTED before this moment can't
     /// prove the final usage — sealing waits for a newer scan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hit_full_at_ms: Option<i64>,
@@ -75,7 +76,7 @@ pub struct Entry {
 }
 
 /// Advance one provider's ledger by one usage poll. `totals` is the
-/// spend scan's (cost, tokens, scan-completed-ms) inside the window, or
+/// spend scan's (cost, tokens, scan-started-ms) inside the window, or
 /// None when no scan has completed yet — an unknown scan result updates
 /// the progress peak but never touches the money.
 pub fn update(
@@ -87,10 +88,17 @@ pub fn update(
     now_ms: i64,
 ) -> Entry {
     let mut out = entry.clone();
-    let same_cycle = out
-        .current
-        .as_ref()
-        .is_some_and(|c| (window_start_ms - c.start_ms).abs() <= SAME_WINDOW_MS);
+    // Same window when the start matches within jitter — EXCEPT a reset
+    // credit spent mid-week restarts the window a few minutes forward
+    // with usage back near zero: a forward shift plus a material drop,
+    // which jitter can't produce (usage is monotonic inside a window).
+    // A backward shift with a drop stays the same cycle — providers can
+    // recompute starts backwards, and over-triggering would split one
+    // real week into two fragments.
+    let same_cycle = out.current.as_ref().is_some_and(|c| {
+        (window_start_ms - c.start_ms).abs() <= SAME_WINDOW_MS
+            && !(window_start_ms > c.start_ms + 60_000 && used_pct + 2.0 < c.peak_pct)
+    });
     if !same_cycle {
         // The window moved (rollover, or a spent reset credit restarted
         // it): archive the old current as observed or incomplete, then
@@ -138,12 +146,14 @@ pub fn update(
         if used_pct >= 100.0 && c.hit_full_at_ms.is_none() {
             c.hit_full_at_ms = Some(now_ms);
         }
-        // Sealing needs totals from a scan completed at-or-after the
+        // Sealing needs totals from a scan STARTED at-or-after the
         // moment 100% was first seen — possibly this same poll if the
-        // scan is already newer — so a stale pre-100% scan can't freeze
-        // an under-count into the permanent sample.
-        if let (Some(hit), Some((_, _, scan_done))) = (c.hit_full_at_ms, totals) {
-            if scan_done >= hit {
+        // scan is already newer — so files read before the hit can't
+        // freeze an under-count into the permanent sample. Scan-start
+        // (not scan-end) is the strict bound: a scan that began before
+        // the hit may still have read this card's files early.
+        if let (Some(hit), Some((_, _, scan_started))) = (c.hit_full_at_ms, totals) {
+            if scan_started >= hit {
                 c.status = Status::Observed;
                 c.peak_pct = c.peak_pct.max(100.0);
                 c.observed_at_ms = Some(now_ms);
@@ -272,6 +282,41 @@ fn path() -> std::path::PathBuf {
     providers::config_dir().join("quota_cycles.json")
 }
 
+/// Ledger key for a snapshot. A default card keeps the bare `claude` /
+/// `codex` id across a sign-in change, so two different accounts would
+/// otherwise share one cycle history — key it by `{id}|{identity8}`
+/// (the same first-8 non-dash truncation the `claude@<hash8>` scoped
+/// ids use, and never a raw email). Scoped cards already embed their
+/// account, and an unreadable identity falls back to the bare id: a
+/// transient failure mustn't orphan the ledger mid-session. Switching
+/// back to an earlier account restores ITS ledger naturally.
+fn ledger_key_from(id: &str, identity: Option<&str>) -> String {
+    if id.contains('@') {
+        return id.to_string();
+    }
+    let Some(raw) = identity else {
+        return id.to_string();
+    };
+    let tag: String = raw.chars().filter(|c| *c != '-').take(8).collect();
+    if tag.is_empty() {
+        id.to_string()
+    } else {
+        format!("{id}|{tag}")
+    }
+}
+
+/// Resolve the family's default-account identity and derive the key —
+/// the same value the snapshot-cache stamp uses to detect an account
+/// swap (providers::{claude,codex}::default_identity).
+pub fn ledger_key(id: &str, family: &str) -> String {
+    let identity = match family {
+        "claude" => providers::claude::default_identity(),
+        "codex" => providers::codex::default_identity(),
+        _ => None,
+    };
+    ledger_key_from(id, identity.as_deref())
+}
+
 /// Lazily-loaded ledger map, shared by every fetch_usage pass.
 fn ledger() -> &'static Mutex<Option<HashMap<String, Entry>>> {
     static LEDGER: OnceLock<Mutex<Option<HashMap<String, Entry>>>> = OnceLock::new();
@@ -346,7 +391,7 @@ mod tests {
     const WEEK: i64 = 7 * 86_400_000;
     const T0: i64 = 1_800_000_000_000; // fixed epoch ms
 
-    /// A poll at T0+1s whose totals come from a scan completed at T0 —
+    /// A poll at T0+1s whose totals come from a scan STARTED at T0 —
     /// always an "older" scan, so a 100% seen here stays pending.
     fn poll(entry: &Entry, start: i64, pct: f64, totals: Option<(f64, f64)>) -> Entry {
         update(
@@ -380,11 +425,12 @@ mod tests {
     }
 
     /// The usage fetch and the spend scan run concurrently — the poll
-    /// that first sees 100% may be holding totals a scan produced
-    /// before the limit was reached. The cycle waits for a scan that
-    /// finished at-or-after the hit, then seals with ITS totals.
+    /// that first sees 100% may be holding totals from a scan whose
+    /// files were read before the limit was reached. The cycle waits
+    /// for a scan STARTED at-or-after the hit, then seals with ITS
+    /// totals.
     #[test]
-    fn observing_100_waits_for_a_scan_newer_than_the_hit() {
+    fn observing_100_waits_for_a_scan_started_after_the_hit() {
         let e = poll(&Entry::default(), T0, 40.0, Some((40.0, 400_000_000.0)));
         let e = poll(&e, T0, 100.0, Some((218.0, 1_300_000_000.0)));
         let cur = e.current.as_ref().unwrap();
@@ -397,7 +443,7 @@ mod tests {
         let m = metric(&e).unwrap();
         assert!(m.value.as_deref().unwrap().starts_with('≈'));
 
-        // The scan that finished after the hit seals the cycle — with
+        // The scan that started after the hit seals the cycle — with
         // its newer totals — and nothing reprices it afterwards.
         let e = update(
             &e, T0, T0 + WEEK, 100.0,
@@ -425,8 +471,31 @@ mod tests {
         assert!(detail["current"]["est_cost"].is_null());
     }
 
+    /// A scan that STARTED before the hit can't seal even if it
+    /// finished after — it may have read this card's files before the
+    /// limit was reached.
+    #[test]
+    fn scan_started_before_the_hit_cannot_seal() {
+        let e = poll(&Entry::default(), T0, 40.0, Some((40.0, 400_000_000.0)));
+        let e = update(
+            &e, T0, T0 + WEEK, 100.0,
+            Some((218.0, 1_300_000_000.0, T0 - 5_000)),
+            T0 + 1_000,
+        );
+        assert_eq!(e.current.as_ref().unwrap().status, Status::Active);
+        // A scan started after the hit seals, with its newer totals.
+        let e = update(
+            &e, T0, T0 + WEEK, 100.0,
+            Some((230.0, 1_400_000_000.0, T0 + 2_000)),
+            T0 + 3_000,
+        );
+        let cur = e.current.as_ref().unwrap();
+        assert_eq!(cur.status, Status::Observed);
+        assert_eq!(cur.cost, 230.0);
+    }
+
     /// When the totals on the very poll that sees 100% already come
-    /// from a scan completed at-or-after that moment, the cycle seals
+    /// from a scan started at-or-after that moment, the cycle seals
     /// immediately.
     #[test]
     fn observing_100_seals_same_poll_when_the_scan_is_newer() {
@@ -542,6 +611,77 @@ mod tests {
         assert_eq!(cur.peak_pct, 55.0);
         assert_eq!(cur.cost, 40.0);
         assert_eq!(cur.tokens, 400_000_000.0);
+    }
+
+    /// A reset credit spent mid-week restarts the window a few minutes
+    /// forward with usage back near zero — a forward shift plus a drop
+    /// is a new cycle, not jitter, and the old one archives incomplete.
+    #[test]
+    fn forward_shift_with_a_usage_drop_starts_a_new_cycle() {
+        let e = poll(&Entry::default(), T0, 8.0, Some((5.0, 50_000_000.0)));
+        let e = update(
+            &e, T0 + 20 * 60_000, T0 + WEEK + 20 * 60_000, 0.5,
+            Some((0.0, 0.0, T0)), T0 + 2_000,
+        );
+        assert_eq!(e.history.len(), 1);
+        assert_eq!(e.history[0].status, Status::Incomplete);
+        assert_eq!(e.history[0].peak_pct, 8.0);
+        assert_eq!(e.current.as_ref().unwrap().start_ms, T0 + 20 * 60_000);
+    }
+
+    #[test]
+    fn forward_shift_without_a_material_drop_is_the_same_cycle() {
+        let e = poll(&Entry::default(), T0, 8.0, Some((5.0, 50_000_000.0)));
+        // +20 min, usage unchanged or rising → jitter, same cycle.
+        let e = update(
+            &e, T0 + 20 * 60_000, T0 + WEEK + 20 * 60_000, 8.0,
+            Some((5.0, 50_000_000.0, T0)), T0 + 2_000,
+        );
+        assert!(e.history.is_empty());
+        let e = update(
+            &e, T0 + 25 * 60_000, T0 + WEEK + 25 * 60_000, 9.0,
+            Some((5.0, 50_000_000.0, T0)), T0 + 3_000,
+        );
+        assert!(e.history.is_empty());
+        // A small dip inside the slack isn't a restart either.
+        let e = update(
+            &e, T0 + 28 * 60_000, T0 + WEEK + 28 * 60_000, 8.5,
+            Some((5.0, 50_000_000.0, T0)), T0 + 4_000,
+        );
+        assert!(e.history.is_empty());
+    }
+
+    #[test]
+    fn backward_shift_with_a_drop_stays_the_same_cycle() {
+        let e = poll(&Entry::default(), T0, 8.0, Some((5.0, 50_000_000.0)));
+        // The provider recomputed the start EARLY with lower usage —
+        // a window can't have restarted in the past, so don't split.
+        let e = update(
+            &e, T0 - 10 * 60_000, T0 + WEEK - 10 * 60_000, 0.5,
+            Some((0.0, 0.0, T0)), T0 + 2_000,
+        );
+        assert!(e.history.is_empty(), "backward shift + drop is jitter");
+    }
+
+    /// A default card keeps `claude`/`codex` across sign-ins — the
+    /// ledger key separates accounts; scoped cards embed theirs.
+    #[test]
+    fn ledger_key_separates_default_accounts() {
+        assert_eq!(
+            ledger_key_from("claude", Some("b3f1c2d4-9a8b-4c5d-8e9f-aabbccddeeff")),
+            "claude|b3f1c2d4"
+        );
+        // An identity shaped like an email is truncated, never stored raw.
+        assert_eq!(ledger_key_from("codex", Some("user@example.com")), "codex|user@exa");
+        // Scoped ids already carry the account — no suffix needed.
+        assert_eq!(
+            ledger_key_from("claude@b3f1c2d4", Some("b3f1c2d4-9a8b")),
+            "claude@b3f1c2d4"
+        );
+        // Identity unreadable → bare id, so a transient failure can't
+        // orphan the ledger mid-session.
+        assert_eq!(ledger_key_from("claude", None), "claude");
+        assert_eq!(ledger_key_from("codex", Some("-")), "codex");
     }
 
     /// A write is owed on any ledger change, and keeps being owed after

@@ -597,10 +597,11 @@ fn staged_hours() -> &'static Mutex<HashMap<String, HashMap<i64, (f64, f64)>>> {
 }
 
 /// Per-spend-id hourly totals from the last completed scan, plus when
-/// that scan finished — a window that hit 100% may only be sealed by
-/// totals from a scan that could have seen it (capacity.rs compares the
-/// stamp). `None` until collect() finishes once: callers asking earlier
-/// must see None, not a partial map.
+/// that scan STARTED — a window that hit 100% may only be sealed by
+/// totals every file of which was read after the hit, and scan-start is
+/// the bound that proves it (capacity.rs compares the stamp). `None`
+/// until collect() finishes once: callers asking earlier must see None,
+/// not a partial map.
 fn recent_hours() -> &'static Mutex<Option<(HashMap<String, HashMap<i64, (f64, f64)>>, i64)>> {
     static RECENT: OnceLock<
         Mutex<Option<(HashMap<String, HashMap<i64, (f64, f64)>>, i64)>>,
@@ -608,7 +609,7 @@ fn recent_hours() -> &'static Mutex<Option<(HashMap<String, HashMap<i64, (f64, f
     RECENT.get_or_init(|| Mutex::new(None))
 }
 
-/// (cost, tokens, scan-completed-ms) `id` logged in hours whose
+/// (cost, tokens, scan-started-ms) `id` logged in hours whose
 /// hour-start is at or after `since_ms` floored to the hour. Hourly
 /// bucketing means a window that began mid-hour can pull in up to one
 /// hour of spend from just before its start — the quota-capacity
@@ -617,7 +618,7 @@ fn recent_hours() -> &'static Mutex<Option<(HashMap<String, HashMap<i64, (f64, f
 pub fn window_totals(id: &str, since_ms: i64) -> Option<(f64, f64, i64)> {
     let since_hour = since_ms.div_euclid(3_600_000);
     let guard = recent_hours().lock().ok()?;
-    let (map, completed_ms) = guard.as_ref()?;
+    let (map, started_ms) = guard.as_ref()?;
     let mut out = (0.0, 0.0);
     if let Some(hours) = map.get(id) {
         for (hour, (cost, tokens)) in hours {
@@ -627,7 +628,7 @@ pub fn window_totals(id: &str, since_ms: i64) -> Option<(f64, f64, i64)> {
             }
         }
     }
-    Some((out.0, out.1, *completed_ms))
+    Some((out.0, out.1, *started_ms))
 }
 
 #[cfg(test)]
@@ -638,9 +639,9 @@ fn reset_recent_hours() {
 }
 
 #[cfg(test)]
-fn publish_test_hours(map: HashMap<String, HashMap<i64, (f64, f64)>>, completed_ms: i64) {
+fn publish_test_hours(map: HashMap<String, HashMap<i64, (f64, f64)>>, started_ms: i64) {
     if let Ok(mut g) = recent_hours().lock() {
-        *g = Some((map, completed_ms));
+        *g = Some((map, started_ms));
     }
 }
 
@@ -3089,6 +3090,10 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
     // from that set. Serialize so a second refresh waits — one scan
     // stays the same speed.
     let _busy = collect_lock().lock().unwrap_or_else(|e| e.into_inner());
+    // The moment THIS scan starts reading files — window_totals carries
+    // it so a quota cycle can only be sealed by a scan every byte of
+    // which postdates the event being proven (see capacity.rs).
+    let scan_started_ms = Utc::now().timestamp_millis();
     providers::sweep_temp_sqlite_copies();
     pricing::ensure_fresh();
     load_persisted_cache();
@@ -3187,7 +3192,7 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
         .map(|mut s| std::mem::take(&mut *s))
         .unwrap_or_default();
     if let Ok(mut recent) = recent_hours().lock() {
-        *recent = Some((staged, Utc::now().timestamp_millis()));
+        *recent = Some((staged, scan_started_ms));
     }
     list.into_iter().filter(ProviderSpend::has_data).collect()
 }

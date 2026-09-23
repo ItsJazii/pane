@@ -2169,8 +2169,11 @@ async fn fetch_usage(
             };
             let window_start = weekly.resets_at.unwrap() - weekly.period_ms.unwrap();
             let totals = spend::window_totals(&snap.id, window_start);
+            // A default card's id survives a sign-in change — key the
+            // ledger by account so two logins never share cycle history.
+            let key = capacity::ledger_key(&snap.id, &family);
             let entry = capacity::note_weekly_window(
-                &snap.id,
+                &key,
                 window_start,
                 weekly.resets_at.unwrap(),
                 weekly.used_percent.unwrap_or(0.0),
