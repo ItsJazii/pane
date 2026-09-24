@@ -55,6 +55,7 @@ const en: Dict = {
   "footer.copied": "Copied to clipboard",
   "footer.shareFailed": "Share failed: {err}",
   "footer.updateFailed": "Update failed: {err}",
+  "footer.updateCheckFailed": "Update check failed: {err}",
   "footer.openLinkFailed": "Could not open link: {err}",
   "footer.twoStars": "Up to 2 stars per provider",
   "footer.redeeming": "Redeeming reset credit…",
@@ -70,6 +71,7 @@ const en: Dict = {
   "footer.onenewapiKeySaved": "Key saved",
 
   "update.check": "Checking for updates…",
+  "update.checkRetry": "↻ Retry check",
   "update.to": "⬆ Update to v{version}",
   "update.installing": "Installing…",
   "update.retry": "⬆ Update to v{version} — retry",
@@ -123,7 +125,7 @@ const en: Dict = {
   "settings.useProxy": "Use proxy",
   "settings.proxyUrl": "Proxy URL",
   "settings.networkNote":
-    "Applies after the app restarts. Local usage API always runs at http://127.0.0.1:6736/v1/usage",
+    "When enabled, the proxy handles external provider requests and app update checks and downloads; loopback requests bypass it. Restart the app after changes. Local usage API: http://127.0.0.1:6736/v1/usage",
 
   "settings.apiKeys": "API keys",
   "settings.apiKeysNote":
@@ -456,6 +458,7 @@ const zh: Dict = {
   "footer.copied": "已复制到剪贴板",
   "footer.shareFailed": "分享失败：{err}",
   "footer.updateFailed": "更新失败：{err}",
+  "footer.updateCheckFailed": "检查更新失败：{err}",
   "footer.openLinkFailed": "无法打开链接：{err}",
   "footer.twoStars": "每个服务最多加星 2 项",
   "footer.redeeming": "正在兑换重置额度…",
@@ -471,6 +474,7 @@ const zh: Dict = {
   "footer.onenewapiKeySaved": "密钥已保存",
 
   "update.check": "正在检查更新…",
+  "update.checkRetry": "↻ 重试检查",
   "update.to": "⬆ 更新到 v{version}",
   "update.installing": "正在安装…",
   "update.retry": "⬆ 更新到 v{version} — 重试",
@@ -521,7 +525,7 @@ const zh: Dict = {
   "settings.useProxy": "使用代理",
   "settings.proxyUrl": "代理地址",
   "settings.networkNote":
-    "重启应用后生效。本机用量接口始终运行在 http://127.0.0.1:6736/v1/usage",
+    "启用后，外部服务请求和应用更新检查、下载会使用此代理；回环地址请求不走代理。修改后重启应用生效。本机用量接口：http://127.0.0.1:6736/v1/usage",
 
   "settings.apiKeys": "API 密钥",
   "settings.apiKeysNote":
@@ -819,6 +823,7 @@ const ru: Dict = {
   "footer.copied": "Скопировано в буфер",
   "footer.shareFailed": "Не удалось поделиться: {err}",
   "footer.updateFailed": "Ошибка обновления: {err}",
+  "footer.updateCheckFailed": "Ошибка проверки обновлений: {err}",
   "footer.openLinkFailed": "Не удалось открыть ссылку: {err}",
   "footer.twoStars": "Не больше 2 звёзд на сервис",
   "footer.redeeming": "Применяем сброс лимита…",
@@ -827,6 +832,7 @@ const ru: Dict = {
   "footer.traySyncFailed": "Не удалось обновить значок в трее; будет повторная попытка: {err}",
 
   "update.check": "Проверка обновлений…",
+  "update.checkRetry": "↻ Повторить проверку",
   "update.to": "⬆ Обновить до v{version}",
   "update.installing": "Установка…",
   "update.retry": "⬆ Обновить до v{version} — повторить",
@@ -880,7 +886,7 @@ const ru: Dict = {
   "settings.useProxy": "Использовать прокси",
   "settings.proxyUrl": "Адрес прокси",
   "settings.networkNote":
-    "Применяется после перезапуска. Локальный API всегда на http://127.0.0.1:6736/v1/usage",
+    "При включении прокси используется для запросов к внешним сервисам, проверки и загрузки обновлений; запросы к адресам обратной петли идут напрямую. Изменения вступают в силу после перезапуска приложения. Локальный API статистики: http://127.0.0.1:6736/v1/usage",
 
   "settings.apiKeys": "Ключи API",
   "settings.apiKeysNote":

@@ -3106,6 +3106,15 @@ fn build_updater_with(
         .updater_builder()
         .endpoints(endpoints)
         .map_err(|e| e.to_string())?;
+    let builder = match providers::proxy_url() {
+        Some(proxy) if reqwest_updater::Proxy::all(proxy).is_ok() => {
+            match proxy.parse() {
+                Ok(url) => builder.proxy(url),
+                Err(_) => builder,
+            }
+        }
+        _ => builder,
+    };
     let builder = match timeout {
         Some(t) => builder.timeout(t),
         None => builder,
