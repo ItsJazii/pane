@@ -2074,6 +2074,7 @@ async fn fetch_usage(
                 "claude": providers::claude::default_identity(),
                 "codex": providers::codex::default_identity(),
                 "opencode": providers::opencode::default_identity(),
+                "stepfun": providers::stepfun::default_identity(),
             });
             let stored: Value = std::fs::read_to_string(&stamp_file)
                 .ok()
@@ -2082,7 +2083,7 @@ async fn fetch_usage(
             let mut map = cache.lock().unwrap();
             let mut removed = false;
             let mut to_store = serde_json::Map::new();
-            for fam in ["claude", "codex", "opencode"] {
+            for fam in ["claude", "codex", "opencode", "stepfun"] {
                 let cur = current.get(fam).cloned().unwrap_or(Value::Null);
                 let old = stored.get(fam).cloned().unwrap_or(Value::Null);
                 // Only a KNOWN stored identity differing from a KNOWN
@@ -2475,6 +2476,7 @@ fn cached_usage() -> Vec<providers::Snapshot> {
         ("claude", providers::claude::default_identity()),
         ("codex", providers::codex::default_identity()),
         ("opencode", providers::opencode::default_identity()),
+        ("stepfun", providers::stepfun::default_identity()),
     ]
     .into_iter()
     .filter(|(fam, current)| {

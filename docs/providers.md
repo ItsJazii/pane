@@ -301,15 +301,17 @@ Ground rules that apply to every provider:
   to this card (models.dev catalog, falling back to baked StepFun list
   prices; `step-5-preview` is priced from Artificial Analysis — $1.00 in /
   $2.70 out / $0.05 cache hit — because StepFun's own price pages omit
-  it). Models with no public token rate — `step-router-v1`, per-image
-  `step-image-edit-2`, TTS/ASR — stay unpriced ⚠ rather than guess. A
+  it). Token-billed `stepaudio-*` chat models price the same way;
+  models with no public token rate — `step-router-v1`, per-image
+  `step-image-edit-2`, character-billed TTS and hour-billed ASR — stay
+  unpriced ⚠ rather than guess. A
   Claude Code run from its own `CLAUDE_CONFIG_DIR` (e.g. `~/.claude-step`)
   with no Claude login is scanned too, so API-key sessions against
   StepFun count here. pi, oh-my-pi, and Step Code sessions
   (`~\.pi\agent\sessions`, `~\.omp\agent\sessions`,
   `~\.stepcode\agent\sessions`) with a `step` or `stepfun*`
   provider name (Step Code logs `step`; `stepfun-cn` is omp's CN
-  endpoint) or a `step-*`
+  endpoint) or a `step-*`/`stepaudio-*`
   model on any provider route here as well; `aihubmix` provider rows
   land on the AihubMix card.
 

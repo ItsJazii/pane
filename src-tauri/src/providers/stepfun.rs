@@ -41,6 +41,16 @@ pub async fn snapshot() -> Snapshot {
     }
 }
 
+/// Fingerprint of the effective credential — lets the snapshot cache
+/// drop a last-good card minted under a different key (new paste, env
+/// change, a different Step Code profile), same mechanism as
+/// claude/codex/opencode. Never the raw key.
+pub fn default_identity() -> Option<String> {
+    stored_api_key(ID, &["STEPFUN_API_KEY", "STEP_API_KEY"])
+        .or_else(stepcode_key)
+        .map(|k| super::key_fingerprint(&k))
+}
+
 /// Region hosts each carry a subset of keys, and any of them can be
 /// down: advance to the next on auth rejection (401/403), rate limiting
 /// (429), server errors (5xx), and transport failures. A 2xx from any
@@ -213,6 +223,7 @@ async fn fetch() -> Result<Snapshot, String> {
                 &doc,
                 sign,
                 Some(if tier.is_some() { "Wallet" } else { "Credits used" }),
+                Some(&key),
             )?;
             if tier.is_none() {
                 return Ok(Snapshot::ok(ID, NAME, plan, metrics));
@@ -352,12 +363,15 @@ fn plan_metrics(
 /// bar's row label — `Some("Credits used")` for a plain wallet key,
 /// `Some("Wallet")` when a Step Plan sits beside it (pay-as-you-go
 /// clients on /v1 still drain the wallet), `None` for no meter at all.
+/// `identity_key` binds the meter's high-water mark to the effective
+/// credential so a key swap can't inherit the old account's baseline.
 fn parse_account(
     doc: &Value,
     sign: &str,
     meter_label: Option<&str>,
+    identity_key: Option<&str>,
 ) -> Result<(Option<String>, Vec<Metric>), String> {
-    parse_account_in(&super::config_dir(), doc, sign, meter_label)
+    parse_account_in(&super::config_dir(), doc, sign, meter_label, identity_key)
 }
 
 /// `parse_account` against a caller-chosen config dir so tests never
@@ -367,6 +381,7 @@ fn parse_account_in(
     doc: &Value,
     sign: &str,
     meter_label: Option<&str>,
+    identity_key: Option<&str>,
 ) -> Result<(Option<String>, Vec<Metric>), String> {
     let balance = doc
         .get("balance")
@@ -377,7 +392,15 @@ fn parse_account_in(
     // Credits-used meter against the highest balance seen locally —
     // top-ups raise it (feeds the Almost Out notification).
     if let Some(label) = meter_label {
-        if let Some(meter) = super::credit_meter_labeled_in(dir, ID, sign, balance, label, "") {
+        if let Some(meter) = super::credit_meter_labeled_identity_in(
+            dir,
+            ID,
+            sign,
+            balance,
+            label,
+            "",
+            identity_key,
+        ) {
             metrics.push(meter);
         }
     }
@@ -431,7 +454,7 @@ mod tests {
             "balance": 12.345,
             "total_cash_balance": 10.0,
             "total_voucher_balance": 2.345,
-        }), "$", Some("Credits used"))
+        }), "$", Some("Credits used"), None)
         .unwrap();
         assert_eq!(plan.as_deref(), Some("Prepaid"));
         assert_eq!(
@@ -455,7 +478,7 @@ mod tests {
             "balance": 99.08,
             "total_cash_balance": 100.0,
             "total_voucher_balance": 0.0,
-        }), "¥", Some("Credits used"))
+        }), "¥", Some("Credits used"), None)
         .unwrap();
         assert_eq!(plan.as_deref(), Some("Prepaid"));
         assert_eq!(
@@ -475,7 +498,7 @@ mod tests {
             "balance": 4.0,
             "total_cash_balance": 4.0,
             "total_voucher_balance": 0.0,
-        }), "$", Some("Credits used"))
+        }), "$", Some("Credits used"), None)
         .unwrap();
         assert_eq!(plan.as_deref(), Some("Postpaid"));
         assert_eq!(
@@ -497,7 +520,7 @@ mod tests {
             "balance": 43.40,
             "total_cash_balance": 43.40,
             "total_voucher_balance": 0.0,
-        }), "¥", Some("Wallet"))
+        }), "¥", Some("Wallet"), None)
         .unwrap();
         assert_eq!(plan.as_deref(), Some("Prepaid"));
         assert_eq!(metrics[0].kind, "progress");
@@ -513,11 +536,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The wallet baseline binds to the effective credential: the same
+    /// key keeps its high-water mark, a different key starts fresh, and
+    /// no identity keeps the legacy bare-number behaviour. The raw key
+    /// never reaches the baseline file.
+    #[test]
+    fn credit_meter_baseline_follows_the_effective_key() {
+        let dir = tmpdir("baseline-key");
+        let doc = |b: f64| json!({"object": "account", "type": "prepaid", "balance": b});
+        let label = Some("Credits used");
+        // sk-a: $100 high-water, then $50 left → 50% used.
+        let (_, m) = parse_account_in(&dir, &doc(100.0), "$", label, Some("sk-a")).unwrap();
+        assert_eq!(m[0].used_percent, Some(0.0));
+        let (_, m) = parse_account_in(&dir, &doc(50.0), "$", label, Some("sk-a")).unwrap();
+        assert_eq!(m[0].used_percent, Some(50.0));
+        // sk-b: a new $90 wallet is 0% used, not 90% of the old $100 pot.
+        let (_, m) = parse_account_in(&dir, &doc(90.0), "$", label, Some("sk-b")).unwrap();
+        assert_eq!(m[0].used_percent, Some(0.0));
+        assert_eq!(m[0].detail.as_deref(), Some("$90.00 of $90.00 left"));
+        let raw = std::fs::read_to_string(dir.join("credit_baselines.json")).unwrap();
+        assert!(!raw.contains("sk-"), "baseline file holds a raw key: {raw}");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir2 = tmpdir("baseline-none");
+        let (_, m) = parse_account_in(&dir2, &doc(100.0), "$", label, None).unwrap();
+        assert_eq!(m[0].used_percent, Some(0.0));
+        let (_, m) = parse_account_in(&dir2, &doc(50.0), "$", label, None).unwrap();
+        assert_eq!(m[0].used_percent, Some(50.0));
+        let raw = std::fs::read_to_string(dir2.join("credit_baselines.json")).unwrap();
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&raw).unwrap()["stepfun"].is_number(),
+            "no-identity baselines stay bare numbers: {raw}"
+        );
+        let _ = std::fs::remove_dir_all(&dir2);
+    }
+
     #[test]
     fn missing_balance_is_an_error() {
         let dir = tmpdir("missing");
         assert!(
-            parse_account_in(&dir, &json!({"object": "account", "type": "prepaid"}), "$", Some("Credits used")).is_err()
+            parse_account_in(&dir, &json!({"object": "account", "type": "prepaid"}), "$", Some("Credits used"), None).is_err()
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

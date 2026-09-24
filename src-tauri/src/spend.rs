@@ -860,6 +860,16 @@ fn scan_cutoff(now: DateTime<Local>) -> SystemTime {
     }
 }
 
+/// `scan_cutoff` as epoch milliseconds — the one source of truth for
+/// "how far back spend reads" for callers whose timestamps are ms/s
+/// ints (OpenCode's SQLite `time_created`) instead of file mtimes.
+pub(crate) fn spend_cutoff_ms(now: DateTime<Local>) -> i64 {
+    scan_cutoff(now)
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 fn recent_jsonl_files(root: &Path, out: &mut Vec<PathBuf>) {
     let cutoff = scan_cutoff(Local::now());
     // Canonical paths of link targets already entered. Cycles and aliases can
@@ -1839,9 +1849,14 @@ fn split_models(data: &mut FileData, prefix: &str) -> FileData {
 /// StepFun model slugs as the CLIs log them: bare `step-*`, or the
 /// gateway-prefixed `stepfun/step-*` spelling `builtin_price` already
 /// accepts. Routing matches on this; the logged string is kept as-is.
+/// A StepFun model slug, bare or `stepfun/` gateway-prefixed: the
+/// `step-…` flagship/vision/audio family and the token-billed
+/// `stepaudio-…` chat family. Explicit prefixes only — a slug that
+/// merely starts with "step" (`stepwise-…`) is not StepFun.
 fn is_stepfun_model(m: &str) -> bool {
     let m = m.to_ascii_lowercase();
-    m.strip_prefix("stepfun/").unwrap_or(&m).starts_with("step-")
+    let m = m.strip_prefix("stepfun/").unwrap_or(&m);
+    m.starts_with("step-") || m.starts_with("stepaudio-")
 }
 
 fn split_models_by(data: &mut FileData, matches: impl Fn(&str) -> bool) -> FileData {
@@ -5028,6 +5043,17 @@ mod tests {
             scan_cutoff(mid),
             SystemTime::from(mid) - Duration::from_secs(31 * 86_400)
         );
+        // The ms view OpenCode uses is the same instant, one source of
+        // truth for every spend window.
+        for now in [last_day, mid] {
+            assert_eq!(
+                spend_cutoff_ms(now),
+                scan_cutoff(now)
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as i64
+            );
+        }
     }
 
     #[test]
@@ -5042,14 +5068,20 @@ mod tests {
         // `stepfun/step-…`) routes the same — string kept as logged.
         data.days.insert((1002, "stepfun/step-3.7-flash".into()), (0.3, 30.0));
         data.days.insert((1002, "STEPFUN/Step-5-preview".into()), (0.4, 40.0));
+        // The token-billed audio-chat family routes too, prefixed or not.
+        data.days.insert((1003, "stepaudio-2.5-chat".into()), (0.6, 60.0));
+        data.days
+            .insert((1003, "stepfun/stepaudio-2.5-chat".into()), (0.7, 70.0));
+        // "step…" alone isn't a StepFun family — unrelated slugs stay.
+        data.days.insert((1003, "stepwise-model".into()), (9.0, 90.0));
         data.unpriced.insert("step-3.7-flash".into(), 3);
         data.unpriced.insert("stepfun/step-9-ultra".into(), 2);
         data.unpriced.insert("mystery-model".into(), 1);
 
         let sf = split_models_by(&mut data, is_stepfun_model);
-        assert_eq!(data.days.len(), 1);
+        assert_eq!(data.days.len(), 2);
         assert_eq!(data.unpriced.len(), 1);
-        assert_eq!(sf.days.len(), 5);
+        assert_eq!(sf.days.len(), 7);
         assert_eq!(sf.days[&(1000, "step-3.7-flash".to_string())], (0.5, 50.0));
         assert_eq!(
             sf.days[&(1002, "stepfun/step-3.7-flash".to_string())],
@@ -5058,6 +5090,14 @@ mod tests {
         assert_eq!(
             sf.days[&(1002, "STEPFUN/Step-5-preview".to_string())],
             (0.4, 40.0)
+        );
+        assert_eq!(
+            sf.days[&(1003, "stepaudio-2.5-chat".to_string())],
+            (0.6, 60.0)
+        );
+        assert_eq!(
+            sf.days[&(1003, "stepfun/stepaudio-2.5-chat".to_string())],
+            (0.7, 70.0)
         );
         assert_eq!(sf.unpriced.get("step-3.7-flash"), Some(&3));
         assert_eq!(sf.unpriced.get("stepfun/step-9-ultra"), Some(&2));

@@ -469,6 +469,18 @@ fn expected_credit_meter_generation(provider: &str) -> u64 {
 /// meter identically but shouldn't all be called "Credits used", and some
 /// carry an extra unit in the caption ("· N credits").
 
+/// First 12 hex chars of a digest of the trimmed credential — enough to
+/// tell one key from another without storing anything reversible. Never
+/// log it alongside anything that reveals the key, and never persist the
+/// raw credential.
+pub(crate) fn key_fingerprint(secret: &str) -> String {
+    use md5::Digest;
+    md5::Md5::digest(secret.trim().as_bytes())[..6]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 pub fn credit_meter_labeled(
     provider: &str,
     sign: &str,
@@ -494,6 +506,25 @@ pub fn credit_meter_labeled_in(
     label: &str,
     caption_suffix: &str,
 ) -> Option<Metric> {
+    credit_meter_labeled_identity_in(dir, provider, sign, balance, label, caption_suffix, None)
+}
+
+/// `credit_meter_labeled_in` that also binds the high-water mark to a
+/// fingerprint of the effective credential. `identity_key` is the key
+/// itself — it's hashed before it touches disk, never stored. When the
+/// stored fingerprint differs (new paste, env change, a different Step
+/// Code profile behind a fallback), the baseline resets before metering
+/// so the new wallet isn't compared against the old account's pot.
+/// `None` keeps the legacy behaviour: no fingerprint stored or checked.
+pub fn credit_meter_labeled_identity_in(
+    dir: &Path,
+    provider: &str,
+    sign: &str,
+    balance: f64,
+    label: &str,
+    caption_suffix: &str,
+    identity_key: Option<&str>,
+) -> Option<Metric> {
     if !balance.is_finite() || balance < 0.0 {
         return None;
     }
@@ -509,14 +540,35 @@ pub fn credit_meter_labeled_in(
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .filter(serde_json::Value::is_object)
         .unwrap_or_else(|| serde_json::json!({}));
-    let high = doc
-        .get(provider)
-        .and_then(serde_json::Value::as_f64)
-        .unwrap_or(0.0);
+    // Baselines persist as a bare number (no identity, or written before
+    // fingerprints existed) or {"b": balance, "fp": fingerprint}.
+    let entry = doc.get(provider);
+    let (stored_high, stored_fp) = match entry {
+        Some(v) if v.is_object() => (
+            v.get("b").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
+            v.get("fp")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+        ),
+        _ => (
+            entry.and_then(serde_json::Value::as_f64).unwrap_or(0.0),
+            None,
+        ),
+    };
+    let fp = identity_key.map(key_fingerprint);
+    // A credential we can't vouch for starts at zero: a legacy bare
+    // number may belong to a different account entirely.
+    let mut high = stored_high;
+    if fp.is_some() && fp.as_deref() != stored_fp.as_deref() {
+        high = 0.0;
+    }
     // A late result from a rotated key must not recreate the deleted
     // baseline from the old account's leftover balance.
     if !stale && balance > high {
-        doc[provider] = serde_json::Value::from(balance);
+        doc[provider] = match &fp {
+            Some(fp) => serde_json::json!({"b": balance, "fp": fp}),
+            None => serde_json::Value::from(balance),
+        };
         let _ = std::fs::write(
             &path,
             serde_json::to_string_pretty(&doc).unwrap_or_default(),
