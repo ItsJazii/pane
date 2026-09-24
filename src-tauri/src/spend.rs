@@ -767,7 +767,9 @@ fn build_spend(id: impl Into<String>, name: impl Into<String>, data: FileData) -
         if day == today - 1 {
             bump(1, &mut sp.yesterday);
         }
-        if month_start.is_some_and(|m| day >= m) {
+        // Month-to-date means up to today — a clock-skewed or synthetic
+        // row dated in the future must not inflate the month total.
+        if month_start.is_some_and(|m| day >= m && day <= today) {
             sp.month_cost += cost;
         }
         if day > today - TREND_DAYS as i32 {
@@ -4967,6 +4969,8 @@ mod tests {
         // Last month's final day: $5 that must not count toward month_cost.
         data.days.insert((month_start - 1, "m".into()), (5.0, 100.0));
         data.days.insert((today, "m".into()), (2.0, 50.0));
+        // Tomorrow's $9 (clock skew, synthetic row): also excluded.
+        data.days.insert((today + 1, "m".into()), (9.0, 90.0));
         let sp = build_spend("test", "Test", data);
         assert_eq!(sp.month_cost, 2.0);
     }

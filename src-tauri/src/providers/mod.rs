@@ -279,6 +279,16 @@ pub(crate) async fn read_body_bounded(
     Ok(bytes)
 }
 
+/// Lossy body text capped at `max_bytes` — "" when the read fails or
+/// the body exceeds the cap. For callers that only need a bounded peek
+/// at error text, not a parsed body.
+pub(crate) async fn bounded_text(resp: reqwest::Response, max_bytes: usize) -> String {
+    match resp.bytes().await {
+        Ok(b) if b.len() <= max_bytes => String::from_utf8_lossy(&b).into_owned(),
+        _ => String::new(),
+    }
+}
+
 /// JSON bodies from vendor APIs are tiny (quota + token responses). Cap
 /// before parse so a huge payload can't stall a refresh or blow RAM —
 /// same idea as the share-card decode bound.

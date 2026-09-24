@@ -1,4 +1,4 @@
-use super::{config_value, http, stored_api_key, Metric, Snapshot};
+use super::{bounded_text, config_value, http, json_body, stored_api_key, Metric, Snapshot};
 use crate::spend;
 use chrono::{Datelike, Local, NaiveDate};
 use serde_json::Value;
@@ -6,6 +6,8 @@ use std::path::Path;
 
 const ID: &str = "stepfun";
 const NAME: &str = "StepFun";
+// Wallet/probe JSON is kilobytes; 1 MiB bounds a hostile or broken body.
+const MAX_BODY: usize = 1024 * 1024;
 
 // Step Plan pricing rule (platform.stepfun.com/docs/zh/step-plan/overview):
 // 1M Credit = ¥1, charged at model list price, pool issued monthly and
@@ -39,25 +41,84 @@ pub async fn snapshot() -> Snapshot {
     }
 }
 
-/// GET `urls` in order with the key; a 401 falls through to the next host
-/// (a key is valid on one region only). Returns the answering url with
-/// the first non-401 response, or None when every host rejected the key.
+/// Region hosts each carry a subset of keys, and any of them can be
+/// down: advance to the next on auth rejection (401/403), rate limiting
+/// (429), server errors (5xx), and transport failures. A 2xx from any
+/// host is authoritative; a non-retry status (404-style) is a real
+/// answer the callers interpret themselves.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Try {
+    Ok,
+    Status(u16),
+    Transport,
+}
+
+/// What `try_urls` should do once every host answered.
+#[derive(Debug, PartialEq)]
+enum Pick {
+    /// Return this host's response to the caller.
+    Use(usize),
+    /// Every host auth-rejected → the callers' "key rejected" path
+    /// (plan probe, then the paste-a-key error).
+    Rejected,
+    /// Surface the last non-auth failure — a 5xx/429/transport error
+    /// says more than the 401/403 another region returned.
+    Fail(usize),
+}
+
+fn retryable(s: u16) -> bool {
+    s == 401 || s == 403 || s == 429 || s >= 500
+}
+
+fn pick_outcome(outcomes: &[Try]) -> Pick {
+    let mut last_non_auth = None;
+    for (i, o) in outcomes.iter().enumerate() {
+        match *o {
+            Try::Ok => return Pick::Use(i),
+            Try::Status(s) if !retryable(s) => return Pick::Use(i),
+            Try::Status(s) => {
+                if s != 401 && s != 403 {
+                    last_non_auth = Some(i);
+                }
+            }
+            Try::Transport => last_non_auth = Some(i),
+        }
+    }
+    match last_non_auth {
+        Some(i) => Pick::Fail(i),
+        None => Pick::Rejected,
+    }
+}
+
+/// GET `urls` in order with the key (.ai first, then .com). Returns the
+/// answering url with the first non-retryable response, Err on the most
+/// useful failure when every host fell over, or None when every host
+/// auth-rejected the key.
 async fn try_urls<'u>(
     urls: &[&'u str],
     key: &str,
 ) -> Result<Option<(&'u str, reqwest::Response)>, String> {
+    let mut failures: Vec<(Try, String)> = Vec::new();
     for url in urls {
-        let resp = http()
-            .get(*url)
-            .bearer_auth(key)
-            .send()
-            .await
-            .map_err(|e| format!("{url}: {e}"))?;
-        if resp.status().as_u16() != 401 {
-            return Ok(Some((*url, resp)));
+        match http().get(*url).bearer_auth(key).send().await {
+            Err(e) => failures.push((Try::Transport, format!("{url}: {e}"))),
+            Ok(resp) => {
+                let s = resp.status().as_u16();
+                if retryable(s) {
+                    failures.push((Try::Status(s), format!("{url}: HTTP {s}")));
+                } else {
+                    return Ok(Some((*url, resp)));
+                }
+            }
         }
     }
-    Ok(None)
+    let outcomes: Vec<Try> = failures.iter().map(|(t, _)| *t).collect();
+    match pick_outcome(&outcomes) {
+        Pick::Fail(i) => Err(failures[i].1.clone()),
+        // All auth rejections (Use is unreachable — non-retryable
+        // statuses return inside the loop).
+        Pick::Rejected | Pick::Use(_) => Ok(None),
+    }
 }
 
 /// Step Code (StepFun's official CLI) stores its credential in
@@ -82,13 +143,17 @@ fn stepcode_api_key(auth_json: &str) -> Option<String> {
 
 /// The Step Code credential file, if it holds a platform API key.
 fn stepcode_key() -> Option<String> {
-    let raw = std::fs::read_to_string(
-        dirs::home_dir()
-            .unwrap_or_default()
-            .join(".stepcode")
-            .join("auth.json"),
-    )
-    .ok()?;
+    let path = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".stepcode")
+        .join("auth.json");
+    // auth.json is a few hundred bytes — size-gate before reading so a
+    // swapped or corrupt file can't be slurped wholesale.
+    let meta = std::fs::metadata(&path).ok()?;
+    if meta.len() > 64 * 1024 {
+        return None;
+    }
+    let raw = std::fs::read_to_string(&path).ok()?;
     stepcode_api_key(&raw)
 }
 
@@ -108,7 +173,7 @@ async fn fetch() -> Result<Snapshot, String> {
             if !resp.status().is_success() {
                 return Err(format!("accounts endpoint: HTTP {}", resp.status()));
             }
-            let doc: Value = resp.json().await.map_err(|e| format!("accounts parse: {e}"))?;
+            let doc = json_body(resp, MAX_BODY, "accounts").await?;
             // .com accounts are billed in CNY.
             let sign = if url.contains("stepfun.com") { "¥" } else { "$" };
             // A Step Plan subscription can't be detected over the API —
@@ -140,7 +205,13 @@ async fn fetch() -> Result<Snapshot, String> {
             // Plan key, which only exists on the plan surface. A 200 on
             // /models proves the key is real rather than a typo.
             let plan_probe = try_urls(&PLAN_MODELS_URLS, &key).await?;
-            if plan_probe.is_some_and(|(_, r)| r.status().is_success()) {
+            if let Some((_, resp)) = plan_probe {
+                if !resp.status().is_success() {
+                    return Err("key was rejected — paste a fresh key in Settings (gear icon)".into());
+                }
+                // The probe only needs the status, but still bound the
+                // body — no unbounded reads anywhere on this card.
+                let _ = bounded_text(resp, MAX_BODY).await;
                 let (chip, metrics, warning) =
                     plan_metrics(spend::month_to_date_cost(ID), plan_tier());
                 let mut snap = Snapshot::ok(ID, NAME, chip, metrics);
@@ -307,7 +378,7 @@ fn parse_account_in(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_account_in, plan_metrics, stepcode_api_key, Metric};
+    use super::{parse_account_in, pick_outcome, plan_metrics, stepcode_api_key, Metric, Pick, Try};
     use serde_json::json;
     use std::path::PathBuf;
 
@@ -521,5 +592,44 @@ mod tests {
             None
         );
         assert_eq!(stepcode_api_key("not json"), None);
+    }
+
+    #[test]
+    fn pick_outcome_uses_the_first_real_answer() {
+        // A down/limited/rejecting host falls through to the next; any
+        // real answer (2xx or a non-retryable status) wins immediately.
+        assert_eq!(pick_outcome(&[Try::Status(503), Try::Ok]), Pick::Use(1));
+        assert_eq!(pick_outcome(&[Try::Status(401), Try::Ok]), Pick::Use(1));
+        assert_eq!(pick_outcome(&[Try::Transport, Try::Ok]), Pick::Use(1));
+        assert_eq!(pick_outcome(&[Try::Status(403), Try::Status(404)]), Pick::Use(1));
+        assert_eq!(pick_outcome(&[Try::Ok, Try::Status(503)]), Pick::Use(0));
+        assert_eq!(pick_outcome(&[Try::Status(429), Try::Ok]), Pick::Use(1));
+    }
+
+    #[test]
+    fn pick_outcome_prefers_a_non_auth_error() {
+        // All hosts down: a 5xx/429/transport says more than another
+        // region's 401. All-auth stays Rejected → the callers' None
+        // path (plan probe / paste-a-key error).
+        assert_eq!(
+            pick_outcome(&[Try::Status(503), Try::Status(401)]),
+            Pick::Fail(0)
+        );
+        assert_eq!(
+            pick_outcome(&[Try::Status(401), Try::Transport]),
+            Pick::Fail(1)
+        );
+        assert_eq!(
+            pick_outcome(&[Try::Status(401), Try::Status(429), Try::Status(500)]),
+            Pick::Fail(2)
+        );
+        assert_eq!(
+            pick_outcome(&[Try::Status(401), Try::Status(401)]),
+            Pick::Rejected
+        );
+        assert_eq!(
+            pick_outcome(&[Try::Status(401), Try::Status(403)]),
+            Pick::Rejected
+        );
     }
 }
