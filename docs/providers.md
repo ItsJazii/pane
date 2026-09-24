@@ -270,11 +270,14 @@ Ground rules that apply to every provider:
 
 - **Reads:** pasted key or env var (`STEPFUN_API_KEY`,
   `STEP_API_KEY`), or — when neither is set — the API key Step Code
-  (StepFun's official CLI) stores in `~\.stepcode\auth.json` for its
-  `platform_*` profiles (`step_plan*` profiles hold an OAuth token the
-  accounts endpoint can't use, so those are ignored).
+  (StepFun's official CLI) stores for its `platform_*` profiles, tried
+  in order at `%STEP_CODING_AGENT_DIR%\auth.json`,
+  `~\.stepcode\agent\auth.json`, and `~\.stepcode\auth.json`
+  (`step_plan*` profiles hold an OAuth token the accounts endpoint
+  can't use, so those are ignored).
 - **Calls:** `api.stepfun.ai/v1/accounts` then `api.stepfun.com` on a
-  401 (CN keys live on the mirror host). If both reject the key it may
+  401/403/429/5xx or transport error (CN keys live on the mirror host).
+  If both reject the key it may
   be a Step Plan key — `/step_plan/v1/models` is probed on both hosts
   and a 200 proves the key is real.
 - **Shows:** a Prepaid/Postpaid plan chip with Balance (and Vouchers

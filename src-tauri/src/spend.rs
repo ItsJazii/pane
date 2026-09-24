@@ -840,8 +840,28 @@ fn oversized_log(path: &Path, size: u64) {
 /// Because links are followed, the walk is iterative and bounded: it stops at
 /// `MAX_SCAN_DEPTH` levels, visits at most `MAX_SCAN_DIRS` directories, and
 /// skips canonical paths already seen, so a link cycle can't spin forever.
+/// The file-scan cutoff: `now − 31 days`, widened back to the start of
+/// the current local month (minus a day of margin) when that reaches
+/// further. A 31-day month containing a DST fall-back is 31d+1h long,
+/// so late in such a month the rolling cutoff would drop files touched
+/// in the month's first hour — which `month_cost` still needs. Never
+/// narrows the window, only widens it by at most a day.
+fn scan_cutoff(now: DateTime<Local>) -> SystemTime {
+    let rolling = SystemTime::from(now) - Duration::from_secs(31 * 86_400);
+    let month_floor = now
+        .date_naive()
+        .with_day(1)
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .and_then(|t| t.and_local_timezone(Local).single())
+        .map(|ms| SystemTime::from(ms) - Duration::from_secs(86_400));
+    match month_floor {
+        Some(floor) => rolling.min(floor),
+        None => rolling,
+    }
+}
+
 fn recent_jsonl_files(root: &Path, out: &mut Vec<PathBuf>) {
-    let cutoff = SystemTime::now() - Duration::from_secs(31 * 86_400);
+    let cutoff = scan_cutoff(Local::now());
     // Canonical paths of link targets already entered. Cycles and aliases can
     // only form through links, so plain directories skip the canonicalize —
     // on Windows it opens a real handle per directory (plus an antivirus
@@ -2217,10 +2237,12 @@ fn codex_dated_base(model: &str) -> String {
 /// intentionally not Cursor's `-fast` supplement multipliers. Unknown models
 /// use the supplement's multiplier when one exists, else 2x. Kimi/Moonshot
 /// slugs billed through a Codex router are not OpenAI-tiered — leave them
-/// at 1× so they merge with the Kimi CLI's own (unmultiplied) rows.
+/// at 1× so they merge with the Kimi CLI's own (unmultiplied) rows. Same
+/// for StepFun `step-*` slugs (bare or `stepfun/` prefixed): Step Plan
+/// bills its own list prices, not OpenAI's fast tier.
 fn codex_priority_multiplier(dated: &str, rate_model: &str) -> f64 {
     let lower = rate_model.to_ascii_lowercase();
-    if lower.contains("kimi") || lower.contains("moonshot") {
+    if lower.contains("kimi") || lower.contains("moonshot") || is_stepfun_model(rate_model) {
         return 1.0;
     }
     match dated {
@@ -4412,6 +4434,17 @@ mod tests {
         assert_eq!(codex_dated_base("gpt-6-astra-2026-09-01"), "gpt-6-astra");
         assert_eq!(codex_long_context("gpt-6-astra"), Some((20.0, 75.0, 2.0)));
         assert_eq!(codex_priority_multiplier("gpt-6-astra", "gpt-6-astra"), 2.0);
+        // StepFun slugs aren't OpenAI-tiered — no fast multiplier, bare
+        // or gateway-prefixed, while gpt models stay tiered.
+        assert_eq!(
+            codex_priority_multiplier("step-3.7-flash", "step-3.7-flash"),
+            1.0
+        );
+        assert_eq!(
+            codex_priority_multiplier("stepfun/step-5-preview", "stepfun/step-5-preview"),
+            1.0
+        );
+        assert_eq!(codex_priority_multiplier("gpt-5.4", "gpt-5.4"), 2.0);
     }
 
     fn dated_astra_session(model: &str, input: f64, output: f64, fast: bool) -> FileData {
@@ -4973,6 +5006,28 @@ mod tests {
         data.days.insert((today + 1, "m".into()), (9.0, 90.0));
         let sp = build_spend("test", "Test", data);
         assert_eq!(sp.month_cost, 2.0);
+    }
+
+    /// Late in a 31-day month (the DST fall-back makes it 31d+1h), the
+    /// cutoff must still reach the month's first hour — files touched
+    /// there feed `month_cost`. Mid-month it's just now − 31d.
+    #[test]
+    fn scan_cutoff_covers_the_whole_current_month() {
+        use chrono::TimeZone;
+        let local_dt = |y, mo, d, h, mi| {
+            Local
+                .with_ymd_and_hms(y, mo, d, h, mi, 0)
+                .single()
+                .expect("unambiguous local time")
+        };
+        let last_day = local_dt(2026, 10, 31, 23, 30);
+        let month_start = local_dt(2026, 10, 1, 0, 0);
+        assert!(scan_cutoff(last_day) <= SystemTime::from(month_start));
+        let mid = local_dt(2026, 10, 15, 12, 0);
+        assert_eq!(
+            scan_cutoff(mid),
+            SystemTime::from(mid) - Duration::from_secs(31 * 86_400)
+        );
     }
 
     #[test]

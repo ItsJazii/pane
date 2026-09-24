@@ -2,7 +2,7 @@ use super::{bounded_text, config_value, http, json_body, stored_api_key, Metric,
 use crate::spend;
 use chrono::{Datelike, Local, NaiveDate};
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const ID: &str = "stepfun";
 const NAME: &str = "StepFun";
@@ -121,8 +121,10 @@ async fn try_urls<'u>(
     }
 }
 
-/// Step Code (StepFun's official CLI) stores its credential in
-/// ~/.stepcode/auth.json as `{"step": {"type","access","profile",…}}`.
+/// Step Code (StepFun's official CLI) stores its credential as
+/// `{"step": {"type","access","profile",…}}` — its docs put it at
+/// ~/.stepcode/agent/auth.json but real installs also use
+/// ~/.stepcode/auth.json, so both are tried (plus $STEP_CODING_AGENT_DIR).
 /// For `platform_*` profiles `access` is a plain StepFun API key — the
 /// same key this card asks for — so a signed-in Step Code user needs
 /// no Settings entry. `step_plan*` profiles hold a browser OAuth token
@@ -141,20 +143,42 @@ fn stepcode_api_key(auth_json: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Step Code auth.json candidates, tried in order: the agent-dir
+/// override, the docs' agent/auth.json, then the root auth.json real
+/// installs use. An empty/whitespace env var means unset.
+fn stepcode_auth_candidates(agent_env: Option<&str>, home: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(dir) = agent_env.map(str::trim).filter(|s| !s.is_empty()) {
+        out.push(Path::new(dir).join("auth.json"));
+    }
+    out.push(home.join(".stepcode").join("agent").join("auth.json"));
+    out.push(home.join(".stepcode").join("auth.json"));
+    out
+}
+
 /// The Step Code credential file, if it holds a platform API key.
 fn stepcode_key() -> Option<String> {
-    let path = dirs::home_dir()
-        .unwrap_or_default()
-        .join(".stepcode")
-        .join("auth.json");
-    // auth.json is a few hundred bytes — size-gate before reading so a
-    // swapped or corrupt file can't be slurped wholesale.
-    let meta = std::fs::metadata(&path).ok()?;
-    if meta.len() > 64 * 1024 {
-        return None;
+    let home = dirs::home_dir()?;
+    for path in stepcode_auth_candidates(
+        std::env::var("STEP_CODING_AGENT_DIR").ok().as_deref(),
+        &home,
+    ) {
+        // auth.json is a few hundred bytes — size-gate before reading so
+        // a swapped or corrupt file can't be slurped wholesale.
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if meta.len() > 64 * 1024 {
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Some(key) = stepcode_api_key(&raw) {
+            return Some(key);
+        }
     }
-    let raw = std::fs::read_to_string(&path).ok()?;
-    stepcode_api_key(&raw)
+    None
 }
 
 async fn fetch() -> Result<Snapshot, String> {
@@ -270,7 +294,9 @@ fn month_window_ms() -> Option<(i64, i64)> {
 /// wallet endpoints rejected outright. With no tier picked there is no
 /// bar at all (0% of an unknown pool would lie); the estimate stays a
 /// text row and a visible "Plan tier" row carries the pick-a-tier hint —
-/// Snapshot.warning never renders on an ok card.
+/// Snapshot.warning never renders on an ok card. With a tier but no
+/// spend scan yet the row is the same "Estimating…" text — a 0% bar
+/// would read as "100% left" while the estimate is still pending.
 fn plan_metrics(
     month_cost_usd: Option<f64>,
     tier: Option<(u64, &'static str)>,
@@ -295,15 +321,11 @@ fn plan_metrics(
         );
     };
     let Some(usd) = month_cost_usd else {
+        // Same marker the no-tier branch uses — a 0% bar would read as
+        // "100% left" before the first spend scan lands.
         return (
             chip,
-            vec![Metric::progress(
-                "Plan Credits",
-                0.0,
-                // The frontend keys on this exact string to re-fetch once
-                // the first spend scan lands.
-                Some("Estimating from session logs…".into()),
-            )],
+            vec![Metric::text("Plan Credits", "Estimating…".into())],
             None,
         );
     };
@@ -378,7 +400,11 @@ fn parse_account_in(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_account_in, pick_outcome, plan_metrics, stepcode_api_key, Metric, Pick, Try};
+    use super::{
+        parse_account_in, pick_outcome, plan_metrics, stepcode_api_key,
+        stepcode_auth_candidates, Metric, Pick, Try,
+    };
+    use std::path::Path;
     use serde_json::json;
     use std::path::PathBuf;
 
@@ -559,9 +585,9 @@ mod tests {
         let (_, metrics, warning) = plan_metrics(None, Some((8000, "Flash Pro")));
         assert!(warning.is_none());
         let m = &metrics[0];
-        assert_eq!(m.kind, "progress");
-        assert_eq!(m.used_percent, Some(0.0));
-        assert_eq!(m.detail.as_deref(), Some("Estimating from session logs…"));
+        assert_eq!(m.kind, "text");
+        assert_eq!(m.label, "Plan Credits");
+        assert_eq!(m.value.as_deref(), Some("Estimating…"));
     }
 
     #[test]
@@ -592,6 +618,22 @@ mod tests {
             None
         );
         assert_eq!(stepcode_api_key("not json"), None);
+    }
+
+    /// Auth.json candidates: agent-dir env first, then the docs'
+    /// agent/auth.json, then the root auth.json installs actually use.
+    #[test]
+    fn stepcode_auth_candidates_order_env_then_docs_then_root() {
+        let home = Path::new("/h");
+        let agent = home.join(".stepcode").join("agent").join("auth.json");
+        let root = home.join(".stepcode").join("auth.json");
+        assert_eq!(stepcode_auth_candidates(None, home), vec![agent.clone(), root.clone()]);
+        assert_eq!(
+            stepcode_auth_candidates(Some("/opt/step"), home),
+            vec![Path::new("/opt/step").join("auth.json"), agent.clone(), root.clone()]
+        );
+        // Empty/whitespace env counts as unset.
+        assert_eq!(stepcode_auth_candidates(Some("  "), home), vec![agent, root]);
     }
 
     #[test]
