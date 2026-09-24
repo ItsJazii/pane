@@ -40,6 +40,11 @@ pub struct Metric {
     pub value: Option<String>,
     pub resets_at: Option<i64>,
     pub period_ms: Option<i64>,
+    /// True when `resets_at` is an expiry — the row's value is lost at
+    /// that moment, not renewed. Skipped in JSON when false so older
+    /// caches and snapshots decode unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub expires: bool,
 }
 
 /// One banked rate-limit reset credit. `id` is present when Pane can redeem
@@ -62,6 +67,7 @@ impl Metric {
             value: None,
             resets_at: None,
             period_ms: None,
+            expires: false,
         }
     }
 
@@ -75,6 +81,7 @@ impl Metric {
             value: Some(value),
             resets_at: None,
             period_ms: None,
+            expires: false,
         }
     }
 
@@ -99,6 +106,7 @@ impl Metric {
                 .as_ref()
                 .and_then(|c| c.iter().filter_map(|credit| credit.expires_at).min()),
             period_ms: None,
+            expires: false,
         }
     }
 
@@ -106,6 +114,22 @@ impl Metric {
         self.resets_at = resets_at;
         self.period_ms = period_ms;
         self
+    }
+
+    /// Marks `resets_at` as an expiry: the row's remaining value is
+    /// lost at that moment rather than renewed, so the frontend counts
+    /// down and no reset machinery may treat it as a rollover.
+    pub fn with_expiry(mut self, expires_at: Option<i64>) -> Self {
+        self.resets_at = expires_at;
+        self.period_ms = None;
+        self.expires = true;
+        self
+    }
+
+    /// True for an expiring row whose deadline has passed — the value
+    /// is gone even if the last API reading still shows a balance.
+    pub fn expired_at(&self, now_ms: i64) -> bool {
+        self.expires && self.resets_at.is_some_and(|r| r <= now_ms)
     }
 }
 
@@ -1147,5 +1171,17 @@ mod resets_tests {
             detail.iter().map(|c| c.id.as_deref()).collect::<Vec<_>>(),
             vec![Some("a"), Some("b")]
         );
+    }
+
+    #[test]
+    fn metric_omits_expires_unless_set() {
+        // Older caches and snapshots decode unchanged: the flag only
+        // exists in JSON when an expiring row sets it.
+        let plain = serde_json::to_value(Metric::progress("Session", 10.0, None)).unwrap();
+        assert!(plain.get("expires").is_none());
+        let expiring =
+            serde_json::to_value(Metric::progress("Cloud credits", 0.0, None).with_expiry(Some(1)))
+                .unwrap();
+        assert_eq!(expiring.get("expires"), Some(&serde_json::json!(true)));
     }
 }

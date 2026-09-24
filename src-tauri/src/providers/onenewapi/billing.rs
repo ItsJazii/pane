@@ -123,6 +123,7 @@ fn expiry_metric(resets_at: i64) -> Metric {
         value: None,
         resets_at: Some(resets_at),
         period_ms: None,
+        expires: false,
     }
 }
 

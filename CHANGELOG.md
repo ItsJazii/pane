@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Added
+- **Claude: Cloud session credits.** The included credit for Claude
+  Code cloud sessions (e.g. $100) shows as a bar with its expiry.
 - **StepFun card.** Paste a StepFun API key: account balance (and
   vouchers) with the usual credits-used meter, plus local spend for
   `step-*` models used through Claude Code / Codex / OpenCode against

@@ -39,7 +39,10 @@ Ground rules that apply to every provider:
   (spending a banked reset);
   `platform.claude.com/v1/oauth/token` (refresh, written back).
 - **Shows:** Session + Weekly windows, per-model weeklies, Extra Usage
-  overage; local spend from `~\.claude\projects\` logs. Banked limit
+  overage, and the Cloud session credits bar (`iguana_necktie`) — the
+  included dollar credit for Claude Code cloud sessions, counting down
+  to its expiry rather than a reset; local spend from
+  `~\.claude\projects\` logs. Banked limit
   resets appear in the Rate Limit Resets row with their expiry and can
   be claimed from the popover exactly like Codex's — the server-selected
   grant is the only claimable one. Persisted

@@ -171,7 +171,11 @@ pub fn evaluate(snapshots: &[Snapshot], cfg: &Value) -> Vec<Alert> {
                 (entry.resets_at, metric.resets_at),
                 (Some(old), Some(new)) if new - old > 10 * 60_000
             );
-            let rolled_over = entry.seen
+            // Expiring rows (e.g. Claude Cloud credits) never reset — a
+            // re-issued credit arrives with a LATER expiry and low use,
+            // which would otherwise look exactly like a rollover.
+            let rolled_over = !metric.expires
+                && entry.seen
                 && advanced
                 && long_window(metric.period_ms, entry.resets_at, metric.resets_at)
                 && (used < 2.0 || entry.prev_used.is_some_and(|p| used + 10.0 < p));
@@ -410,6 +414,26 @@ mod tests {
         assert!(alerts[0].body.contains("Codex Weekly is back to 100%"));
         assert!(alerts[0].body.contains("Next reset in"));
         assert!(evaluate(&[make(0.0, t + period)], &cfg).is_empty());
+        forget_snapshot(id);
+    }
+
+    #[test]
+    fn expiring_credit_reissue_is_not_a_reset() {
+        // A fresh Cloud-credit grant lands with a later expiry and 0%
+        // used — the same signature as a weekly rollover. The expires
+        // flag must keep it from firing "back to 100%".
+        let id = "claude@expiry-reissue";
+        let cfg = serde_json::json!({"notifyReset": true, "locale": "en"});
+        let t = chrono::Utc::now().timestamp_millis() + 2 * 3_600_000;
+        let make = |used, resets| Snapshot::ok(id, "Claude", None, vec![
+            crate::providers::Metric::progress("Cloud credits", used, None)
+                .with_expiry(Some(resets)),
+        ]);
+        forget_snapshot(id);
+        assert!(evaluate(&[make(10.0, t)], &cfg).is_empty());
+        // Old credit dies, a new one appears a month out at 0% used.
+        let alerts = evaluate(&[make(0.0, t + 30 * 86_400_000)], &cfg);
+        assert!(alerts.is_empty());
         forget_snapshot(id);
     }
 

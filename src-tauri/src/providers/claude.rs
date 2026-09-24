@@ -300,8 +300,12 @@ async fn fetch(dir: &std::path::Path, id: &str, name: &str) -> Result<Snapshot, 
     if metrics.is_empty() {
         return Err("usage response had no recognizable limit windows".into());
     }
-    // Pushed after the windowless early-return: a resets row alone must
-    // never turn a response with no windows into an ok snapshot.
+    // Pushed after the windowless early-return: a cloud-credit bar or a
+    // resets row alone must never turn a response with no windows into
+    // an ok snapshot.
+    if let Some(credits) = cloud_credits(&usage) {
+        metrics.push(credits);
+    }
     if let Some(resets) = banked_resets(&usage) {
         metrics.push(resets);
     }
@@ -434,6 +438,48 @@ fn push_window(metrics: &mut Vec<Metric>, node: Option<&Value>, label: &str, per
     let Some(used) = node.get("utilization").and_then(Value::as_f64) else { return };
     let resets_at = parse_reset(node.get("resets_at"));
     metrics.push(Metric::progress(label, used, None).with_reset(resets_at, Some(period_ms)));
+}
+
+/// Cloud session credits — the included dollar credit for Claude Code
+/// cloud sessions, carried under `iguana_necktie` on the usage response
+/// (what claude.ai → Settings → Usage shows as "N of N left"). Unlike a
+/// window it EXPIRES rather than resets: the metric is flagged so the
+/// UI counts down and no reset machinery treats it as a rollover. An
+/// account with no credit reports a null-dollar sibling — None.
+fn cloud_credits(usage: &Value) -> Option<Metric> {
+    let node = usage.get("iguana_necktie")?;
+    let limit = node.get("limit_dollars").and_then(Value::as_f64)?;
+    if limit <= 0.0 {
+        return None;
+    }
+    let used = node
+        .get("used_dollars")
+        .and_then(Value::as_f64)
+        .or_else(|| {
+            node.get("remaining_dollars")
+                .and_then(Value::as_f64)
+                .map(|r| limit - r)
+        })
+        .or_else(|| {
+            node.get("utilization")
+                .and_then(Value::as_f64)
+                .map(|u| u / 100.0 * limit)
+        })
+        .unwrap_or(0.0)
+        .clamp(0.0, limit);
+    let remaining = node
+        .get("remaining_dollars")
+        .and_then(Value::as_f64)
+        .unwrap_or(limit - used)
+        .clamp(0.0, limit);
+    Some(
+        Metric::progress(
+            "Cloud credits",
+            (used / limit * 100.0).clamp(0.0, 100.0),
+            Some(format!("${remaining:.2} of ${limit:.2} left")),
+        )
+        .with_expiry(parse_reset(node.get("resets_at"))),
+    )
 }
 
 /// Banked "limit resets" — Anthropic's cedar_ember program, surfaced by
@@ -720,7 +766,9 @@ fn backup_credentials(path: &std::path::Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::{banked_resets, identity_from, parse_reset_credit_id, scoped_id_charset};
+    use super::{
+        banked_resets, cloud_credits, identity_from, parse_reset_credit_id, scoped_id_charset,
+    };
     use serde_json::json;
 
     #[test]
@@ -995,6 +1043,67 @@ mod tests {
         assert!(!tmp.exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cloud_credits_live_shape_shows_the_remaining_dollars() {
+        // The live iguana_necktie block: $100 untouched, expiry set.
+        let usage = json!({"iguana_necktie": {
+            "utilization": 0.0,
+            "resets_at": "2026-11-05T07:59:00+00:00",
+            "limit_dollars": 100,
+            "used_dollars": 0.0,
+            "remaining_dollars": 100.0,
+            "locked_reason": null
+        }});
+        let m = cloud_credits(&usage).expect("a funded credit yields a row");
+        assert_eq!(m.label, "Cloud credits");
+        assert_eq!(m.used_percent, Some(0.0));
+        assert_eq!(m.detail.as_deref(), Some("$100.00 of $100.00 left"));
+        assert_eq!(m.resets_at, Some(1_793_865_540_000)); // 2026-11-05T07:59:00Z
+        assert!(m.expires);
+        assert_eq!(m.period_ms, None);
+    }
+
+    #[test]
+    fn cloud_credits_partially_used_reports_the_remainder() {
+        let usage = json!({"iguana_necktie": {
+            "limit_dollars": 100, "used_dollars": 25, "remaining_dollars": 75,
+            "resets_at": null
+        }});
+        let m = cloud_credits(&usage).unwrap();
+        assert_eq!(m.used_percent, Some(25.0));
+        assert_eq!(m.detail.as_deref(), Some("$75.00 of $100.00 left"));
+        assert_eq!(m.resets_at, None);
+        assert!(m.expires);
+    }
+
+    #[test]
+    fn cloud_credits_derives_used_from_remaining_or_utilization() {
+        // No used_dollars: limit - remaining wins; no remaining either:
+        // utilization/100*limit.
+        let usage = json!({"iguana_necktie": {
+            "limit_dollars": 200, "remaining_dollars": 150
+        }});
+        assert_eq!(cloud_credits(&usage).unwrap().used_percent, Some(25.0));
+        let usage = json!({"iguana_necktie": {
+            "limit_dollars": 200, "utilization": 10.0
+        }});
+        assert_eq!(cloud_credits(&usage).unwrap().used_percent, Some(10.0));
+    }
+
+    #[test]
+    fn cloud_credits_absent_or_null_shapes_yield_no_row() {
+        // The nimbus_quill-style null-dollar sibling, a null key, a
+        // missing key, and a zero limit all mean "no credit".
+        let nulls = json!({"iguana_necktie": {
+            "utilization": 0.0, "resets_at": null, "limit_dollars": null,
+            "used_dollars": null, "remaining_dollars": null, "locked_reason": null
+        }});
+        assert!(cloud_credits(&nulls).is_none());
+        assert!(cloud_credits(&json!({"iguana_necktie": null})).is_none());
+        assert!(cloud_credits(&json!({"five_hour": {}})).is_none());
+        assert!(cloud_credits(&json!({"iguana_necktie": {"limit_dollars": 0}})).is_none());
     }
 
     #[test]
