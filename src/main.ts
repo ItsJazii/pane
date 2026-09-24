@@ -33,6 +33,7 @@ import hermesIcon from "./assets/providers/hermes.svg?raw";
 import kimiIcon from "./assets/providers/kimi.svg?raw";
 import minimaxIcon from "./assets/providers/minimax.svg?raw";
 import onenewapiIcon from "./assets/providers/onenewapi.svg?raw";
+import stepfunIcon from "./assets/providers/stepfun.svg?raw";
 import sub2apiIcon from "./assets/providers/sub2api.svg?raw";
 import opencodeIcon from "./assets/providers/opencode.svg?raw";
 import openrouterIcon from "./assets/providers/openrouter.svg?raw";
@@ -62,6 +63,7 @@ const PROVIDER_ICONS: Record<string, string> = {
   sub2api: sub2apiIcon,
   opencode: opencodeIcon,
   openrouter: openrouterIcon,
+  stepfun: stepfunIcon,
   zai: zaiIcon,
 };
 
@@ -122,6 +124,7 @@ interface ProviderSpend {
   trend: number[];
   unpriced: number;
   unpriced_models: string[];
+  month_cost: number;
 }
 
 /// How to get each provider signed in again, for the ⚠ Outdated tooltip.
@@ -225,6 +228,7 @@ interface Config {
   starPromptLastMs: number;
   reduceAnimations: boolean;
   locale: LocalePref;
+  stepfunPlanCredits: number | null;
 }
 
 const FRONTEND_CONFIG_KEYS = [
@@ -259,6 +263,7 @@ const FRONTEND_CONFIG_KEYS = [
   "starPromptLastMs",
   "reduceAnimations",
   "locale",
+  "stepfunPlanCredits",
 ] as const satisfies readonly (keyof Config)[];
 type _AssertAllConfigKeys = Exclude<keyof Config, (typeof FRONTEND_CONFIG_KEYS)[number]> extends never
   ? true
@@ -314,6 +319,7 @@ const ALL_PROVIDERS: [string, string][] = [
   ["qwen", "Qwen Code"],
   ["hermes", "Hermes"],
   ["kimi", "Kimi Code"],
+  ["stepfun", "StepFun"],
 ];
 
 function providerDisplayName(id: string): string {
@@ -375,6 +381,10 @@ const PROVIDER_LINKS: Record<string, { label: string; url: string }[]> = {
     { label: "Console", url: "https://www.kimi.com/code/console" },
     { label: "Quota", url: "https://www.kimi.com/membership/subscription?tab=quota" },
     { label: "API", url: "https://platform.moonshot.ai/console" },
+  ],
+  stepfun: [
+    { label: "Platform", url: "https://platform.stepfun.ai/" },
+    { label: "Docs", url: "https://platform.stepfun.ai/docs/en/step-plan/overview" },
   ],
 };
 
@@ -448,9 +458,14 @@ let config: Config = {
   starPromptLastMs: 0,
   reduceAnimations: false,
   locale: "auto",
+  stepfunPlanCredits: null,
 };
 let lastFetch = 0;
 let refreshing = false;
+// The StepFun plan bar reads the spend scan's month-to-date; on a cold
+// start the usage fetch usually finishes first, so we re-fetch usage once
+// when spend lands (see refresh()'s tail).
+let stepPlanNudged = false;
 // A forced refresh requested while one was already in flight (saving an
 // API key races the auto-refresh timer). Dropping it would leave the new
 // state unfetched and the status line stuck on the save message.
@@ -1813,15 +1828,23 @@ function renderTotalSpend(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Footer update flow — popover opens re-check, but the backend gates the
-// launch + every-4-h cadence per docs/privacy.md (invoke is a cheap cache
-// read inside the window). The version stamp becomes "Checking for
-// updates…" and then an Update button on a hit.
+// Footer update flow — check on launch and every popover open; the backend
+// also checks at launch and every 4 h. The version stamp becomes "Checking
+// for updates…" and then an Update button on a hit.
 // ---------------------------------------------------------------------------
 
 let buildText = "";
 let updateVersion: string | null = null;
 let checkingUpdate = false;
+let updateCheckError: string | null = null;
+let reportUpdateCheckError = false;
+
+function clearUpdateCheckError(): void {
+  if (!updateCheckError) return;
+  const status = document.querySelector("#status");
+  if (status?.textContent === updateCheckError) status.textContent = "";
+  updateCheckError = null;
+}
 
 function renderBuildInfo(): void {
   const el = document.querySelector<HTMLElement>("#build-info");
@@ -1845,13 +1868,22 @@ function renderBuildInfo(): void {
       });
     });
     el.replaceChildren(btn);
+  } else if (updateCheckError) {
+    const btn = document.createElement("button");
+    btn.id = "update-check-retry";
+    btn.textContent = t("update.checkRetry");
+    btn.addEventListener("click", () => void checkForUpdate(true));
+    el.replaceChildren(btn);
   } else {
     el.textContent = checkingUpdate ? t("update.check") : buildText;
   }
 }
 
-async function checkForUpdate(): Promise<void> {
-  if (checkingUpdate || updateVersion) return;
+async function checkForUpdate(showError = false): Promise<void> {
+  if (updateVersion) return;
+  if (showError) reportUpdateCheckError = true;
+  if (checkingUpdate) return;
+  clearUpdateCheckError();
   checkingUpdate = true;
   renderBuildInfo();
   try {
@@ -1859,10 +1891,14 @@ async function checkForUpdate(): Promise<void> {
     // the background checker announced while this check was in flight.
     const v = await invoke<string | null>("check_update");
     if (v) updateVersion = v;
-  } catch {
-    // Offline or GitHub unreachable — the stamp just returns; the
-    // 4-hourly background checker will try again anyway.
+  } catch (err) {
+    if (reportUpdateCheckError && !updateVersion) {
+      updateCheckError = t("footer.updateCheckFailed", { err: String(err) });
+      const status = document.querySelector("#status");
+      if (status && !configSaveError) status.textContent = updateCheckError;
+    }
   }
+  reportUpdateCheckError = false;
   checkingUpdate = false;
   renderBuildInfo();
 }
@@ -3625,6 +3661,23 @@ async function refresh(force = false, usageOnly = false): Promise<void> {
   }
   if (lastSnapshots.length) ensureLayout();
   if (!customizeOpen && lastSnapshots.length) renderIfVisible();
+  // Past the finally block, so `refreshing` is false and a forced pass is
+  // safe: swap StepFun's "Estimating…" placeholder for the real estimate.
+  // Keyed on the scan having landed, not on a StepFun entry: a quiet
+  // provider is filtered out of the list, yet its estimate (0) is ready.
+  if (
+    !stepPlanNudged &&
+    spend &&
+    lastSnapshots.some(
+      (s) =>
+        s.id === "stepfun" &&
+        s.status === "ok" &&
+        s.metrics.some((m) => m.value === "Estimating…"),
+    )
+  ) {
+    stepPlanNudged = true;
+    void refresh(true, true);
+  }
 }
 
 function scheduleAutoRefresh(): void {
@@ -4975,6 +5028,15 @@ async function initSettings(): Promise<void> {
     requestTraySync();
   });
 
+  const stepfunPlan = document.querySelector<HTMLSelectElement>("#stepfun-plan")!;
+  stepfunPlan.value =
+    config.stepfunPlanCredits == null ? "" : String(config.stepfunPlanCredits);
+  stepfunPlan.addEventListener("change", () => {
+    const v = stepfunPlan.value;
+    // Await the write: the backend reads the tier from config.json.
+    void patchConfig({ stepfunPlanCredits: v ? Number(v) : null }).then(() => refresh(true, true));
+  });
+
   const notifyToggles: [string, keyof Config][] = [
     ["#notify-reset", "notifyReset"],
     ["#notify-almost", "notifyAlmostOut"],
@@ -5123,6 +5185,7 @@ async function resetAllSettings(): Promise<void> {
     showTotalSpend: true,
     reduceAnimations: false,
     locale: "auto",
+    stepfunPlanCredits: null,
   }).catch(() => {});
   spendTab = "today";
   applyLocale();
@@ -5153,6 +5216,10 @@ function syncSettingsControls(): void {
   setCheck("#pacing", config.pacingAlways);
   setSelect("#timeformat", config.timeFormat);
   setSelect("#locale", config.locale);
+  setSelect(
+    "#stepfun-plan",
+    config.stepfunPlanCredits == null ? "" : String(config.stepfunPlanCredits),
+  );
   setCheck("#notify-reset", config.notifyReset);
   setCheck("#notify-almost", config.notifyAlmostOut);
   setCheck("#notify-close", config.notifyCuttingClose);
@@ -5468,6 +5535,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
   // The 4-hourly background checker feeds the same footer button.
   void listen<string>("update-available", (e) => {
+    clearUpdateCheckError();
     updateVersion = e.payload;
     renderBuildInfo();
   });
@@ -5481,7 +5549,7 @@ window.addEventListener("DOMContentLoaded", () => {
   });
 
   void listen("popover-shown", () => {
-    void checkForUpdate();
+    void checkForUpdate(true);
     // Always reopen on the main page, at the top — leftover Customize/
     // Settings panels, a stale confirm dialog, or a stale scroll position
     // from the previous visit feel like the app is stuck mid-page.

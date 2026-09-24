@@ -5,6 +5,31 @@
 ### Added
 - **Claude: Cloud session credits.** The included credit for Claude
   Code cloud sessions (e.g. $100) shows as a bar with its expiry.
+- **StepFun card.** Paste a StepFun API key: account balance (and
+  vouchers) with the usual credits-used meter, plus local spend for
+  `step-*` models used through Claude Code / Codex / OpenCode against
+  the Step Plan endpoint. If you subscribe to Step Plan, pick your tier
+  in Settings → API keys → StepFun and the card shows both pots: a live
+  "Wallet" bar (pay-as-you-go clients on `/v1` drain it) plus a "Plan
+  Credits" estimate of this month's plan Credits computed from local
+  spend logs (USD × 7; 1M Credit = ¥1) against the monthly pool
+  (Flash Mini–Max, 400M–40,000M) — StepFun's API reports no plan quota
+  and can't even confirm the subscription exists; until a tier is picked
+  the estimate shows as a text row next to a "Plan tier: Not set" hint.
+- **Keyless Claude config dirs count toward spend.** Claude Code
+  sessions run from an API-key-only `CLAUDE_CONFIG_DIR` (e.g. StepFun's)
+  are now included in local spend.
+- **oh-my-pi sessions count toward spend.** `~/.omp/agent/sessions` is
+  scanned alongside pi's own logs; `stepfun*` provider rows (incl.
+  `stepfun-cn`) and `step-*` models land on the StepFun card,
+  `aihubmix` rows on AihubMix.
+- **Step Code sessions count toward StepFun spend.** StepFun's official
+  coding CLI (a pi fork) writes the same session format under
+  `~/.stepcode/agent/sessions` (honoring `STEP_CODING_AGENT_SESSION_DIR`
+  and `STEP_CODING_AGENT_DIR`); its `step` provider rows land on the
+  StepFun card, and when no StepFun key is configured the card falls
+  back to the API key Step Code stores in `~/.stepcode/auth.json` for
+  `platform_*` profiles.
 
 ## 0.4.54 — 2026-09-24
 

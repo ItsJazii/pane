@@ -29,6 +29,8 @@ tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "socks"] }
+# The updater already uses reqwest 0.13; enable SOCKS on that version.
+reqwest_updater = { package = "reqwest", version = "0.13", default-features = false, features = ["socks"] }
 tiny_http = "0.12"
 arboard = "3"
 tokio = { version = "1", features = ["macros", "process", "sync", "time"] }

@@ -52,7 +52,9 @@ Ground rules that apply to every provider:
   inside the parent totals. Sidechain (subagent) logs that replay the
   parent's message under a fresh request id are deduplicated. Sessions
   of the pi coding agent that drove this Claude account
-  (`~\.pi\agent\sessions`, providers `anthropic`/`claude-agent-sdk`)
+  (`~\.pi\agent\sessions`, providers `anthropic`/`claude-agent-sdk`;
+  oh-my-pi writes the same format under `~\.omp\agent\sessions`, and
+  Step Code under `~\.stepcode\agent\sessions`)
   fold into this card's spend — pi's own recorded cost when present,
   catalog pricing otherwise.
 - **Weekly capacity row:** while the Weekly window runs, Pane sums what
@@ -267,6 +269,55 @@ Ground rules that apply to every provider:
   notification). Saving a key in Settings turns that provider on if
   Customize had it off.
 
+## StepFun
+
+- **Reads:** pasted key or env var (`STEPFUN_API_KEY`,
+  `STEP_API_KEY`), or — when neither is set — the API key Step Code
+  (StepFun's official CLI) stores for its `platform_*` profiles, tried
+  in order at `%STEP_CODING_AGENT_DIR%\auth.json`,
+  `~\.stepcode\agent\auth.json`, and `~\.stepcode\auth.json`
+  (`step_plan*` profiles hold an OAuth token the accounts endpoint
+  can't use, so those are ignored).
+- **Calls:** `api.stepfun.ai/v1/accounts` then `api.stepfun.com` on a
+  401/403/429/5xx or transport error (CN keys live on the mirror host).
+  If both reject the key it may
+  be a Step Plan key — `/step_plan/v1/models` is probed on both hosts
+  and a 200 proves the key is real.
+- **Shows:** a Prepaid/Postpaid plan chip with Balance (and Vouchers
+  when any are held) plus a "Credits used" percent bar metered against
+  the highest balance Pane has seen locally. .ai accounts display in
+  USD; .com accounts bill in CNY and display in ¥. A Step Plan
+  subscription can't be detected over the API — `/step_plan/v1/models`
+  answers 200 for any valid key, subscribed or not — so the plan side
+  is opt-in: pick your tier in Settings → API keys → StepFun (Flash
+  Mini 400M / Plus 1,600M / Pro 8,000M / Max 40,000M) and the card
+  shows both pots. The "Wallet" bar stays live from the API
+  (pay-as-you-go clients on `/v1` drain it) while "Plan Credits"
+  estimates this month's plan Credits from local logs (USD spend × 7,
+  since 1M Credit = ¥1 at model list price). StepFun's API has no
+  plan-quota endpoint — the estimate is all it can show, it clears at
+  month end like the real pool, and it counts every `step-*` row the
+  log scan finds, so wallet-billed clients inflate it; the Wallet bar
+  is the authoritative number. Local spend for `step-*`
+  models used through
+  Claude Code, Codex, or OpenCode against the Step Plan endpoint routes
+  to this card (models.dev catalog, falling back to baked StepFun list
+  prices; `step-5-preview` is priced from Artificial Analysis — $1.00 in /
+  $2.70 out / $0.05 cache hit — because StepFun's own price pages omit
+  it). Token-billed `stepaudio-*` chat models price the same way;
+  models with no public token rate — `step-router-v1`, per-image
+  `step-image-edit-2`, character-billed TTS and hour-billed ASR — stay
+  unpriced ⚠ rather than guess. A
+  Claude Code run from its own `CLAUDE_CONFIG_DIR` (e.g. `~/.claude-step`)
+  with no Claude login is scanned too, so API-key sessions against
+  StepFun count here. pi, oh-my-pi, and Step Code sessions
+  (`~\.pi\agent\sessions`, `~\.omp\agent\sessions`,
+  `~\.stepcode\agent\sessions`) with a `step` or `stepfun*`
+  provider name (Step Code logs `step`; `stepfun-cn` is omp's CN
+  endpoint) or a `step-*`/`stepaudio-*`
+  model on any provider route here as well; `aihubmix` provider rows
+  land on the AihubMix card.
+
 ## Kimi Code
 
 - **Reads:** `%USERPROFILE%\.kimi-code\credentials\kimi-code.json` (honors
@@ -389,7 +440,8 @@ Ground rules that apply to every provider:
   way MiniMax-routed sessions are. Claude Code logs don't record which
   gateway served a request, so this assumes qwen models reached Claude
   Code via AihubMix — sessions run through Alibaba's own
-  Anthropic-compatible proxy would land here too.
+  Anthropic-compatible proxy would land here too. pi / oh-my-pi session
+  rows carrying `provider: "aihubmix"` fold in the same way.
 
 ## One/New API
 
