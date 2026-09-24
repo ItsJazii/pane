@@ -536,24 +536,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The wallet baseline binds to the effective credential: the same
-    /// key keeps its high-water mark, a different key starts fresh, and
-    /// no identity keeps the legacy bare-number behaviour. The raw key
-    /// never reaches the baseline file.
+    /// The wallet baseline binds to the effective credential: a legacy
+    /// bare number is adopted under the first identity that sees it
+    /// (upgrade must not wipe the high-water mark), a stored fingerprint
+    /// that differs resets, and no identity keeps the legacy
+    /// bare-number behaviour. The raw key never reaches the file.
     #[test]
     fn credit_meter_baseline_follows_the_effective_key() {
         let dir = tmpdir("baseline-key");
         let doc = |b: f64| json!({"object": "account", "type": "prepaid", "balance": b});
         let label = Some("Credits used");
-        // sk-a: $100 high-water, then $50 left → 50% used.
-        let (_, m) = parse_account_in(&dir, &doc(100.0), "$", label, Some("sk-a")).unwrap();
+        // Legacy bare-number baseline, as written before fingerprints.
+        let (_, m) = parse_account_in(&dir, &doc(100.0), "$", label, None).unwrap();
         assert_eq!(m[0].used_percent, Some(0.0));
+        // Identity A adopts it: $50 of the adopted $100 is 50% used, and
+        // the entry is rewritten with A's fingerprint.
         let (_, m) = parse_account_in(&dir, &doc(50.0), "$", label, Some("sk-a")).unwrap();
         assert_eq!(m[0].used_percent, Some(50.0));
-        // sk-b: a new $90 wallet is 0% used, not 90% of the old $100 pot.
+        let entry = || {
+            serde_json::from_str::<serde_json::Value>(
+                &std::fs::read_to_string(dir.join("credit_baselines.json")).unwrap(),
+            )
+            .unwrap()["stepfun"]
+                .clone()
+        };
+        assert_eq!(entry()["b"].as_f64(), Some(100.0));
+        assert_eq!(
+            entry()["fp"].as_str(),
+            Some(crate::providers::key_fingerprint("sk-a").as_str())
+        );
+        // Key B: a new $90 wallet resets to its own baseline — 0% used,
+        // not 90% of A's adopted $100 pot.
         let (_, m) = parse_account_in(&dir, &doc(90.0), "$", label, Some("sk-b")).unwrap();
         assert_eq!(m[0].used_percent, Some(0.0));
         assert_eq!(m[0].detail.as_deref(), Some("$90.00 of $90.00 left"));
+        // Back to A at 50: the single-entry file now holds B's
+        // fingerprint, so A reads as another swap — the adopted $100
+        // high-water is gone for good. One entry = one owner.
+        let (_, m) = parse_account_in(&dir, &doc(50.0), "$", label, Some("sk-a")).unwrap();
+        assert_eq!(m[0].used_percent, Some(0.0));
+        assert_eq!(entry()["b"].as_f64(), Some(50.0));
         let raw = std::fs::read_to_string(dir.join("credit_baselines.json")).unwrap();
         assert!(!raw.contains("sk-"), "baseline file holds a raw key: {raw}");
         let _ = std::fs::remove_dir_all(&dir);

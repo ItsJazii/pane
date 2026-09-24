@@ -556,17 +556,20 @@ pub fn credit_meter_labeled_identity_in(
         ),
     };
     let fp = identity_key.map(key_fingerprint);
-    // A credential we can't vouch for starts at zero: a legacy bare
-    // number may belong to a different account entirely.
+    // Only a stored fingerprint that differs proves a credential swap
+    // and resets the baseline. A bare number predates fingerprints —
+    // adopt it under this credential (trust on first sight) rather than
+    // wiping every existing user's high-water mark on upgrade.
     let mut high = stored_high;
-    if fp.is_some() && fp.as_deref() != stored_fp.as_deref() {
+    if stored_fp.is_some() && fp.as_deref() != stored_fp.as_deref() {
         high = 0.0;
     }
+    let adopt_fp = fp.is_some() && stored_fp.is_none() && entry.is_some();
     // A late result from a rotated key must not recreate the deleted
     // baseline from the old account's leftover balance.
-    if !stale && balance > high {
+    if !stale && (balance > high || adopt_fp) {
         doc[provider] = match &fp {
-            Some(fp) => serde_json::json!({"b": balance, "fp": fp}),
+            Some(fp) => serde_json::json!({"b": high.max(balance), "fp": fp}),
             None => serde_json::Value::from(balance),
         };
         let _ = std::fs::write(
