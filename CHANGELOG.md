@@ -12,7 +12,8 @@
   Credits" estimate of this month's plan Credits computed from local
   spend logs (USD × 7; 1M Credit = ¥1) against the monthly pool
   (Flash Mini–Max, 400M–40,000M) — StepFun's API reports no plan quota
-  and can't even confirm the subscription exists.
+  and can't even confirm the subscription exists; until a tier is picked
+  the estimate shows as a text row next to a "Plan tier: Not set" hint.
 - **Keyless Claude config dirs count toward spend.** Claude Code
   sessions run from an API-key-only `CLAUDE_CONFIG_DIR` (e.g. StepFun's)
   are now included in local spend.

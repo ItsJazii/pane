@@ -195,13 +195,34 @@ fn month_window_ms() -> Option<(i64, i64)> {
 
 /// Step Plan rows: the "Plan Credits" estimate from this month's local
 /// spend, as a bar against the configured tier. Chip is the tier name.
-/// The `None` tier branch (text row + pick-a-tier hint) only runs for a
-/// plan-only key — one the wallet endpoints rejected outright.
+/// The `None` tier branch only runs for a plan-only key — one the
+/// wallet endpoints rejected outright. With no tier picked there is no
+/// bar at all (0% of an unknown pool would lie); the estimate stays a
+/// text row and a visible "Plan tier" row carries the pick-a-tier hint —
+/// Snapshot.warning never renders on an ok card.
 fn plan_metrics(
     month_cost_usd: Option<f64>,
     tier: Option<(u64, &'static str)>,
 ) -> (Option<String>, Vec<Metric>, Option<String>) {
     let chip = Some(tier.map(|(_, n)| n).unwrap_or("Step Plan").to_string());
+    let Some((limit, _)) = tier else {
+        let estimate = month_cost_usd
+            .map(|usd| {
+                format!("≈{:.0}M Credits this month · est. from logs", usd * CNY_PER_USD)
+            })
+            .unwrap_or_else(|| "Estimating…".into());
+        return (
+            chip,
+            vec![
+                Metric::text("Plan Credits", estimate),
+                Metric::text(
+                    "Plan tier",
+                    "Not set — pick one in Settings → API keys → StepFun".into(),
+                ),
+            ],
+            None,
+        );
+    };
     let Some(usd) = month_cost_usd else {
         return (
             chip,
@@ -216,37 +237,20 @@ fn plan_metrics(
         );
     };
     let used_m = usd * CNY_PER_USD;
-    match tier {
-        Some((limit, _)) => {
-            let pct = (used_m / limit as f64 * 100.0).clamp(0.0, 100.0);
-            let (resets_at, period_ms) = month_window_ms()
-                .map(|(r, p)| (Some(r), Some(p)))
-                .unwrap_or((None, None));
-            let metric = Metric::progress(
-                "Plan Credits",
-                pct,
-                Some(format!(
-                    "≈{used_m:.0}M of {}M Credits used · est. from logs",
-                    grouped(limit)
-                )),
-            )
-            .with_reset(resets_at, period_ms);
-            (chip, vec![metric], None)
-        }
-        None => (
-            chip,
-            vec![Metric::text(
-                "Plan Credits",
-                format!("≈{used_m:.0}M Credits this month · est. from logs"),
-            )],
-            Some(
-                "Pick your Step Plan tier in Settings → API keys → StepFun to \
-                 turn Credits into a bar (StepFun's API doesn't report plan \
-                 quota)."
-                    .into(),
-            ),
-        ),
-    }
+    let pct = (used_m / limit as f64 * 100.0).clamp(0.0, 100.0);
+    let (resets_at, period_ms) = month_window_ms()
+        .map(|(r, p)| (Some(r), Some(p)))
+        .unwrap_or((None, None));
+    let metric = Metric::progress(
+        "Plan Credits",
+        pct,
+        Some(format!(
+            "≈{used_m:.0}M of {}M Credits used · est. from logs",
+            grouped(limit)
+        )),
+    )
+    .with_reset(resets_at, period_ms);
+    (chip, vec![metric], None)
 }
 
 /// `GET /v1/accounts` body: `{object:"account", type:"prepaid"|"postpaid",
@@ -444,10 +448,13 @@ mod tests {
     }
 
     #[test]
-    fn plan_metrics_without_tier_is_text_plus_warning() {
+    fn plan_metrics_without_tier_is_text_plus_tier_hint() {
         let (chip, metrics, warning) = plan_metrics(Some(4.35), None);
         assert_eq!(chip.as_deref(), Some("Step Plan"));
-        assert!(warning.is_some());
+        // The hint rides a visible row now — Snapshot.warning never
+        // renders on an ok card.
+        assert!(warning.is_none());
+        assert_eq!(metrics.len(), 2);
         let m = &metrics[0];
         assert_eq!(m.kind, "text");
         assert_eq!(m.label, "Plan Credits");
@@ -455,6 +462,25 @@ mod tests {
             m.value.as_deref().is_some_and(|v| v.contains("≈30M Credits")),
             "value={:?}", m.value
         );
+        let hint = &metrics[1];
+        assert_eq!(hint.kind, "text");
+        assert_eq!(hint.label, "Plan tier");
+        assert!(
+            hint.value.as_deref().is_some_and(|v| v.starts_with("Not set")),
+            "value={:?}", hint.value
+        );
+    }
+
+    #[test]
+    fn plan_metrics_without_tier_never_shows_a_bar() {
+        // Even before the first spend scan: no 0% progress bar against
+        // an unknown pool.
+        let (_, metrics, _) = plan_metrics(None, None);
+        assert_eq!(metrics.len(), 2);
+        assert_eq!(metrics[0].kind, "text");
+        assert_eq!(metrics[0].label, "Plan Credits");
+        assert_eq!(metrics[0].value.as_deref(), Some("Estimating…"));
+        assert_eq!(metrics[1].label, "Plan tier");
     }
 
     #[test]

@@ -1811,7 +1811,18 @@ fn claude_line(st: &mut ClaudeFileState, line: &str, data: &mut FileData) {
 /// rows on the wrong card.
 fn split_models(data: &mut FileData, prefix: &str) -> FileData {
     let prefix = prefix.to_ascii_lowercase();
-    let matches = |m: &str| m.to_ascii_lowercase().starts_with(&prefix);
+    split_models_by(data, |m| m.to_ascii_lowercase().starts_with(&prefix))
+}
+
+/// StepFun model slugs as the CLIs log them: bare `step-*`, or the
+/// gateway-prefixed `stepfun/step-*` spelling `builtin_price` already
+/// accepts. Routing matches on this; the logged string is kept as-is.
+fn is_stepfun_model(m: &str) -> bool {
+    let m = m.to_ascii_lowercase();
+    m.strip_prefix("stepfun/").unwrap_or(&m).starts_with("step-")
+}
+
+fn split_models_by(data: &mut FileData, matches: impl Fn(&str) -> bool) -> FileData {
     let mut out = FileData::default();
     data.days.retain(|(day, model), v| {
         if matches(model) {
@@ -1928,7 +1939,7 @@ fn claude(extra: FileData) -> (ProviderSpend, FileData, FileData, FileData, File
     let kimi_routed = split_kimi_routed(&mut all);
     // step-* models mean the session ran against StepFun's Step Plan
     // Anthropic-compatible endpoint — the StepFun card owns those rows.
-    let stepfun = split_models(&mut all, "step-");
+    let stepfun = split_models_by(&mut all, is_stepfun_model);
     (build_spend("claude", "Claude", all), minimax, qwen_via_aihubmix, kimi_routed, stepfun)
 }
 
@@ -1954,7 +1965,7 @@ fn claude_extra_accounts() -> (Vec<ProviderSpend>, FileData, FileData, FileData,
         merge_data(&mut minimax_extra, split_models(&mut all, "MiniMax"));
         merge_data(&mut qwen_extra, split_models(&mut all, "qwen"));
         merge_data(&mut kimi_extra, split_kimi_routed(&mut all));
-        merge_data(&mut stepfun_extra, split_models(&mut all, "step-"));
+        merge_data(&mut stepfun_extra, split_models_by(&mut all, is_stepfun_model));
         spends.push(build_spend(acct.id, acct.name, all));
     }
     (spends, minimax_extra, qwen_extra, kimi_extra, stepfun_extra)
@@ -2528,7 +2539,7 @@ fn codex(extra: FileData) -> (ProviderSpend, FileData, FileData) {
     let kimi_routed = split_kimi_routed(&mut all);
     // step-* slugs mean the session ran against StepFun's Step Plan
     // endpoint — those dollars belong on the StepFun card.
-    let stepfun_routed = split_models(&mut all, "step-");
+    let stepfun_routed = split_models_by(&mut all, is_stepfun_model);
     (build_spend("codex", "Codex", all), kimi_routed, stepfun_routed)
 }
 
@@ -2542,7 +2553,7 @@ fn codex_extra_accounts() -> (Vec<ProviderSpend>, FileData, FileData) {
     for acct in providers::codex::discover_extra_accounts() {
         let mut data = codex_scan(&acct.dir);
         merge_data(&mut kimi_extra, split_kimi_routed(&mut data));
-        merge_data(&mut stepfun_extra, split_models(&mut data, "step-"));
+        merge_data(&mut stepfun_extra, split_models_by(&mut data, is_stepfun_model));
         spends.push(build_spend(acct.id, acct.name, data));
     }
     (spends, kimi_extra, stepfun_extra)
@@ -2613,8 +2624,17 @@ fn pi_sessions_dirs() -> Vec<PathBuf> {
     out
 }
 
+/// Dedupe by canonical identity, not spelling: two env spellings that
+/// resolve to the same directory (`a` vs `a/.`, `a/../a`, a symlink)
+/// would otherwise scan the same files twice. A dir that doesn't exist
+/// can't canonicalize and falls back to its spelling — fine, there's
+/// nothing to double-count. The original path is kept for scanning.
 fn push_unique(out: &mut Vec<PathBuf>, dir: PathBuf) {
-    if !out.contains(&dir) {
+    let key = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+    let seen = out.iter().any(|existing| {
+        std::fs::canonicalize(existing).unwrap_or_else(|_| existing.clone()) == key
+    });
+    if !seen {
         out.push(dir);
     }
 }
@@ -2663,7 +2683,7 @@ fn pi_line(seen: &mut HashSet<String>, line: &str, data: &mut FileData) {
         "aihubmix" => "aihubmix",
         "step" => "stepfun",
         p if p.to_lowercase().starts_with("stepfun") => "stepfun",
-        _ if model.to_lowercase().starts_with("step-") => "stepfun",
+        _ if is_stepfun_model(model) => "stepfun",
         _ => return,
     };
     if let Some(id) = v.get("id").and_then(Value::as_str) {
@@ -2897,7 +2917,7 @@ fn fold_opencode_data(
         if let Some(ts) = DateTime::from_timestamp_millis(ts_ms as i64) {
             let target = if provider == "aihubmix" {
                 &mut aihubmix
-            } else if provider == "stepfun" || model.to_ascii_lowercase().starts_with("step-") {
+            } else if provider == "stepfun" || is_stepfun_model(&model) {
                 &mut stepfun
             } else {
                 &mut oc
@@ -4844,6 +4864,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn push_unique_dedupes_spellings_of_one_real_dir() {
+        // Two spellings of one existing dir must not become two roots —
+        // the scan would count every file twice.
+        let base = std::env::temp_dir()
+            .join(format!("pane-pi-dedupe-{}", std::process::id()));
+        let dir = base.join("real");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut out = Vec::new();
+        push_unique(&mut out, dir.clone());
+        push_unique(&mut out, dir.join(".")); // same dir, `a/.` spelling
+        push_unique(&mut out, base.join("other").join("..").join("real")); // `a/../a`
+        assert_eq!(out, vec![dir]);
+        // A missing dir can't canonicalize and dedupes by spelling only.
+        let ghost = base.join("missing");
+        push_unique(&mut out, ghost.clone());
+        push_unique(&mut out, ghost.clone());
+        assert_eq!(out.len(), 2);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// Overflowed Pi keys keep their routing prefix: take_tagged must still
     /// claim them, so capped usage lands on the right card instead of
     /// vanishing with the discarded scan.
@@ -4938,15 +4979,45 @@ mod tests {
         data.days.insert((1001, "step-3.5-flash".into()), (0.2, 20.0));
         // The unpublished preview routes by prefix too (stays unpriced ⚠).
         data.days.insert((1001, "step-5-preview".into()), (0.1, 10.0));
+        // The gateway-prefixed spelling (Claude/Codex logs can carry
+        // `stepfun/step-…`) routes the same — string kept as logged.
+        data.days.insert((1002, "stepfun/step-3.7-flash".into()), (0.3, 30.0));
+        data.days.insert((1002, "STEPFUN/Step-5-preview".into()), (0.4, 40.0));
         data.unpriced.insert("step-3.7-flash".into(), 3);
+        data.unpriced.insert("stepfun/step-9-ultra".into(), 2);
         data.unpriced.insert("mystery-model".into(), 1);
 
-        let sf = split_models(&mut data, "step-");
+        let sf = split_models_by(&mut data, is_stepfun_model);
         assert_eq!(data.days.len(), 1);
         assert_eq!(data.unpriced.len(), 1);
-        assert_eq!(sf.days.len(), 3);
+        assert_eq!(sf.days.len(), 5);
         assert_eq!(sf.days[&(1000, "step-3.7-flash".to_string())], (0.5, 50.0));
+        assert_eq!(
+            sf.days[&(1002, "stepfun/step-3.7-flash".to_string())],
+            (0.3, 30.0)
+        );
+        assert_eq!(
+            sf.days[&(1002, "STEPFUN/Step-5-preview".to_string())],
+            (0.4, 40.0)
+        );
         assert_eq!(sf.unpriced.get("step-3.7-flash"), Some(&3));
+        assert_eq!(sf.unpriced.get("stepfun/step-9-ultra"), Some(&2));
+    }
+
+    #[test]
+    fn opencode_provider_wins_over_stepfun_prefixed_model() {
+        // An aihubmix-routed row keeps its card even when the model slug
+        // itself would match StepFun — provider overrides stay.
+        let (_oc, aihubmix, stepfun) = fold_opencode_data([
+            (1000.0, 1.0, 10.0, "aihubmix/step-3.7-flash".into(), "aihubmix".into()),
+            (1000.0, 2.0, 20.0, "stepfun/step-3.7-flash".into(), "openrouter".into()),
+        ]);
+        assert_eq!(cost_sum(&aihubmix), 1.0);
+        assert_eq!(cost_sum(&stepfun), 2.0);
+        assert!(stepfun
+            .days
+            .keys()
+            .any(|(_, m)| m == "stepfun/step-3.7-flash"));
     }
 
     #[test]

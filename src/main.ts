@@ -3620,7 +3620,9 @@ async function refresh(force = false, usageOnly = false): Promise<void> {
       (s) =>
         s.id === "stepfun" &&
         s.status === "ok" &&
-        s.metrics.some((m) => m.detail === "Estimating from session logs…"),
+        s.metrics.some(
+          (m) => m.detail === "Estimating from session logs…" || m.value === "Estimating…",
+        ),
     )
   ) {
     stepPlanNudged = true;
@@ -5133,6 +5135,7 @@ async function resetAllSettings(): Promise<void> {
     showTotalSpend: true,
     reduceAnimations: false,
     locale: "auto",
+    stepfunPlanCredits: null,
   }).catch(() => {});
   spendTab = "today";
   applyLocale();
