@@ -281,11 +281,13 @@ pub(crate) async fn read_body_bounded(
 
 /// Lossy body text capped at `max_bytes` — "" when the read fails or
 /// the body exceeds the cap. For callers that only need a bounded peek
-/// at error text, not a parsed body.
+/// at error text, not a parsed body. Built on `read_body_bounded` so
+/// the cap is enforced while streaming, not after buffering.
 pub(crate) async fn bounded_text(resp: reqwest::Response, max_bytes: usize) -> String {
-    match resp.bytes().await {
-        Ok(b) if b.len() <= max_bytes => String::from_utf8_lossy(&b).into_owned(),
-        _ => String::new(),
+    let mut resp = resp;
+    match read_body_bounded(&mut resp, max_bytes, "response").await {
+        Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+        Err(_) => String::new(),
     }
 }
 
