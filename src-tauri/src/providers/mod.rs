@@ -124,6 +124,12 @@ impl Metric {
         self.expires = true;
         self
     }
+
+    /// True for an expiring row whose deadline has passed — the value
+    /// is gone even if the last API reading still shows a balance.
+    pub fn expired_at(&self, now_ms: i64) -> bool {
+        self.expires && self.resets_at.is_some_and(|r| r <= now_ms)
+    }
 }
 
 /// Everything one provider reports back after a refresh. `stale` marks a

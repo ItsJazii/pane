@@ -305,6 +305,11 @@ fn append_sub2api_status(mut line: String, snapshot: &providers::Snapshot, prima
 }
 
 fn percent_left(metric: &providers::Metric) -> f64 {
+    // An expiring row past its deadline has nothing left, whatever the
+    // last API reading said.
+    if metric.expired_at(chrono::Utc::now().timestamp_millis()) {
+        return 0.0;
+    }
     (100.0 - metric.used_percent.unwrap_or(0.0))
         .clamp(0.0, 100.0)
         .round()
@@ -321,6 +326,19 @@ mod tests {
 
     fn snapshot(id: &str, name: &str, metrics: Vec<Metric>) -> Snapshot {
         Snapshot::ok(id, name, None, metrics)
+    }
+
+    #[test]
+    fn expired_credit_projects_as_fully_used() {
+        let now = chrono::Utc::now().timestamp_millis();
+        // Past the deadline the stale reading means nothing: 0% left.
+        let dead = progress("Cloud credits", 40.0).with_expiry(Some(now - 60_000));
+        assert_eq!(percent_left(&dead), 0.0);
+        // Still running, the reading stands; a non-expiring row is
+        // untouched either way.
+        let live = progress("Cloud credits", 40.0).with_expiry(Some(now + 86_400_000));
+        assert_eq!(percent_left(&live), 60.0);
+        assert_eq!(percent_left(&progress("Weekly", 40.0)), 60.0);
     }
 
     fn provider(metric_order: &[&str]) -> ProviderProjectionConfig {

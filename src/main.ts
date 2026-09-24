@@ -1123,9 +1123,15 @@ function parseResetCredits(m: Metric): ResetCredit[] | null {
 
 function renderMetric(m: Metric, providerId: string): string {
   if (m.kind === "progress" && m.used_percent !== null) {
-    const used = clampPercent(m.used_percent);
+    // An expiring credit past its deadline is dead — a stale/restored
+    // snapshot can outlive resets_at, so render it fully gone rather
+    // than trusting the last balance the API reported.
+    const expired = m.expires === true && m.resets_at !== null && m.resets_at <= Date.now();
+    const used = expired ? 100 : clampPercent(m.used_percent);
     const left = Math.round(100 - used);
-    const pace = computePace(m);
+    const pace: Pace = expired
+      ? { cls: "low", note: "", noteClass: "", title: "", tick: null }
+      : computePace(m);
     const tick =
       pace.tick !== null && pace.tick > 1 && pace.tick < 99
         ? `<span class="tick" style="left:${pace.tick}%"></span>`
@@ -1133,11 +1139,21 @@ function renderMetric(m: Metric, providerId: string): string {
     const note = pace.note
       ? `<span class="pace-note ${pace.noteClass}" title="${escapeHtml(pace.title)}">${escapeHtml(pace.note)}</span>`
       : "";
-    const headline = config.showUsed ? t("card.pctUsed", { n: Math.round(used) }) : t("card.pctLeft", { n: left });
-    const headlineAlt = config.showUsed ? t("card.pctLeft", { n: left }) : t("card.pctUsed", { n: Math.round(used) });
+    const headline = expired
+      ? t("card.expired")
+      : config.showUsed
+        ? t("card.pctUsed", { n: Math.round(used) })
+        : t("card.pctLeft", { n: left });
+    const headlineAlt = expired
+      ? t("card.expired")
+      : config.showUsed
+        ? t("card.pctLeft", { n: left })
+        : t("card.pctUsed", { n: Math.round(used) });
 
     let resetHtml = "";
-    if (m.expires && m.resets_at !== null && m.resets_at > Date.now()) {
+    if (expired) {
+      resetHtml = `<span>${escapeHtml(t("card.expiredAt", { when: fmtExact(m.resets_at!) }))}</span>`;
+    } else if (m.expires && m.resets_at !== null && m.resets_at > Date.now()) {
       // Expiring credit (e.g. Claude Cloud credits): the remaining value
       // dies at resets_at rather than refreshing — count down to the
       // loss, and never apply the notStarted grace (its clock doesn't
@@ -1169,7 +1185,10 @@ function renderMetric(m: Metric, providerId: string): string {
         resetHtml = `<span class="clickable" data-flip="reset" title="${escapeHtml(alt)}">${escapeHtml(text)}</span>`;
       }
     }
-    const detailHtml = [m.detail ? escapeHtml(displayMetricDetail(m.detail)) : "", resetHtml].filter(Boolean).join(" · ");
+    const detailHtml = [
+      expired || !m.detail ? "" : escapeHtml(displayMetricDetail(m.detail)),
+      resetHtml,
+    ].filter(Boolean).join(" · ");
     return `
       <div class="metric">
         <div class="metric-head">

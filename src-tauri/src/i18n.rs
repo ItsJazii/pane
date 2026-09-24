@@ -69,6 +69,7 @@ fn zh_metric(label: &str) -> String {
         "Extra usage" => "额外用量".into(),
         "Extra credits" => "额外额度".into(),
         "Rate Limit Resets" => "速率限制重置".into(),
+        "Cloud credits" => "云端额度".into(),
         "Extra balance" => "额外余额".into(),
         "Kilo Pass" => "Kilo Pass".into(),
         "Requests today" => "今日请求".into(),
@@ -126,6 +127,7 @@ fn ru_metric(label: &str) -> String {
         "Extra usage" => "Дополнительно".into(),
         "Extra credits" => "Доп. кредиты".into(),
         "Rate Limit Resets" => "Сбросы лимитов".into(),
+        "Cloud credits" => "Облачные кредиты".into(),
         "Extra balance" => "Доп. баланс".into(),
         "Kilo Pass" => "Kilo Pass".into(),
         "Requests today" => "Запросы сегодня".into(),
@@ -195,6 +197,7 @@ mod tests {
         assert_eq!(metric_label(&zh, "Session"), "会话");
         assert_eq!(metric_label(&zh, "Sonnet weekly"), "Sonnet 每周");
         assert_eq!(metric_label(&zh, "Rate Limit Resets"), "速率限制重置");
+        assert_eq!(metric_label(&zh, "Cloud credits"), "云端额度");
         assert_eq!(metric_label(&json!({"locale": "en"}), "Session"), "Session");
     }
 
@@ -204,6 +207,7 @@ mod tests {
         assert_eq!(metric_label(&ru, "Session"), "Сессия");
         assert_eq!(metric_label(&ru, "Sonnet weekly"), "Sonnet за неделю");
         assert_eq!(metric_label(&ru, "Rate Limit Resets"), "Сбросы лимитов");
+        assert_eq!(metric_label(&ru, "Cloud credits"), "Облачные кредиты");
         assert_eq!(metric_label(&ru, "Recent models"), "Недавние модели");
         assert_eq!(quit_label(&ru), "Выйти из Pane");
     }
