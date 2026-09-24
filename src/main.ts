@@ -1791,6 +1791,15 @@ function renderTotalSpend(): string {
 let buildText = "";
 let updateVersion: string | null = null;
 let checkingUpdate = false;
+let updateCheckError: string | null = null;
+let reportUpdateCheckError = false;
+
+function clearUpdateCheckError(): void {
+  if (!updateCheckError) return;
+  const status = document.querySelector("#status");
+  if (status?.textContent === updateCheckError) status.textContent = "";
+  updateCheckError = null;
+}
 
 function renderBuildInfo(): void {
   const el = document.querySelector<HTMLElement>("#build-info");
@@ -1814,13 +1823,22 @@ function renderBuildInfo(): void {
       });
     });
     el.replaceChildren(btn);
+  } else if (updateCheckError) {
+    const btn = document.createElement("button");
+    btn.id = "update-check-retry";
+    btn.textContent = t("update.checkRetry");
+    btn.addEventListener("click", () => void checkForUpdate(true));
+    el.replaceChildren(btn);
   } else {
     el.textContent = checkingUpdate ? t("update.check") : buildText;
   }
 }
 
-async function checkForUpdate(): Promise<void> {
-  if (checkingUpdate || updateVersion) return;
+async function checkForUpdate(showError = false): Promise<void> {
+  if (updateVersion) return;
+  if (showError) reportUpdateCheckError = true;
+  if (checkingUpdate) return;
+  clearUpdateCheckError();
   checkingUpdate = true;
   renderBuildInfo();
   try {
@@ -1828,10 +1846,14 @@ async function checkForUpdate(): Promise<void> {
     // the background checker announced while this check was in flight.
     const v = await invoke<string | null>("check_update");
     if (v) updateVersion = v;
-  } catch {
-    // Offline or GitHub unreachable — the stamp just returns; the
-    // 4-hourly background checker will try again anyway.
+  } catch (err) {
+    if (reportUpdateCheckError && !updateVersion) {
+      updateCheckError = t("footer.updateCheckFailed", { err: String(err) });
+      const status = document.querySelector("#status");
+      if (status) status.textContent = updateCheckError;
+    }
   }
+  reportUpdateCheckError = false;
   checkingUpdate = false;
   renderBuildInfo();
 }
@@ -5437,6 +5459,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
   // The 4-hourly background checker feeds the same footer button.
   void listen<string>("update-available", (e) => {
+    clearUpdateCheckError();
     updateVersion = e.payload;
     renderBuildInfo();
   });
@@ -5450,7 +5473,7 @@ window.addEventListener("DOMContentLoaded", () => {
   });
 
   void listen("popover-shown", () => {
-    void checkForUpdate();
+    void checkForUpdate(true);
     // Always reopen on the main page, at the top — leftover Customize/
     // Settings panels, a stale confirm dialog, or a stale scroll position
     // from the previous visit feel like the app is stuck mid-page.

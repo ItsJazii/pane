@@ -187,7 +187,7 @@ impl Snapshot {
 /// Optional outbound proxy from config.json `proxy: { enabled, url }`.
 /// Loaded once per app run (Mac parity — a change needs a restart) and never
 /// applied to loopback, so the local Antigravity/HTTP-API traffic stays direct.
-fn proxy_url() -> Option<&'static str> {
+pub(crate) fn proxy_url() -> Option<&'static str> {
     static PROXY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     PROXY
         .get_or_init(|| {
