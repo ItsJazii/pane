@@ -1392,6 +1392,20 @@ select:focus-visible {
   border-radius: 999px;
 }
 
+/* Weekly capacity tooltip: section gap and the API-equivalent footnote. */
+.tip-line.cap-gap {
+  margin-top: 7px;
+}
+
+.tip-foot {
+  margin-top: 7px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
 /* ------------------------------------------------- rate-limit resets row */
 
 /* Severity dot in the row's "N available" value, off the soonest expiry. */

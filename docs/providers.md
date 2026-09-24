@@ -31,10 +31,18 @@ Ground rules that apply to every provider:
   account in two places stays one card). Extra cards are named from the
   account's organization or email; the default login keeps the plain
   `claude` id. Each account's spend comes from its own dir's logs.
-- **Calls:** `api.anthropic.com/api/oauth/usage` (usage windows);
+- **Calls:** `api.anthropic.com/api/oauth/usage?cedar_ember=1` (usage
+  windows + banked limit resets — the `cedar_ember` block only reports
+  eligibility when the request carries Claude Code's own User-Agent);
+  `api.anthropic.com/api/oauth/profile` (org uuid, at redeem time);
+  `api.anthropic.com/api/organizations/<org>/reset_rate_limits`
+  (spending a banked reset);
   `platform.claude.com/v1/oauth/token` (refresh, written back).
 - **Shows:** Session + Weekly windows, per-model weeklies, Extra Usage
-  overage; local spend from `~\.claude\projects\` logs. Persisted
+  overage; local spend from `~\.claude\projects\` logs. Banked limit
+  resets appear in the Rate Limit Resets row with their expiry and can
+  be claimed from the popover exactly like Codex's — the server-selected
+  grant is the only claimable one. Persisted
   `claude -p` runs count too (`--no-session-persistence` runs write no
   log to read). Advisor work nested in a message's `usage.iterations`
   counts once under the advisor's own model; ordinary iterations stay
@@ -46,6 +54,14 @@ Ground rules that apply to every provider:
   Step Code under `~\.stepcode\agent\sessions`)
   fold into this card's spend — pi's own recorded cost when present,
   catalog pricing otherwise.
+- **Weekly capacity row:** while the Weekly window runs, Pane sums what
+  this card's logs recorded inside it and estimates what 100% of the
+  limit is worth — tokens plus API-equivalent dollars (list prices, not
+  what you pay). A week Pane actually sees reach 100% is saved as an
+  observed sample, frozen at completion; a week that resets first is
+  marked incomplete. Hover the value for history and the observed
+  average. Usage on other devices or a shared account isn't counted, so
+  an incomplete week can just mean this PC didn't see all of it.
 
 ## Codex (Codex CLI)
 
@@ -78,6 +94,11 @@ Ground rules that apply to every provider:
   `openai-codex`) fold into this card's spend the same way they do for
   Claude. Turns logged as `kimi-oauth/…` or `moonshot-ai/…` (a router
   pointed at the Kimi plan) move to the Kimi Code card instead.
+- **Weekly capacity row:** same as Claude — an in-window estimate of
+  what 100% of the weekly limit is worth (tokens + API-equivalent
+  dollars), a frozen "observed" sample once Pane sees the window hit
+  100%, an "incomplete" mark when it resets first, and a per-week
+  history with the observed average on hover.
 
 ## Cursor
 

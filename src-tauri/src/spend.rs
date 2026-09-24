@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
@@ -108,12 +109,32 @@ const OVERFLOW_MODEL_KEY: &str = "[over-limit model name]";
 #[derive(Default, Clone)]
 struct FileData {
     days: DayMap,
+    /// (UTC hour index, bounded model key) → (cost, tokens) for events in
+    /// the last HOURS_WINDOW days. The model half of the key is what lets
+    /// the split helpers (split_models / take_tagged / split_kimi_routed)
+    /// move hourly rows between cards together with their day rows — an
+    /// hour bucket without it could not follow a routed row. Consumers
+    /// (window_totals) collapse the model dimension back out.
+    hours: HashMap<(i64, String), (f64, f64)>,
     unpriced: HashMap<String, u64>,
     /// Distinct model keys admitted by `model_key` during this file's
     /// parse — the state behind MAX_MODELS_PER_FILE. Consulted only while
     /// parsing; split helpers don't keep it in step.
     models: HashSet<String>,
 }
+
+/// Hourly buckets exist to price an arbitrary weekly-quota window: nine
+/// days covers a 7-day window plus boundary slack, nothing older is asked
+/// for, and persisting any more would just grow spend_cache.json.
+/// Shared with capacity.rs — a cycle is only reconstructible from the
+/// buckets while its start hour is still inside this retention window.
+pub const HOURS_WINDOW_MS: i64 = 9 * 86_400_000;
+const HOURS_WINDOW_SECS: i64 = HOURS_WINDOW_MS / 1_000;
+
+/// Distinct (hour, model) keys one file may admit before extras fold into
+/// OVERFLOW_MODEL_KEY — the hours analogue of MAX_MODELS_PER_FILE, so a
+/// hostile log can't inflate the map (or spend_cache.json) without bound.
+const MAX_HOURS_PER_FILE: usize = 8192;
 
 impl FileData {
     /// Bounded key for a log-supplied model string: within both caps the
@@ -317,6 +338,12 @@ struct PersistEntry {
     mtime_nanos: u32,
     size: u64,
     days: Vec<(i32, String, f64, f64)>,
+    /// Hourly buckets — (hour index, model key, cost, tokens). `None` =
+    /// written by a version that predates hours; that distinction drives
+    /// the backfill rule in load_persisted_cache (recent files re-parse
+    /// once, old files just stay empty). New writes always emit Some.
+    #[serde(default)]
+    hours: Option<Vec<(i64, String, f64, f64)>>,
     unpriced: Vec<(String, u64)>,
     /// Pricing questions this file's parse asked (see `PriceProbe`).
     /// Older caches without the field deserialize as empty — safe, because
@@ -376,16 +403,26 @@ fn load_persisted_cache() {
         let gen = pricing::generation();
         let Ok(mut map) = cache().lock() else { return };
         for e in doc.entries {
+            let mtime = SystemTime::UNIX_EPOCH
+                + std::time::Duration::new(e.mtime_secs, e.mtime_nanos);
+            if needs_hours_backfill(e.hours.is_none(), mtime) {
+                // Cached before hourly buckets existed but still inside
+                // the window: re-parse once so window_totals sees it.
+                continue;
+            }
             let mut data = FileData::default();
             for (day, model, cost, tokens) in e.days {
                 data.days.insert((day, model), (cost, tokens));
+            }
+            if let Some(hours) = e.hours {
+                for (hour, model, cost, tokens) in hours {
+                    data.hours.insert((hour, model), (cost, tokens));
+                }
             }
             data.unpriced = e.unpriced.into_iter().collect();
             if !stamp_matches && !probes_still_vouch(&e.probes, &data) {
                 continue; // a price this file used changed — re-parse it
             }
-            let mtime = SystemTime::UNIX_EPOCH
-                + std::time::Duration::new(e.mtime_secs, e.mtime_nanos);
             map.insert(
                 e.path,
                 FileEntry {
@@ -406,6 +443,15 @@ fn load_persisted_cache() {
     });
 }
 
+/// Backfill rule for caches written before hourly buckets: an entry with
+/// no `hours` whose file was modified inside the window is re-parsed once
+/// (the next save stores its hours). An older file can't hold in-window
+/// events — logs are append-only — so it keeps empty hours rather than
+/// re-reading gigabytes at launch.
+fn needs_hours_backfill(hours_absent: bool, mtime: SystemTime) -> bool {
+    hours_absent && mtime >= SystemTime::now() - Duration::from_secs(8 * 86_400)
+}
+
 /// Writes the cache back to disk (atomically, via temp + rename) when this
 /// run parsed anything new. Only entries that are current — touched this
 /// run and priced under the live catalog generation — are persisted.
@@ -416,6 +462,11 @@ fn save_persisted_cache() {
         return;
     }
     let gen = pricing::generation();
+    let cutoff_hour = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64 - HOURS_WINDOW_SECS)
+        .unwrap_or(0)
+        .div_euclid(3600);
     let Ok(touched_set) = touched().lock() else { return };
     let Ok(map) = cache().lock() else { return };
     let entries: Vec<PersistEntry> = map
@@ -437,6 +488,19 @@ fn save_persisted_cache() {
                     .iter()
                     .map(|((day, model), (cost, tokens))| (*day, model.clone(), *cost, *tokens))
                     .collect(),
+                // Drop buckets the window has already rolled past; Some
+                // even when empty so the load side never re-parses an
+                // entry it already trusts.
+                hours: Some(
+                    e.data
+                        .hours
+                        .iter()
+                        .filter(|((hour, _), _)| *hour >= cutoff_hour)
+                        .map(|((hour, model), (cost, tokens))| {
+                            (*hour, model.clone(), *cost, *tokens)
+                        })
+                        .collect(),
+                ),
                 unpriced: e.data.unpriced.iter().map(|(m, c)| (m.clone(), *c)).collect(),
                 probes: e.probes.clone(),
                 prefix_head: e.prefix_head.clone(),
@@ -467,9 +531,31 @@ fn day_of_utc(ts: DateTime<Utc>) -> i32 {
 
 fn add_event(data: &mut FileData, ts: DateTime<Utc>, model: &str, cost: f64, tokens: f64) {
     let key = data.model_key(model);
-    let entry = data.days.entry((day_of_utc(ts), key)).or_insert((0.0, 0.0));
+    let entry = data
+        .days
+        .entry((day_of_utc(ts), key.clone()))
+        .or_insert((0.0, 0.0));
     entry.0 += cost;
     entry.1 += tokens;
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    if ts.timestamp() >= now - HOURS_WINDOW_SECS {
+        let hour = ts.timestamp().div_euclid(3600);
+        // Over the cap, collapse this hour into the overflow bucket — the
+        // totals stay exact, only the per-model attribution merges.
+        let hkey = if data.hours.len() < MAX_HOURS_PER_FILE
+            || data.hours.contains_key(&(hour, key.clone()))
+        {
+            (hour, key)
+        } else {
+            (hour, overflow_key(model))
+        };
+        let hentry = data.hours.entry(hkey).or_insert((0.0, 0.0));
+        hentry.0 += cost;
+        hentry.1 += tokens;
+    }
 }
 
 /// Tally an event no catalog can price: its tokens still count (they're
@@ -486,6 +572,11 @@ fn note_unpriced(data: &mut FileData, ts: DateTime<Utc>, model: &str, tokens: f6
 fn merge_data(target: &mut FileData, source: FileData) {
     for (key, (cost, tokens)) in source.days {
         let entry = target.days.entry(key).or_insert((0.0, 0.0));
+        entry.0 += cost;
+        entry.1 += tokens;
+    }
+    for (key, (cost, tokens)) in source.hours {
+        let entry = target.hours.entry(key).or_insert((0.0, 0.0));
         entry.0 += cost;
         entry.1 += tokens;
     }
@@ -521,7 +612,107 @@ fn finalize_models(raw: HashMap<String, (f64, f64)>, window_cost: f64) -> Vec<Mo
     named
 }
 
+/// Hourly (cost, tokens) staged per spend id by build_spend during a
+/// collect(), swapped into RECENT_HOURS when the scan completes. Staging
+/// keeps a crashed/aborted scan from publishing a half-built map.
+fn staged_hours() -> &'static Mutex<HashMap<String, HashMap<i64, (f64, f64)>>> {
+    static STAGED: OnceLock<Mutex<HashMap<String, HashMap<i64, (f64, f64)>>>> =
+        OnceLock::new();
+    STAGED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Per-spend-id hourly totals from the last completed scan, plus when
+/// that scan STARTED — a window that hit 100% may only be sealed by
+/// totals every file of which was read after the hit, and scan-start is
+/// the bound that proves it (capacity.rs compares the stamp). `None`
+/// until collect() finishes once: callers asking earlier must see None,
+/// not a partial map.
+fn recent_hours() -> &'static Mutex<Option<(HashMap<String, HashMap<i64, (f64, f64)>>, i64, bool)>> {
+    static RECENT: OnceLock<
+        Mutex<Option<(HashMap<String, HashMap<i64, (f64, f64)>>, i64, bool)>>,
+    > = OnceLock::new();
+    RECENT.get_or_init(|| Mutex::new(None))
+}
+
+/// `id`'s totals inside a bounded window plus the scan they came from.
+/// `complete` is false when the scan swallowed a transient read failure
+/// — the numbers are fine for a live estimate but must not seal a
+/// permanent sample. The flag is global per scan, deliberately
+/// conservative: one unrelated provider's bad file delays sealing by a
+/// refresh rather than freezing an under-count forever.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowTotals {
+    pub cost: f64,
+    pub tokens: f64,
+    pub scan_started_ms: i64,
+    pub complete: bool,
+}
+
+/// A read the scan expected to succeed failed transiently — the file
+/// exists but its bytes didn't make it into this pass's totals.
+fn note_scan_gap() {
+    SCAN_INCOMPLETE.store(true, Ordering::Relaxed);
+}
+
+/// Set when any provider's file/dir was listed but couldn't be opened
+/// or read mid-scan; reset at the start of every collect(). Published
+/// as `WindowTotals.complete` so permanent samples (quota cycles) only
+/// seal on scans that saw every file.
+static SCAN_INCOMPLETE: AtomicBool = AtomicBool::new(false);
+
+/// A listing/stat failure that isn't a file vanishing mid-scan (normal
+/// rotation churn) means entries may be silently skipped this pass.
+fn gap_unless_notfound(err: &std::io::Error) {
+    if err.kind() != std::io::ErrorKind::NotFound {
+        note_scan_gap();
+    }
+}
+
+/// (cost, tokens, scan-started-ms, complete) `id` logged in hours whose
+/// hour-start is at or after `since_ms` floored to the hour and before
+/// `until_ms` ceiled to the hour — hourly bucketing can pull in up to
+/// one hour of spend at EACH end of the window, which the
+/// quota-capacity estimate tolerates. `None` before the first
+/// completed scan; after that, an id nobody logged into sums to zero.
+pub fn window_totals(id: &str, since_ms: i64, until_ms: i64) -> Option<WindowTotals> {
+    let since_hour = since_ms.div_euclid(3_600_000);
+    let until_hour =
+        until_ms.div_euclid(3_600_000) + i64::from(until_ms.rem_euclid(3_600_000) != 0);
+    let guard = recent_hours().lock().ok()?;
+    let (map, started_ms, complete) = guard.as_ref()?;
+    let mut out = (0.0, 0.0);
+    if let Some(hours) = map.get(id) {
+        for (hour, (cost, tokens)) in hours {
+            if *hour >= since_hour && *hour < until_hour {
+                out.0 += cost;
+                out.1 += tokens;
+            }
+        }
+    }
+    Some(WindowTotals {
+        cost: out.0,
+        tokens: out.1,
+        scan_started_ms: *started_ms,
+        complete: *complete,
+    })
+}
+
+#[cfg(test)]
+fn reset_recent_hours() {
+    if let Ok(mut g) = recent_hours().lock() {
+        *g = None;
+    }
+}
+
+#[cfg(test)]
+fn publish_test_hours(map: HashMap<String, HashMap<i64, (f64, f64)>>, started_ms: i64, complete: bool) {
+    if let Ok(mut g) = recent_hours().lock() {
+        *g = Some((map, started_ms, complete));
+    }
+}
+
 fn build_spend(id: impl Into<String>, name: impl Into<String>, data: FileData) -> ProviderSpend {
+    let id = id.into();
     let today = Local::now().date_naive().num_days_from_ce();
     // Day numbers are days since CE, so the local month's first day is the
     // month-to-date floor.
@@ -532,9 +723,24 @@ fn build_spend(id: impl Into<String>, name: impl Into<String>, data: FileData) -
     let mut unpriced_models: Vec<String> = data.unpriced.keys().cloned().collect();
     unpriced_models.sort();
     unpriced_models.truncate(5);
+    // Hand this card's hourly buckets to the pending-scan map, collapsed
+    // by hour. An all-empty FileData is the take_join/panic fallback —
+    // skipping it keeps the real build's staging from being overwritten
+    // by a fallback evaluated alongside it on the collect thread.
+    if !data.days.is_empty() || !data.hours.is_empty() || !data.unpriced.is_empty() {
+        let mut by_hour: HashMap<i64, (f64, f64)> = HashMap::new();
+        for ((hour, _), (cost, tokens)) in &data.hours {
+            let e = by_hour.entry(*hour).or_insert((0.0, 0.0));
+            e.0 += cost;
+            e.1 += tokens;
+        }
+        if let Ok(mut staged) = staged_hours().lock() {
+            staged.insert(id.clone(), by_hour);
+        }
+    }
     let days = data.days;
     let mut sp = ProviderSpend {
-        id: id.into(),
+        id,
         name: name.into(),
         today: Window::default(),
         yesterday: Window::default(),
@@ -582,16 +788,20 @@ fn build_spend(id: impl Into<String>, name: impl Into<String>, data: FileData) -
 
 /// How deep below a scan root directories are visited. Session logs nest a
 /// handful of levels at most; the cap keeps a pathological tree from turning
-/// the walk into an unbounded crawl.
+/// the walk into an unbounded crawl. Deterministic — the same files are
+/// skipped on every scan, so it never flags SCAN_INCOMPLETE: a quota cycle
+/// may seal on a bounded scan.
 const MAX_SCAN_DEPTH: usize = 16;
 
 /// Upper bound on directories inspected per scan root, so a link into a huge
-/// tree (or `/`) can't stall the refresh thread.
+/// tree (or `/`) can't stall the refresh thread. Deterministic like the
+/// depth cap — not a transient gap, sealing is allowed.
 const MAX_SCAN_DIRS: usize = 20_000;
 
 /// Session logs larger than this are skipped whole, with a diagnostic — a
 /// multi-hundred-MB single "log" is a corrupt or hostile artifact, and
-/// reading it would stall the refresh thread.
+/// reading it would stall the refresh thread. Deterministic like the scan
+/// bounds — not a transient gap, sealing is allowed.
 const MAX_LOG_FILE_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Stored bytes per JSONL line: a longer physical line is skipped and its
@@ -655,13 +865,34 @@ fn recent_jsonl_files(root: &Path, out: &mut Vec<PathBuf>) {
             );
             return;
         }
-        let Ok(entries) = fs::read_dir(&dir) else { continue };
-        for entry in entries.flatten() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(err) => {
+                // A configured root that's absent is normal (provider not
+                // installed); one that exists but can't be listed is a gap.
+                gap_unless_notfound(&err);
+                continue;
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(err) => {
+                    gap_unless_notfound(&err);
+                    continue;
+                }
+            };
             let path = entry.path();
             // The listing itself carries the entry type (free on Windows —
             // no extra stat). Symlinks/junctions report as symlink here, not
             // as their target type.
-            let Ok(ftype) = entry.file_type() else { continue };
+            let ftype = match entry.file_type() {
+                Ok(t) => t,
+                Err(err) => {
+                    gap_unless_notfound(&err);
+                    continue;
+                }
+            };
             if ftype.is_dir() {
                 if depth + 1 > MAX_SCAN_DEPTH {
                     continue;
@@ -670,7 +901,13 @@ fn recent_jsonl_files(root: &Path, out: &mut Vec<PathBuf>) {
             } else if ftype.is_symlink() {
                 // Links still resolve (relocated logs must be found), but
                 // only they pay for canonicalize and the seen-set gate.
-                let Ok(meta) = fs::metadata(&path) else { continue };
+                let meta = match fs::metadata(&path) {
+                    Ok(m) => m,
+                    Err(err) => {
+                        gap_unless_notfound(&err);
+                        continue;
+                    }
+                };
                 if meta.is_dir() {
                     if depth + 1 > MAX_SCAN_DEPTH {
                         continue;
@@ -693,7 +930,13 @@ fn recent_jsonl_files(root: &Path, out: &mut Vec<PathBuf>) {
                     out.push(path);
                 }
             } else if path.extension().is_some_and(|e| e == "jsonl") {
-                let Ok(meta) = entry.metadata() else { continue };
+                let meta = match entry.metadata() {
+                    Ok(m) => m,
+                    Err(err) => {
+                        gap_unless_notfound(&err);
+                        continue;
+                    }
+                };
                 if meta.len() > MAX_LOG_FILE_BYTES {
                     oversized_log(&path, meta.len());
                     continue;
@@ -1041,6 +1284,7 @@ fn file_days_inner(
             PROBES.with(|p| {
                 p.borrow_mut().take();
             });
+            note_scan_gap();
             return FileData::default();
         }
     };
@@ -1068,6 +1312,7 @@ fn file_days_inner(
                         PROBES.with(|p| {
                             p.borrow_mut().take();
                         });
+                        note_scan_gap();
                         return data;
                     }
                 }
@@ -1078,6 +1323,7 @@ fn file_days_inner(
                     PROBES.with(|p| {
                         p.borrow_mut().take();
                     });
+                    note_scan_gap();
                     return data;
                 }
             }
@@ -1088,13 +1334,16 @@ fn file_days_inner(
         PROBES.with(|p| {
             p.borrow_mut().take();
         });
+        note_scan_gap();
         return data;
     }
     let (read_ok, last_complete) = parse_jsonl_reader(&mut reader, parse, &mut data, from, None);
     let probes = PROBES.with(|p| p.borrow_mut().take()).unwrap_or_default();
     if !read_ok {
         // Prefix `data` is already correct. A full retry would reuse
-        // warmed/restored parser state and drop those events.
+        // warmed/restored parser state and drop those events. The tail
+        // this pass never saw stays uncached — flag the gap.
+        note_scan_gap();
         return data;
     }
 
@@ -1116,12 +1365,14 @@ fn file_days_full(
         PROBES.with(|p| {
             p.borrow_mut().take();
         });
+        note_scan_gap();
         return FileData::default();
     };
     let mut reader = BufReader::new(file);
     let (read_ok, last_complete) = parse_jsonl_reader(&mut reader, parse, &mut data, 0, None);
     let probes = PROBES.with(|p| p.borrow_mut().take()).unwrap_or_default();
     if !read_ok {
+        note_scan_gap();
         return data;
     }
     remember_file(path, mtime, last_complete, gen, probes, data.clone());
@@ -1570,6 +1821,14 @@ fn split_models(data: &mut FileData, prefix: &str) -> FileData {
             true
         }
     });
+    data.hours.retain(|(hour, model), v| {
+        if matches(model) {
+            out.hours.insert((*hour, model.clone()), *v);
+            false
+        } else {
+            true
+        }
+    });
     let moved: Vec<String> =
         data.unpriced.keys().filter(|m| matches(m)).cloned().collect();
     for m in moved {
@@ -1605,6 +1864,14 @@ fn split_kimi_routed(all: &mut FileData) -> FileData {
     let mut out = FileData::default();
     for ((day, model), (cost, tokens)) in moved.days {
         let entry = out.days.entry((day, strip_kimi_prefix(&model))).or_insert((0.0, 0.0));
+        entry.0 += cost;
+        entry.1 += tokens;
+    }
+    for ((hour, model), (cost, tokens)) in moved.hours {
+        let entry = out
+            .hours
+            .entry((hour, strip_kimi_prefix(&model)))
+            .or_insert((0.0, 0.0));
         entry.0 += cost;
         entry.1 += tokens;
     }
@@ -2450,6 +2717,17 @@ fn take_tagged(data: &mut FileData, card: &str) -> FileData {
             out.days.insert((key.0, key.1[prefix.len()..].to_string()), v);
         }
     }
+    let hour_keys: Vec<_> = data
+        .hours
+        .keys()
+        .filter(|(_, m)| m.starts_with(&prefix))
+        .cloned()
+        .collect();
+    for key in hour_keys {
+        if let Some(v) = data.hours.remove(&key) {
+            out.hours.insert((key.0, key.1[prefix.len()..].to_string()), v);
+        }
+    }
     let unpriced: Vec<String> =
         data.unpriced.keys().filter(|m| m.starts_with(&prefix)).cloned().collect();
     for m in unpriced {
@@ -3024,6 +3302,9 @@ fn take_join<T>(
 ) -> T {
     handle.join().unwrap_or_else(|_| {
         eprintln!("[pane] spend: {name} panicked — keeping the other providers");
+        // The fallback is empty data — a permanent sample must not seal
+        // on a scan that silently lost a provider.
+        note_scan_gap();
         fallback
     })
 }
@@ -3038,11 +3319,19 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
     // from that set. Serialize so a second refresh waits — one scan
     // stays the same speed.
     let _busy = collect_lock().lock().unwrap_or_else(|e| e.into_inner());
+    // The moment THIS scan starts reading files — window_totals carries
+    // it so a quota cycle can only be sealed by a scan every byte of
+    // which postdates the event being proven (see capacity.rs).
+    let scan_started_ms = Utc::now().timestamp_millis();
+    SCAN_INCOMPLETE.store(false, Ordering::Relaxed);
     providers::sweep_temp_sqlite_copies();
     pricing::ensure_fresh();
     load_persisted_cache();
     if let Ok(mut t) = touched().lock() {
         t.clear();
+    }
+    if let Ok(mut s) = staged_hours().lock() {
+        s.clear();
     }
     let (pi_claude, pi_codex, pi_aihubmix, pi_stepfun) = pi();
     // Claude / Codex / OpenCode / Devin used to run one after another on
@@ -3144,6 +3433,15 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
         pricing::note_unpriced();
     }
     save_persisted_cache();
+    // The scan is complete — publish the staged hourly buckets so
+    // window_totals() answers from this run's files.
+    let staged = staged_hours()
+        .lock()
+        .map(|mut s| std::mem::take(&mut *s))
+        .unwrap_or_default();
+    if let Ok(mut recent) = recent_hours().lock() {
+        *recent = Some((staged, scan_started_ms, !SCAN_INCOMPLETE.load(Ordering::Relaxed)));
+    }
     // Publish before has_data filters: a scanned-but-quiet provider still
     // reads as Some(0.0) rather than "no scan yet".
     if let Ok(mut slot) = MONTH_COST.get_or_init(|| Mutex::new(None)).lock() {
@@ -3167,6 +3465,19 @@ mod tests {
 
     fn cost_sum(d: &FileData) -> f64 {
         d.days.values().map(|v| v.0).sum()
+    }
+
+    // ---- Worker join: a panic must not read as a complete scan -----
+
+    #[test]
+    fn a_panicked_worker_marks_the_scan_incomplete() {
+        SCAN_INCOMPLETE.store(false, Ordering::Relaxed);
+        std::thread::scope(|s| {
+            let h = s.spawn(|| -> i32 { panic!("boom") });
+            assert_eq!(take_join(h, "test", 42), 42);
+        });
+        assert!(SCAN_INCOMPLETE.load(Ordering::Relaxed));
+        SCAN_INCOMPLETE.store(false, Ordering::Relaxed);
     }
 
     // ---- Log scan: bounded walk ------------------------------------------
@@ -3237,6 +3548,7 @@ mod tests {
                 mtime_nanos: 123_456_700, // NTFS 100ns precision must survive
                 size: 4096,
                 days: vec![(739_000, "claude-fable-5".into(), 1.25, 40_000.0)],
+                hours: Some(vec![(495_123, "claude-fable-5".into(), 0.75, 24_000.0)]),
                 unpriced: vec![("mystery-model".into(), 3)],
                 probes: vec![
                     PriceProbe::Lookup {
@@ -3266,6 +3578,7 @@ mod tests {
         assert_eq!(a.path, b.path);
         assert_eq!((a.mtime_secs, a.mtime_nanos, a.size), (b.mtime_secs, b.mtime_nanos, b.size));
         assert_eq!(a.days, b.days);
+        assert_eq!(a.hours, b.hours);
         assert_eq!(a.unpriced, b.unpriced);
         assert_eq!(a.probes, b.probes);
         assert_eq!(a.prefix_head, b.prefix_head);
@@ -4645,6 +4958,117 @@ mod tests {
                                   "speed": "turbo"}}})
         .to_string();
         assert!(claude_run(&[line]).days.is_empty());
+    }
+
+    // ---- Hourly buckets (#236) ------------------------------------------
+
+    fn hours_sum(d: &FileData) -> (f64, f64) {
+        d.hours.values().fold((0.0, 0.0), |(c, t), (c2, t2)| (c + c2, t + t2))
+    }
+
+    #[test]
+    fn add_event_fills_hours_only_inside_the_window() {
+        let mut d = FileData::default();
+        let now = Utc::now();
+        add_event(&mut d, now, "claude-fable-5", 1.5, 1_000.0);
+        add_event(&mut d, now - chrono::Duration::days(10), "claude-fable-5", 9.0, 9_000.0);
+        // The old event still counts in days…
+        assert_eq!(cost_sum(&d), 10.5);
+        // …but only the in-window event made an hourly bucket.
+        assert_eq!(d.hours.len(), 1);
+        assert_eq!(hours_sum(&d), (1.5, 1_000.0));
+        let hour = now.timestamp().div_euclid(3600);
+        assert!(d.hours.contains_key(&(hour, "claude-fable-5".to_string())));
+    }
+
+    #[test]
+    fn note_unpriced_counts_toward_hours() {
+        let mut d = FileData::default();
+        note_unpriced(&mut d, Utc::now(), "mystery-model", 5_000.0);
+        assert_eq!(hours_sum(&d), (0.0, 5_000.0));
+        assert_eq!(d.unpriced.get("mystery-model"), Some(&1));
+    }
+
+    #[test]
+    fn merge_and_split_helpers_keep_hours_with_their_days() {
+        let now = Utc::now();
+        let hour = now.timestamp().div_euclid(3600);
+        let mut a = FileData::default();
+        add_event(&mut a, now, "claude-fable-5", 1.0, 100.0);
+        let mut b = FileData::default();
+        add_event(&mut b, now, "claude-fable-5", 2.0, 200.0);
+        merge_data(&mut a, b);
+        assert_eq!(a.hours.get(&(hour, "claude-fable-5".into())), Some(&(3.0, 300.0)));
+
+        // Family-prefix splits (MiniMax/qwen in Claude logs) move the
+        // model's hour rows to the routed card along with its day rows.
+        let mut c = FileData::default();
+        add_event(&mut c, now, "MiniMax-M2.5", 4.0, 400.0);
+        add_event(&mut c, now, "claude-fable-5", 1.0, 100.0);
+        let moved = split_models(&mut c, "MiniMax");
+        assert_eq!(hours_sum(&moved), (4.0, 400.0));
+        assert_eq!(hours_sum(&c), (1.0, 100.0));
+
+        // Pi-style card tags: take_tagged untags hour keys the same way
+        // it untags day keys, so the routed card owns those hours.
+        let mut p = FileData::default();
+        add_event(&mut p, now, &format!("codex{PI_SEP}gpt-5.5"), 7.0, 700.0);
+        add_event(&mut p, now, &format!("claude{PI_SEP}claude-fable-5"), 3.0, 300.0);
+        let codex = take_tagged(&mut p, "codex");
+        let claude = take_tagged(&mut p, "claude");
+        assert_eq!(codex.hours.get(&(hour, "gpt-5.5".into())), Some(&(7.0, 700.0)));
+        assert_eq!(claude.hours.get(&(hour, "claude-fable-5".into())), Some(&(3.0, 300.0)));
+        assert!(p.hours.is_empty());
+
+        // Kimi-routed rows keep their hours after the prefix peel.
+        let mut k = FileData::default();
+        add_event(&mut k, now, "kimi-oauth/k3", 2.0, 200.0);
+        let kimi = split_kimi_routed(&mut k);
+        assert_eq!(kimi.hours.get(&(hour, "k3".into())), Some(&(2.0, 200.0)));
+        assert!(k.hours.is_empty());
+    }
+
+    #[test]
+    fn needs_hours_backfill_only_for_recent_unbucketed_files() {
+        let now = SystemTime::now();
+        assert!(needs_hours_backfill(true, now - Duration::from_secs(86_400)));
+        assert!(!needs_hours_backfill(true, now - Duration::from_secs(10 * 86_400)));
+        assert!(!needs_hours_backfill(false, now - Duration::from_secs(86_400)));
+    }
+
+    /// window_totals: None before the first completed scan, then sums the
+    /// buckets at or after the floored window start. One test owns the
+    /// shared static so parallel tests can't interleave with it.
+    #[test]
+    fn window_totals_sums_hours_from_the_floored_start() {
+        reset_recent_hours();
+        assert!(window_totals("claude", 0, i64::MAX).is_none(), "no scan yet → None");
+
+        let hour_ms = 3_600_000i64;
+        let mut claude = HashMap::new();
+        claude.insert(100i64, (10.0, 1_000.0));
+        claude.insert(101i64, (20.0, 2_000.0));
+        claude.insert(102i64, (30.0, 3_000.0));
+        let mut map: HashMap<String, HashMap<i64, (f64, f64)>> = HashMap::new();
+        map.insert("claude".into(), claude);
+        map.insert("codex".into(), HashMap::from([(101i64, (5.0, 500.0))]));
+        publish_test_hours(map, 999, true);
+        let wt = |cost, tokens| {
+            Some(WindowTotals { cost, tokens, scan_started_ms: 999, complete: true })
+        };
+
+        // since_ms mid-hour-101 floors to hour 101 → hours 101+102 count.
+        // The stamp tells callers which scan these totals came from.
+        assert_eq!(window_totals("claude", 101 * hour_ms + 1_234, i64::MAX), wt(50.0, 5_000.0));
+        // until_ms bounds the top end: hour 102 excluded at an exact
+        // boundary, included when until lands mid-hour-102 (ceil).
+        assert_eq!(window_totals("claude", 0, 102 * hour_ms), wt(30.0, 3_000.0));
+        assert_eq!(window_totals("claude", 0, 102 * hour_ms + 1), wt(60.0, 6_000.0));
+        assert_eq!(window_totals("codex", 101 * hour_ms, i64::MAX), wt(5.0, 500.0));
+        // A card nobody logged into sums to zero once a scan ran.
+        assert_eq!(window_totals("grok", 0, i64::MAX), wt(0.0, 0.0));
+
+        reset_recent_hours();
     }
 
     /// Live probe over this machine's real logs + Cursor export. Prints
