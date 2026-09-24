@@ -147,6 +147,9 @@ fn config_with_defaults(mut cfg: Value) -> Value {
     obj.entry("starPromptLastMs").or_insert(json!(0));
     obj.entry("reduceAnimations").or_insert(json!(false));
     obj.entry("locale").or_insert(json!("auto"));
+    // StepFun's plan tier pick — null = "Not set" (Credits row stays an
+    // estimate-only text row instead of a bar against a monthly pool).
+    obj.entry("stepfunPlanCredits").or_insert(Value::Null);
     cfg
 }
 
@@ -199,6 +202,7 @@ const CONFIG_KEYS: &[&str] = &[
     "starPromptLastMs",
     "reduceAnimations",
     "locale",
+    "stepfunPlanCredits",
 ];
 
 static CONFIG_WRITE: Mutex<()> = Mutex::new(());
@@ -610,7 +614,7 @@ struct StripEntry {
 /// strip ids are validated against this before becoming tray icon ids,
 /// including `family@account` cards. Stale family-level strip icons are
 /// removed for exactly this set.
-const STRIP_PROVIDER_IDS: [&str; 23] = [
+const STRIP_PROVIDER_IDS: [&str; 24] = [
     "claude",
     "codex",
     "cursor",
@@ -634,6 +638,7 @@ const STRIP_PROVIDER_IDS: [&str; 23] = [
     "kimi",
     "onenewapi",
     "sub2api",
+    "stepfun",
 ];
 
 async fn update_tray_strip(app: tauri::AppHandle, entries: Vec<StripEntry>) -> Result<(), String> {
@@ -1413,6 +1418,7 @@ const API_KEY_PROVIDERS: &[&str] = &[
     "kilo",
     "aihubmix",
     "qwen",
+    "stepfun",
 ];
 
 fn is_plain_api_key_provider(family: &str) -> bool {
@@ -1830,6 +1836,14 @@ async fn fetch_usage(
                 providers::kimi::snapshot(),
             )),
         ),
+        (
+            "stepfun",
+            Box::pin(guarded(
+                "stepfun".into(),
+                "StepFun".into(),
+                providers::stepfun::snapshot(),
+            )),
+        ),
     ];
     // Skip the leftover Moonshot fetch only when the last Kimi card
     // actually painted — a credentials file alone is not enough (expired
@@ -2060,6 +2074,7 @@ async fn fetch_usage(
                 "claude": providers::claude::default_identity(),
                 "codex": providers::codex::default_identity(),
                 "opencode": providers::opencode::default_identity(),
+                "stepfun": providers::stepfun::default_identity(),
             });
             let stored: Value = std::fs::read_to_string(&stamp_file)
                 .ok()
@@ -2068,7 +2083,7 @@ async fn fetch_usage(
             let mut map = cache.lock().unwrap();
             let mut removed = false;
             let mut to_store = serde_json::Map::new();
-            for fam in ["claude", "codex", "opencode"] {
+            for fam in ["claude", "codex", "opencode", "stepfun"] {
                 let cur = current.get(fam).cloned().unwrap_or(Value::Null);
                 let old = stored.get(fam).cloned().unwrap_or(Value::Null);
                 // Only a KNOWN stored identity differing from a KNOWN
@@ -2461,6 +2476,7 @@ fn cached_usage() -> Vec<providers::Snapshot> {
         ("claude", providers::claude::default_identity()),
         ("codex", providers::codex::default_identity()),
         ("opencode", providers::opencode::default_identity()),
+        ("stepfun", providers::stepfun::default_identity()),
     ]
     .into_iter()
     .filter(|(fam, current)| {

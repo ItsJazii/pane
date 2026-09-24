@@ -13,7 +13,7 @@
 //! what cc-switch and the plan's Anthropic-compatible endpoint accept
 //! (issue #173). Login wins when both exist; the key is a fallback only.
 
-use super::{http, stored_api_key, Metric, Snapshot};
+use super::{bounded_text, http, stored_api_key, Metric, Snapshot};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -455,12 +455,7 @@ fn backup_credentials(path: &Path) {
     let _ = std::fs::copy(path, &bak);
 }
 
-async fn bounded_text(resp: reqwest::Response, max_bytes: usize) -> String {
-    match resp.bytes().await {
-        Ok(b) if b.len() <= max_bytes => String::from_utf8_lossy(&b).into_owned(),
-        _ => String::new(),
-    }
-}
+
 
 fn parse_snapshot(doc: &Value) -> Result<Snapshot, String> {
     const SESSION_MS: i64 = 5 * HOUR_MS;

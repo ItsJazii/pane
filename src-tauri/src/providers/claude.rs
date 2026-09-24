@@ -1,7 +1,7 @@
 use super::{codex::RedeemOutcome, http, Metric, ResetCredit, Snapshot};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // Claude Code's public OAuth client id — the same one the CLI itself uses.
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -134,6 +134,35 @@ pub fn discover_extra_accounts() -> Vec<ClaudeAccount> {
         out.push(ClaudeAccount { id: format!("claude@{hash8}"), name, dir });
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+/// True when `dir` is a Claude Code config dir with no OAuth login —
+/// `history.jsonl` + `projects/` + `shell-snapshots/` are the shape the
+/// CLI writes into a `CLAUDE_CONFIG_DIR` pointed at a third-party
+/// Anthropic-compatible endpoint (StepFun, MiniMax, …). The three markers
+/// together exclude `~/.cursor`, `~/.qwen`, `~/.commandcode`, which each
+/// carry `projects/*.jsonl` in other formats. Dirs WITH
+/// `.credentials.json` are the OAuth path's business
+/// (`discover_extra_accounts`) and are excluded here so nothing is
+/// scanned twice.
+pub(crate) fn is_keyless_claude_dir(dir: &Path) -> bool {
+    dir.join("history.jsonl").is_file()
+        && dir.join("projects").is_dir()
+        && dir.join("shell-snapshots").is_dir()
+        && !dir.join(".credentials.json").exists()
+}
+
+/// Keyless Claude config dirs under the usual scan roots (never the
+/// default dir — it is scanned regardless of login state).
+pub fn discover_keyless_dirs() -> Vec<PathBuf> {
+    let default = default_dir();
+    let mut out: Vec<PathBuf> = super::account_scan_roots()
+        .into_iter()
+        .filter(|d| *d != default && is_keyless_claude_dir(d))
+        .collect();
+    out.sort();
+    out.dedup();
     out
 }
 
@@ -964,6 +993,35 @@ mod tests {
         let staged = stage_credentials_tmp(&live).unwrap();
         drop(staged);
         assert!(!tmp.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keyless_dir_requires_the_full_shape_without_oauth() {
+        use super::is_keyless_claude_dir;
+        let dir = std::env::temp_dir().join(format!("pane-keyless-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("projects")).unwrap();
+        std::fs::create_dir_all(dir.join("shell-snapshots")).unwrap();
+        std::fs::write(dir.join("history.jsonl"), "").unwrap();
+
+        // Full shape, no credentials file → keyless.
+        assert!(is_keyless_claude_dir(&dir));
+
+        // An OAuth login present → discover_extra_accounts' business.
+        std::fs::write(dir.join(".credentials.json"), "{}").unwrap();
+        assert!(!is_keyless_claude_dir(&dir));
+        let _ = std::fs::remove_file(dir.join(".credentials.json"));
+
+        // Missing history → not a Claude Code config dir.
+        let _ = std::fs::remove_file(dir.join("history.jsonl"));
+        assert!(!is_keyless_claude_dir(&dir));
+        std::fs::write(dir.join("history.jsonl"), "").unwrap();
+
+        // Missing shell-snapshots → some other tool's projects/ tree.
+        let _ = std::fs::remove_dir_all(dir.join("shell-snapshots"));
+        assert!(!is_keyless_claude_dir(&dir));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

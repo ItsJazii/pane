@@ -660,8 +660,7 @@ pub fn collect_cost_events_in(dir: &Path) -> Vec<(f64, f64, f64, String, String)
 }
 
 fn rows_in_spend_window(rows: &[(f64, f64, f64, String, String)]) -> Vec<(f64, f64, f64, String, String)> {
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    let cutoff_ms = (now_ms - 31 * 86_400 * 1_000) as f64;
+    let cutoff_ms = crate::spend::spend_cutoff_ms(chrono::Local::now()) as f64;
     rows.iter()
         .filter(|(ts, _, _, _, _)| {
             if *ts > 1_000_000_000_000.0 {
@@ -678,8 +677,7 @@ fn rows_in_spend_window(rows: &[(f64, f64, f64, String, String)]) -> Vec<(f64, f
 /// for the monthly Go cycle; this path must not pull that whole ledger.
 fn read_recent_cost_events(db: &Path) -> Result<Vec<(f64, f64, f64, String, String)>, String> {
     let conn = super::open_readonly_sqlite(db)?;
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    let cutoff_ms = now_ms - 31 * 86_400 * 1_000;
+    let cutoff_ms = crate::spend::spend_cutoff_ms(chrono::Local::now());
     // json_extract in WHERE made SQLite parse every blob in the table.
     // Filter on the integer clock first; role/cost stay in Rust.
     // Newest-first via rowid (clustered) — `ORDER BY time_created DESC`

@@ -23,6 +23,23 @@ use crate::providers;
 
 pub const TREND_DAYS: usize = 30;
 
+/// id → month-to-date USD from the last completed scan. `None` until the
+/// first scan finishes so a consumer can tell "not computed yet" from a
+/// provider that genuinely spent nothing.
+static MONTH_COST: OnceLock<Mutex<Option<HashMap<String, f64>>>> = OnceLock::new();
+
+/// Month-to-date local USD for a provider, from the last completed scan.
+/// `None` before the first scan; `Some(0.0)` for an id the scan didn't
+/// produce; `Some(cost)` otherwise.
+pub fn month_to_date_cost(id: &str) -> Option<f64> {
+    MONTH_COST
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()?
+        .as_ref()
+        .map(|m| m.get(id).copied().unwrap_or(0.0))
+}
+
 #[derive(Serialize, Clone)]
 pub struct ModelSpend {
     pub model: String,
@@ -53,6 +70,10 @@ pub struct ProviderSpend {
     /// under-report and the ⚠ says so.
     pub unpriced: u64,
     pub unpriced_models: Vec<String>,
+    /// USD spent since the 1st of the current local calendar month.
+    /// StepFun's Step Plan bills a monthly Credit pool with no quota API,
+    /// so the card estimates Credits from this number.
+    pub month_cost: f64,
 }
 
 impl ProviderSpend {
@@ -134,10 +155,10 @@ impl FileData {
 /// The overflow bucket keeps Pi's routing prefix: take_tagged can only
 /// claim keys that still start with `{card}\u{1}`, so folding a tagged
 /// name into the bare overflow key would strand that usage between cards.
-/// Pi's card set is fixed (`claude`, `codex` — see pi_line), so this adds
-/// at most one bounded key per card.
+/// Pi's card set is fixed (`claude`, `codex`, `aihubmix`, `stepfun` —
+/// see pi_line), so this adds at most one bounded key per card.
 fn overflow_key(model: &str) -> String {
-    for card in ["claude", "codex"] {
+    for card in ["claude", "codex", "aihubmix", "stepfun"] {
         let prefix = format!("{card}{PI_SEP}");
         if model.starts_with(&prefix) {
             return format!("{prefix}{OVERFLOW_MODEL_KEY}");
@@ -693,6 +714,12 @@ fn publish_test_hours(map: HashMap<String, HashMap<i64, (f64, f64)>>, started_ms
 fn build_spend(id: impl Into<String>, name: impl Into<String>, data: FileData) -> ProviderSpend {
     let id = id.into();
     let today = Local::now().date_naive().num_days_from_ce();
+    // Day numbers are days since CE, so the local month's first day is the
+    // month-to-date floor.
+    let month_start = Local::now()
+        .date_naive()
+        .with_day(1)
+        .map(|d| d.num_days_from_ce());
     let mut unpriced_models: Vec<String> = data.unpriced.keys().cloned().collect();
     unpriced_models.sort();
     unpriced_models.truncate(5);
@@ -721,6 +748,7 @@ fn build_spend(id: impl Into<String>, name: impl Into<String>, data: FileData) -
         trend: vec![0.0; TREND_DAYS],
         unpriced: data.unpriced.values().sum(),
         unpriced_models,
+        month_cost: 0.0,
     };
     let mut models: [HashMap<String, (f64, f64)>; 3] =
         [HashMap::new(), HashMap::new(), HashMap::new()];
@@ -738,6 +766,11 @@ fn build_spend(id: impl Into<String>, name: impl Into<String>, data: FileData) -
         }
         if day == today - 1 {
             bump(1, &mut sp.yesterday);
+        }
+        // Month-to-date means up to today — a clock-skewed or synthetic
+        // row dated in the future must not inflate the month total.
+        if month_start.is_some_and(|m| day >= m && day <= today) {
+            sp.month_cost += cost;
         }
         if day > today - TREND_DAYS as i32 {
             bump(2, &mut sp.last30);
@@ -807,8 +840,38 @@ fn oversized_log(path: &Path, size: u64) {
 /// Because links are followed, the walk is iterative and bounded: it stops at
 /// `MAX_SCAN_DEPTH` levels, visits at most `MAX_SCAN_DIRS` directories, and
 /// skips canonical paths already seen, so a link cycle can't spin forever.
+/// The file-scan cutoff: `now − 31 days`, widened back to the start of
+/// the current local month (minus a day of margin) when that reaches
+/// further. A 31-day month containing a DST fall-back is 31d+1h long,
+/// so late in such a month the rolling cutoff would drop files touched
+/// in the month's first hour — which `month_cost` still needs. Never
+/// narrows the window, only widens it by at most a day.
+fn scan_cutoff(now: DateTime<Local>) -> SystemTime {
+    let rolling = SystemTime::from(now) - Duration::from_secs(31 * 86_400);
+    let month_floor = now
+        .date_naive()
+        .with_day(1)
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .and_then(|t| t.and_local_timezone(Local).single())
+        .map(|ms| SystemTime::from(ms) - Duration::from_secs(86_400));
+    match month_floor {
+        Some(floor) => rolling.min(floor),
+        None => rolling,
+    }
+}
+
+/// `scan_cutoff` as epoch milliseconds — the one source of truth for
+/// "how far back spend reads" for callers whose timestamps are ms/s
+/// ints (OpenCode's SQLite `time_created`) instead of file mtimes.
+pub(crate) fn spend_cutoff_ms(now: DateTime<Local>) -> i64 {
+    scan_cutoff(now)
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 fn recent_jsonl_files(root: &Path, out: &mut Vec<PathBuf>) {
-    let cutoff = SystemTime::now() - Duration::from_secs(31 * 86_400);
+    let cutoff = scan_cutoff(Local::now());
     // Canonical paths of link targets already entered. Cycles and aliases can
     // only form through links, so plain directories skip the canonicalize —
     // on Windows it opens a real handle per directory (plus an antivirus
@@ -1780,7 +1843,23 @@ fn claude_line(st: &mut ClaudeFileState, line: &str, data: &mut FileData) {
 /// rows on the wrong card.
 fn split_models(data: &mut FileData, prefix: &str) -> FileData {
     let prefix = prefix.to_ascii_lowercase();
-    let matches = |m: &str| m.to_ascii_lowercase().starts_with(&prefix);
+    split_models_by(data, |m| m.to_ascii_lowercase().starts_with(&prefix))
+}
+
+/// StepFun model slugs as the CLIs log them: bare `step-*`, or the
+/// gateway-prefixed `stepfun/step-*` spelling `builtin_price` already
+/// accepts. Routing matches on this; the logged string is kept as-is.
+/// A StepFun model slug, bare or `stepfun/` gateway-prefixed: the
+/// `step-…` flagship/vision/audio family and the token-billed
+/// `stepaudio-…` chat family. Explicit prefixes only — a slug that
+/// merely starts with "step" (`stepwise-…`) is not StepFun.
+fn is_stepfun_model(m: &str) -> bool {
+    let m = m.to_ascii_lowercase();
+    let m = m.strip_prefix("stepfun/").unwrap_or(&m);
+    m.starts_with("step-") || m.starts_with("stepaudio-")
+}
+
+fn split_models_by(data: &mut FileData, matches: impl Fn(&str) -> bool) -> FileData {
     let mut out = FileData::default();
     data.days.retain(|(day, model), v| {
         if matches(model) {
@@ -1850,15 +1929,16 @@ fn split_kimi_routed(all: &mut FileData) -> FileData {
     out
 }
 
-/// Claude Code writes one JSONL per session under ~/.claude/projects. Each
-/// assistant line carries usage token counts and usually a precomputed
-/// costUSD, which we prefer over our own pricing table.
+/// Claude Code writes one JSONL per session under <CLAUDE_CONFIG_DIR>/
+/// projects (~/.claude by default). Each assistant line carries usage
+/// token counts and usually a precomputed costUSD, which we prefer over
+/// our own pricing table.
 ///
 /// Claude Code can also run against MiniMax's Anthropic-compatible endpoint
 /// (ANTHROPIC_BASE_URL); those sessions log MiniMax models into the same
 /// files. That usage is split out and returned separately — it belongs on
 /// the MiniMax card, not Claude's.
-fn claude(extra: FileData) -> (ProviderSpend, FileData, FileData, FileData) {
+fn claude(extra: FileData) -> (ProviderSpend, FileData, FileData, FileData, FileData) {
     let root = std::env::var("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| dirs::home_dir().unwrap_or_default().join(".claude"))
@@ -1869,6 +1949,18 @@ fn claude(extra: FileData) -> (ProviderSpend, FileData, FileData, FileData) {
     let mut all = FileData::default();
     for file in files {
         merge_data(&mut all, claude_file(&file));
+    }
+    // Keyless config dirs (API-key sessions against StepFun/MiniMax/…
+    // endpoints, e.g. CLAUDE_CONFIG_DIR=~/.claude-step) log the third-party
+    // model slug, so they join before the splits and route by model like
+    // everything else; native Claude rows there (an API key pointed
+    // straight at Anthropic) stay on the Claude card.
+    for dir in providers::claude::discover_keyless_dirs() {
+        let mut files2 = Vec::new();
+        recent_jsonl_files(&dir.join("projects"), &mut files2);
+        for file in files2 {
+            merge_data(&mut all, claude_file(&file));
+        }
     }
     // Usage from other scanners that belongs on this card (pi sessions)
     // driving a Claude account) joins before the splits below, so it gets
@@ -1882,7 +1974,10 @@ fn claude(extra: FileData) -> (ProviderSpend, FileData, FileData, FileData) {
     // Kimi slugs likewise mean Moonshot billed the session (Anthropic-
     // compatible endpoint or a router) — Kimi's card owns those dollars.
     let kimi_routed = split_kimi_routed(&mut all);
-    (build_spend("claude", "Claude", all), minimax, qwen_via_aihubmix, kimi_routed)
+    // step-* models mean the session ran against StepFun's Step Plan
+    // Anthropic-compatible endpoint — the StepFun card owns those rows.
+    let stepfun = split_models_by(&mut all, is_stepfun_model);
+    (build_spend("claude", "Claude", all), minimax, qwen_via_aihubmix, kimi_routed, stepfun)
 }
 
 /// Spend for each discovered extra Claude account, scanned from that
@@ -1890,11 +1985,12 @@ fn claude(extra: FileData) -> (ProviderSpend, FileData, FileData, FileData) {
 /// scopes never mix). MiniMax/qwen-routed rows split out the same way the
 /// default account's do and are handed back for the caller to merge into
 /// those cards.
-fn claude_extra_accounts() -> (Vec<ProviderSpend>, FileData, FileData, FileData) {
+fn claude_extra_accounts() -> (Vec<ProviderSpend>, FileData, FileData, FileData, FileData) {
     let mut spends = Vec::new();
     let mut minimax_extra = FileData::default();
     let mut qwen_extra = FileData::default();
     let mut kimi_extra = FileData::default();
+    let mut stepfun_extra = FileData::default();
     for acct in providers::claude::discover_extra_accounts() {
         let root = acct.dir.join("projects");
         let mut files = Vec::new();
@@ -1906,9 +2002,10 @@ fn claude_extra_accounts() -> (Vec<ProviderSpend>, FileData, FileData, FileData)
         merge_data(&mut minimax_extra, split_models(&mut all, "MiniMax"));
         merge_data(&mut qwen_extra, split_models(&mut all, "qwen"));
         merge_data(&mut kimi_extra, split_kimi_routed(&mut all));
+        merge_data(&mut stepfun_extra, split_models_by(&mut all, is_stepfun_model));
         spends.push(build_spend(acct.id, acct.name, all));
     }
-    (spends, minimax_extra, qwen_extra, kimi_extra)
+    (spends, minimax_extra, qwen_extra, kimi_extra, stepfun_extra)
 }
 
 /// One Claude session file. A restored checkpoint skips the 1 MB
@@ -1966,6 +2063,13 @@ fn minimax(extra: FileData) -> ProviderSpend {
         }
     }
     build_spend("minimax", "MiniMax", data)
+}
+
+/// StepFun spend: whatever other CLIs logged against the Step Plan
+/// endpoint (step-* models split out of the Claude/Codex/OpenCode scans
+/// and passed in). StepFun publishes no local usage store of its own.
+fn stepfun(extra: FileData) -> ProviderSpend {
+    build_spend("stepfun", "StepFun", extra)
 }
 
 /// Which spend slice a Hermes row belongs to. MiniMax- and OpenRouter-routed
@@ -2148,10 +2252,12 @@ fn codex_dated_base(model: &str) -> String {
 /// intentionally not Cursor's `-fast` supplement multipliers. Unknown models
 /// use the supplement's multiplier when one exists, else 2x. Kimi/Moonshot
 /// slugs billed through a Codex router are not OpenAI-tiered — leave them
-/// at 1× so they merge with the Kimi CLI's own (unmultiplied) rows.
+/// at 1× so they merge with the Kimi CLI's own (unmultiplied) rows. Same
+/// for StepFun `step-*` slugs (bare or `stepfun/` prefixed): Step Plan
+/// bills its own list prices, not OpenAI's fast tier.
 fn codex_priority_multiplier(dated: &str, rate_model: &str) -> f64 {
     let lower = rate_model.to_ascii_lowercase();
-    if lower.contains("kimi") || lower.contains("moonshot") {
+    if lower.contains("kimi") || lower.contains("moonshot") || is_stepfun_model(rate_model) {
         return 1.0;
     }
     match dated {
@@ -2459,7 +2565,7 @@ fn codex_scan(home: &Path) -> FileData {
     all
 }
 
-fn codex(extra: FileData) -> (ProviderSpend, FileData) {
+fn codex(extra: FileData) -> (ProviderSpend, FileData, FileData) {
     let home = std::env::var("CODEX_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| dirs::home_dir().unwrap_or_default().join(".codex"));
@@ -2470,44 +2576,106 @@ fn codex(extra: FileData) -> (ProviderSpend, FileData) {
     // them as "kimi-oauth/k3" etc.) bill the Kimi plan, not the ChatGPT
     // subscription — hand them to the Kimi card.
     let kimi_routed = split_kimi_routed(&mut all);
-    (build_spend("codex", "Codex", all), kimi_routed)
+    // step-* slugs mean the session ran against StepFun's Step Plan
+    // endpoint — those dollars belong on the StepFun card.
+    let stepfun_routed = split_models_by(&mut all, is_stepfun_model);
+    (build_spend("codex", "Codex", all), kimi_routed, stepfun_routed)
 }
 
 /// Spend for each discovered extra Codex account, scanned from that
-/// account's own home (each keeps its own sessions/ logs). Kimi-routed
-/// rows split out the same way the default account's do.
-fn codex_extra_accounts() -> (Vec<ProviderSpend>, FileData) {
+/// account's own home (each keeps its own sessions/ logs). Kimi- and
+/// StepFun-routed rows split out the same way the default account's do.
+fn codex_extra_accounts() -> (Vec<ProviderSpend>, FileData, FileData) {
     let mut spends = Vec::new();
     let mut kimi_extra = FileData::default();
+    let mut stepfun_extra = FileData::default();
     for acct in providers::codex::discover_extra_accounts() {
         let mut data = codex_scan(&acct.dir);
         merge_data(&mut kimi_extra, split_kimi_routed(&mut data));
+        merge_data(&mut stepfun_extra, split_models_by(&mut data, is_stepfun_model));
         spends.push(build_spend(acct.id, acct.name, data));
     }
-    (spends, kimi_extra)
+    (spends, kimi_extra, stepfun_extra)
 }
 
 // ---------------------------------------------------------------------------
 // Pi coding agent — folded into the cards of the accounts it drives
 // ---------------------------------------------------------------------------
 
-/// Where pi keeps session logs, mirroring pi's own resolution: an explicit
-/// `PI_CODING_AGENT_SESSION_DIR` wins, else `PI_CODING_AGENT_DIR/sessions`
-/// (config-dir override), else the default `~/.pi/agent/sessions`.
+/// Shared pi-family session-dir resolution: an explicit `*_SESSION_DIR`
+/// wins, else `*_DIR/sessions` (the config-dir override), else the
+/// per-tool default under home. Empty/whitespace env values count as
+/// unset — pi and Step Code document the same convention.
+fn sessions_dir_of(
+    session_env: Option<&str>,
+    agent_env: Option<&str>,
+    home: &Path,
+    default_tail: &[&str],
+) -> PathBuf {
+    if let Some(dir) = session_env.map(str::trim).filter(|d| !d.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    if let Some(dir) = agent_env.map(str::trim).filter(|d| !d.is_empty()) {
+        return PathBuf::from(dir).join("sessions");
+    }
+    default_tail.iter().fold(home.to_path_buf(), |p, seg| p.join(seg))
+}
+
+/// Where pi keeps session logs, mirroring pi's own resolution:
+/// `PI_CODING_AGENT_SESSION_DIR`, else `PI_CODING_AGENT_DIR/sessions`,
+/// else the default `~/.pi/agent/sessions`.
 fn pi_sessions_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("PI_CODING_AGENT_SESSION_DIR") {
-        let dir = dir.trim();
-        if !dir.is_empty() {
-            return PathBuf::from(dir);
-        }
+    sessions_dir_of(
+        std::env::var("PI_CODING_AGENT_SESSION_DIR").ok().as_deref(),
+        std::env::var("PI_CODING_AGENT_DIR").ok().as_deref(),
+        &dirs::home_dir().unwrap_or_default(),
+        &[".pi", "agent", "sessions"],
+    )
+}
+
+/// Step Code, StepFun's official coding CLI, is a pi fork writing the
+/// same v3 session format: `STEP_CODING_AGENT_SESSION_DIR`, else
+/// `STEP_CODING_AGENT_DIR/sessions`, else `~/.stepcode/agent/sessions`.
+fn stepcode_sessions_dir() -> PathBuf {
+    sessions_dir_of(
+        std::env::var("STEP_CODING_AGENT_SESSION_DIR").ok().as_deref(),
+        std::env::var("STEP_CODING_AGENT_DIR").ok().as_deref(),
+        &dirs::home_dir().unwrap_or_default(),
+        &[".stepcode", "agent", "sessions"],
+    )
+}
+
+/// pi plus oh-my-pi ("omp") plus Step Code — an omp or Step Code
+/// session file is byte-for-byte the pi format, only rooted at
+/// `~/.omp/agent/sessions` / `~/.stepcode/agent/sessions` instead.
+/// Deduped against every earlier entry in case an env override points
+/// one tool's dir at another's tree.
+fn pi_sessions_dirs() -> Vec<PathBuf> {
+    let omp = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".omp")
+        .join("agent")
+        .join("sessions");
+    let mut out: Vec<PathBuf> = Vec::new();
+    for dir in [pi_sessions_dir(), omp, stepcode_sessions_dir()] {
+        push_unique(&mut out, dir);
     }
-    if let Ok(dir) = std::env::var("PI_CODING_AGENT_DIR") {
-        let dir = dir.trim();
-        if !dir.is_empty() {
-            return PathBuf::from(dir).join("sessions");
-        }
+    out
+}
+
+/// Dedupe by canonical identity, not spelling: two env spellings that
+/// resolve to the same directory (`a` vs `a/.`, `a/../a`, a symlink)
+/// would otherwise scan the same files twice. A dir that doesn't exist
+/// can't canonicalize and falls back to its spelling — fine, there's
+/// nothing to double-count. The original path is kept for scanning.
+fn push_unique(out: &mut Vec<PathBuf>, dir: PathBuf) {
+    let key = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+    let seen = out.iter().any(|existing| {
+        std::fs::canonicalize(existing).unwrap_or_else(|_| existing.clone()) == key
+    });
+    if !seen {
+        out.push(dir);
     }
-    dirs::home_dir().unwrap_or_default().join(".pi").join("agent").join("sessions")
 }
 
 /// The per-file cache stores ONE FileData per path, but a pi file can hold
@@ -2518,11 +2686,16 @@ const PI_SEP: char = '\u{1}';
 /// One pi session-log line → spend event. Only assistant "message" lines
 /// carry usage; pi's `provider` field says whose account it drove
 /// (mirroring upstream OpenUsage's mapping — pi providers with no local
-/// spend source here are skipped). Pi records an authoritative
-/// per-message usage.cost.total like OpenCode: a carried cost > 0 wins,
-/// a $0 cost (subscription usage pi doesn't impute) prices through the
-/// catalog. Duplicate message ids within a file (forked-session replays)
-/// keep the first occurrence.
+/// spend source here are skipped). `anthropic`/`claude-agent-sdk` →
+/// Claude, `openai-codex` → Codex, `aihubmix` → AihubMix, `step` →
+/// StepFun (Step Code's provider name), and any `stepfun*` provider
+/// name (omp calls its CN endpoint `stepfun-cn`) → StepFun — as does a
+/// `step-*` model on an unrecognized provider, since a custom-named
+/// StepFun endpoint still logs the upstream slug. Pi
+/// records an authoritative per-message usage.cost.total like OpenCode:
+/// a carried cost > 0 wins, a $0 cost (omp/subscription usage that isn't
+/// imputed) prices through the catalog. Duplicate message ids within a
+/// file (forked-session replays) keep the first occurrence.
 fn pi_line(seen: &mut HashSet<String>, line: &str, data: &mut FileData) {
     if !line.contains("\"usage\"") {
         return;
@@ -2536,9 +2709,20 @@ fn pi_line(seen: &mut HashSet<String>, line: &str, data: &mut FileData) {
     if msg.get("role").and_then(Value::as_str) != Some("assistant") {
         return;
     }
-    let card = match msg.get("provider").and_then(Value::as_str) {
-        Some("anthropic" | "claude-agent-sdk") => "claude",
-        Some("openai-codex") => "codex",
+    let provider = msg.get("provider").and_then(Value::as_str).unwrap_or("");
+    let model = msg
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .unwrap_or("unknown");
+    let card = match provider {
+        "anthropic" | "claude-agent-sdk" => "claude",
+        "openai-codex" => "codex",
+        "aihubmix" => "aihubmix",
+        "step" => "stepfun",
+        p if p.to_lowercase().starts_with("stepfun") => "stepfun",
+        _ if is_stepfun_model(model) => "stepfun",
         _ => return,
     };
     if let Some(id) = v.get("id").and_then(Value::as_str) {
@@ -2561,12 +2745,6 @@ fn pi_line(seen: &mut HashSet<String>, line: &str, data: &mut FileData) {
     if tokens <= 0.0 && carried.unwrap_or(0.0) <= 0.0 {
         return;
     }
-    let model = msg
-        .get("model")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|m| !m.is_empty())
-        .unwrap_or("unknown");
     let tagged = format!("{card}{PI_SEP}{model}");
     if let Some(c) = carried.filter(|c| *c > 0.0) {
         add_event(data, ts, &tagged, c, tokens);
@@ -2622,11 +2800,15 @@ fn take_tagged(data: &mut FileData, card: &str) -> FileData {
 /// Pi is a bring-your-own-account agent, so its usage belongs on the card
 /// of the account it drove rather than a card of its own — a Claude sub
 /// used inside pi lands on the Claude card, Codex likewise (the fold
-/// upstream OpenUsage ships).
-fn pi() -> (FileData, FileData) {
-    let root = pi_sessions_dir();
+/// upstream OpenUsage ships). oh-my-pi ("omp") writes the same format
+/// under `~/.omp/agent/sessions`, and Step Code (StepFun's pi-fork CLI)
+/// under `~/.stepcode/agent/sessions`; their StepFun/AihubMix rows fold
+/// the same way.
+fn pi() -> (FileData, FileData, FileData, FileData) {
     let mut files = Vec::new();
-    recent_jsonl_files(&root, &mut files);
+    for root in pi_sessions_dirs() {
+        recent_jsonl_files(&root, &mut files);
+    }
     let mut all = FileData::default();
     for file in files {
         if cache_unchanged(&file) {
@@ -2647,7 +2829,9 @@ fn pi() -> (FileData, FileData) {
     }
     let claude = take_tagged(&mut all, "claude");
     let codex = take_tagged(&mut all, "codex");
-    (claude, codex)
+    let aihubmix = take_tagged(&mut all, "aihubmix");
+    let stepfun = take_tagged(&mut all, "stepfun");
+    (claude, codex, aihubmix, stepfun)
 }
 
 /// Grok CLI appends one global log at ~/.grok/logs/unified.jsonl (or under
@@ -2757,35 +2941,46 @@ fn grok_line(model_by_pid: &mut HashMap<i64, String>, line: &str, data: &mut Fil
 /// spend slice — their dollars belong to that account, and the split gives
 /// the card its Today/Yesterday/30d rows and Usage Trend; everything else
 /// stays under OpenCode.
-/// Returns OpenCode's spend plus the AihubMix rows as raw FileData — the
-/// caller merges in AihubMix traffic from other CLIs (Claude Code) before
-/// building the card's spend.
+/// Returns OpenCode's spend plus the AihubMix and StepFun rows as raw
+/// FileData — the caller merges in traffic from other CLIs (Claude Code,
+/// Codex) before building each card's spend. StepFun rows arrive either
+/// under a `stepfun` provider id or as `step-*` model slugs logged while
+/// pointed at the Step Plan base URL.
 fn fold_opencode_data(
     events: impl IntoIterator<Item = (f64, f64, f64, String, String)>,
-) -> (FileData, FileData) {
+) -> (FileData, FileData, FileData) {
     let mut oc = FileData::default();
     let mut aihubmix = FileData::default();
+    let mut stepfun = FileData::default();
     for (ts_ms, cost, tokens, model, provider) in events {
         if let Some(ts) = DateTime::from_timestamp_millis(ts_ms as i64) {
-            let target = if provider == "aihubmix" { &mut aihubmix } else { &mut oc };
+            let target = if provider == "aihubmix" {
+                &mut aihubmix
+            } else if provider == "stepfun" || is_stepfun_model(&model) {
+                &mut stepfun
+            } else {
+                &mut oc
+            };
             add_event(target, ts, &model, cost, tokens);
         }
     }
-    (oc, aihubmix)
+    (oc, aihubmix, stepfun)
 }
 
 /// One discovery pass, then partition. Calling extra_ledger_homes twice
 /// could move a dir across the default/extra boundary if auth swapped
 /// between the two reads and double-count that ledger.
-fn opencode_accounts() -> (ProviderSpend, Vec<ProviderSpend>, FileData) {
+fn opencode_accounts() -> (ProviderSpend, Vec<ProviderSpend>, FileData, FileData) {
     let homes = providers::opencode::extra_ledger_homes();
-    let (mut oc, mut aihubmix) =
+    let (mut oc, mut aihubmix, mut stepfun) =
         fold_opencode_data(providers::opencode::collect_cost_events());
     let mut groups: std::collections::BTreeMap<String, (String, FileData)> =
         std::collections::BTreeMap::new();
     for (id, name, dir) in homes {
-        let (data, extra_ai) = fold_opencode_data(providers::opencode::collect_cost_events_in(&dir));
+        let (data, extra_ai, extra_sf) =
+            fold_opencode_data(providers::opencode::collect_cost_events_in(&dir));
         merge_data(&mut aihubmix, extra_ai);
+        merge_data(&mut stepfun, extra_sf);
         if id == "opencode" {
             merge_data(&mut oc, data);
         } else {
@@ -2797,7 +2992,7 @@ fn opencode_accounts() -> (ProviderSpend, Vec<ProviderSpend>, FileData) {
         .into_iter()
         .map(|(id, (name, data))| build_spend(id, name, data))
         .collect();
-    (build_spend("opencode", "OpenCode", oc), extras, aihubmix)
+    (build_spend("opencode", "OpenCode", oc), extras, aihubmix, stepfun)
 }
 
 /// Devin CLI keeps per-request token metrics in its local sessions.db
@@ -3197,26 +3392,28 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
     if let Ok(mut s) = staged_hours().lock() {
         s.clear();
     }
-    let (pi_claude, pi_codex) = pi();
+    let (pi_claude, pi_codex, pi_aihubmix, pi_stepfun) = pi();
     // Claude / Codex / OpenCode / Devin used to run one after another on
     // this machine that is minutes of IO. They touch different trees.
     let mut list = std::thread::scope(|s| {
         let claude_t = s.spawn(|| {
             spend_step("claude", || {
-                let (sp, mut mm, mut qw, mut km) = claude(pi_claude);
-                let (extras, mm2, qw2, km2) = claude_extra_accounts();
+                let (sp, mut mm, mut qw, mut km, mut sf) = claude(pi_claude);
+                let (extras, mm2, qw2, km2, sf2) = claude_extra_accounts();
                 merge_data(&mut mm, mm2);
                 merge_data(&mut qw, qw2);
                 merge_data(&mut km, km2);
-                (sp, extras, mm, qw, km)
+                merge_data(&mut sf, sf2);
+                (sp, extras, mm, qw, km, sf)
             })
         });
         let codex_t = s.spawn(|| {
             spend_step("codex", || {
-                let (sp, mut km) = codex(pi_codex);
-                let (extras, km2) = codex_extra_accounts();
+                let (sp, mut km, mut sf) = codex(pi_codex);
+                let (extras, km2, sf2) = codex_extra_accounts();
                 merge_data(&mut km, km2);
-                (sp, extras, km)
+                merge_data(&mut sf, sf2);
+                (sp, extras, km, sf)
             })
         });
         let oc_t = s.spawn(|| spend_step("opencode", opencode_accounts));
@@ -3225,26 +3422,41 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
         let devin_t = s.spawn(|| spend_step("devin", devin));
         let qwen_t = s.spawn(|| spend_step("qwen", qwen));
 
-        let (claude_sp, extra_claude_spends, mut minimax_extra, qwen_via_claude, mut kimi_routed) =
+        let (claude_sp, extra_claude_spends, mut minimax_extra, qwen_via_claude, mut kimi_routed, mut stepfun_data) =
             take_join(claude_t, "claude", (
                 build_spend("claude", "Claude", FileData::default()),
                 Vec::new(),
                 FileData::default(),
                 FileData::default(),
                 FileData::default(),
+                FileData::default(),
             ));
-        let (codex_sp, extra_codex_spends, kimi_via_codex) = take_join(
+        let (codex_sp, extra_codex_spends, kimi_via_codex, stepfun_via_codex) = take_join(
             codex_t,
             "codex",
-            (build_spend("codex", "Codex", FileData::default()), Vec::new(), FileData::default()),
+            (
+                build_spend("codex", "Codex", FileData::default()),
+                Vec::new(),
+                FileData::default(),
+                FileData::default(),
+            ),
         );
         merge_data(&mut kimi_routed, kimi_via_codex);
-        let (opencode_sp, extra_opencode_spends, mut aihubmix_data) = take_join(
+        merge_data(&mut stepfun_data, stepfun_via_codex);
+        let (opencode_sp, extra_opencode_spends, mut aihubmix_data, stepfun_via_opencode) = take_join(
             oc_t,
             "opencode",
-            (build_spend("opencode", "OpenCode", FileData::default()), Vec::new(), FileData::default()),
+            (
+                build_spend("opencode", "OpenCode", FileData::default()),
+                Vec::new(),
+                FileData::default(),
+                FileData::default(),
+            ),
         );
         merge_data(&mut aihubmix_data, qwen_via_claude);
+        merge_data(&mut stepfun_data, stepfun_via_opencode);
+        merge_data(&mut aihubmix_data, pi_aihubmix);
+        merge_data(&mut stepfun_data, pi_stepfun);
         let mut hermes_rest = Vec::new();
         for (id, name, data) in take_join(hermes_t, "hermes", Vec::new()) {
             if id == "minimax" {
@@ -3261,6 +3473,7 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
             build_spend("aihubmix", "AihubMix", aihubmix_data),
             take_join(devin_t, "devin", build_spend("devin", "Devin", FileData::default())),
             minimax(minimax_extra),
+            stepfun(stepfun_data),
             kimi(kimi_routed),
             take_join(qwen_t, "qwen", build_spend("qwen", "Qwen Code", FileData::default())),
         ];
@@ -3287,6 +3500,15 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
         .unwrap_or_default();
     if let Ok(mut recent) = recent_hours().lock() {
         *recent = Some((staged, scan_started_ms, !SCAN_INCOMPLETE.load(Ordering::Relaxed)));
+    }
+    // Publish before has_data filters: a scanned-but-quiet provider still
+    // reads as Some(0.0) rather than "no scan yet".
+    if let Ok(mut slot) = MONTH_COST.get_or_init(|| Mutex::new(None)).lock() {
+        *slot = Some(
+            list.iter()
+                .map(|sp| (sp.id.clone(), sp.month_cost))
+                .collect(),
+        );
     }
     list.into_iter().filter(ProviderSpend::has_data).collect()
 }
@@ -4227,6 +4449,17 @@ mod tests {
         assert_eq!(codex_dated_base("gpt-6-astra-2026-09-01"), "gpt-6-astra");
         assert_eq!(codex_long_context("gpt-6-astra"), Some((20.0, 75.0, 2.0)));
         assert_eq!(codex_priority_multiplier("gpt-6-astra", "gpt-6-astra"), 2.0);
+        // StepFun slugs aren't OpenAI-tiered — no fast multiplier, bare
+        // or gateway-prefixed, while gpt models stay tiered.
+        assert_eq!(
+            codex_priority_multiplier("step-3.7-flash", "step-3.7-flash"),
+            1.0
+        );
+        assert_eq!(
+            codex_priority_multiplier("stepfun/step-5-preview", "stepfun/step-5-preview"),
+            1.0
+        );
+        assert_eq!(codex_priority_multiplier("gpt-5.4", "gpt-5.4"), 2.0);
     }
 
     fn dated_astra_session(model: &str, input: f64, output: f64, fast: bool) -> FileData {
@@ -4567,6 +4800,141 @@ mod tests {
         assert_eq!(codex.unpriced.get("pi-test-model"), Some(&1));
     }
 
+    #[test]
+    fn pi_lines_route_stepfun_and_aihubmix() {
+        let mut seen = HashSet::new();
+        let mut data = FileData::default();
+        // omp writes the pi format: provider stepfun-cn / aihubmix, $0
+        // carried cost (omp doesn't impute) → priced through the catalog.
+        let stepfun_cn = json!({"type": "message", "id": "o1", "timestamp": "2026-08-03T10:00:00Z",
+            "message": {"role": "assistant", "provider": "stepfun-cn", "model": "step-5-preview",
+                        "usage": {"input": 25558.0, "output": 690.0, "cacheRead": 256.0,
+                                  "cacheWrite": 0.0, "totalTokens": 26504.0,
+                                  "cost": {"total": 0.0}}}})
+        .to_string();
+        let aihubmix = stepfun_cn
+            .replace("\"o1\"", "\"o2\"")
+            .replace("\"stepfun-cn\"", "\"aihubmix\"");
+        // A custom provider name pointed at StepFun still routes by model.
+        let gateway = json!({"type": "message", "id": "o3", "timestamp": "2026-08-03T10:01:00Z",
+            "message": {"role": "assistant", "provider": "my-gateway", "model": "step-3.7-flash",
+                        "usage": {"input": 100.0, "output": 50.0, "cacheRead": 0.0,
+                                  "cacheWrite": 0.0, "totalTokens": 150.0,
+                                  "cost": {"total": 0.0}}}})
+        .to_string();
+        // A 402 error row carries all-zero usage → dropped by the
+        // no-tokens-no-dollars rule.
+        let err = json!({"type": "message", "id": "o4", "timestamp": "2026-08-03T10:02:00Z",
+            "message": {"role": "assistant", "provider": "stepfun-cn", "model": "step-5-preview",
+                        "stopReason": "error", "errorStatus": 402,
+                        "usage": {"input": 0.0, "output": 0.0, "cacheRead": 0.0,
+                                  "cacheWrite": 0.0, "totalTokens": 0.0,
+                                  "cost": {"total": 0.0}}}})
+        .to_string();
+        for line in [&stepfun_cn, &aihubmix, &gateway, &err] {
+            pi_line(&mut seen, line, &mut data);
+        }
+
+        let claude = take_tagged(&mut data, "claude");
+        let codex = take_tagged(&mut data, "codex");
+        let mix = take_tagged(&mut data, "aihubmix");
+        let stepfun = take_tagged(&mut data, "stepfun");
+        assert!(data.days.is_empty() && data.unpriced.is_empty());
+        assert_eq!(tokens_sum(&claude), 0.0);
+        assert_eq!(tokens_sum(&codex), 0.0);
+        assert_eq!(tokens_sum(&mix), 26504.0);
+        // stepfun-cn + the model-prefix fallback; the 402 row contributed
+        // nothing.
+        assert_eq!(tokens_sum(&stepfun), 26504.0 + 150.0);
+        assert!(stepfun.days.keys().any(|(_, m)| m == "step-5-preview"));
+        assert!(stepfun.days.keys().any(|(_, m)| m == "step-3.7-flash"));
+    }
+
+    /// Step Code (StepFun's pi fork) writes the same v3 format under
+    /// `provider: "step"` — routed to the StepFun card explicitly, so
+    /// even a non-`step-*` model slug lands there.
+    #[test]
+    fn stepcode_lines_route_to_stepfun() {
+        let mut seen = HashSet::new();
+        let mut data = FileData::default();
+        let normal = json!({"type": "message", "id": "s1", "timestamp": "2026-09-23T10:00:00Z",
+            "message": {"role": "assistant", "provider": "step", "model": "step-5-preview",
+                        "usage": {"input": 30000.0, "output": 1000.0, "cacheRead": 37.0,
+                                  "cacheWrite": 0.0, "totalTokens": 31037.0,
+                                  "cost": {"total": 0.0}}}})
+        .to_string();
+        // provider "step" routes on the provider name alone — no
+        // step-* model fallback needed.
+        let odd_model = normal
+            .replace("\"s1\"", "\"s2\"")
+            .replace("\"step-5-preview\"", "\"custom-alias\"");
+        pi_line(&mut seen, &normal, &mut data);
+        pi_line(&mut seen, &odd_model, &mut data);
+
+        let stepfun = take_tagged(&mut data, "stepfun");
+        assert!(data.days.is_empty());
+        assert_eq!(tokens_sum(&stepfun), 2.0 * 31037.0);
+        assert!(stepfun.days.keys().any(|(_, m)| m == "custom-alias"));
+    }
+
+    #[test]
+    fn sessions_dir_env_precedence() {
+        let home = Path::new("/home/u");
+        let tail = [".pi", "agent", "sessions"];
+        // The explicit session dir wins outright (and is trimmed).
+        assert_eq!(
+            sessions_dir_of(Some(" /x "), Some("/y"), home, &tail),
+            PathBuf::from("/x")
+        );
+        // The config-dir override appends /sessions.
+        assert_eq!(
+            sessions_dir_of(None, Some("/y"), home, &tail),
+            PathBuf::from("/y/sessions")
+        );
+        // Empty/whitespace env values count as unset → home default.
+        assert_eq!(
+            sessions_dir_of(Some("  "), Some("\t"), home, &tail),
+            home.join(".pi").join("agent").join("sessions")
+        );
+        assert_eq!(
+            sessions_dir_of(None, None, home, &tail),
+            home.join(".pi").join("agent").join("sessions")
+        );
+    }
+
+    #[test]
+    fn pi_sessions_dirs_dedupes_against_every_earlier_entry() {
+        let mut out = Vec::new();
+        for d in ["/a", "/b", "/a", "/c", "/b"] {
+            push_unique(&mut out, PathBuf::from(d));
+        }
+        assert_eq!(
+            out,
+            vec![PathBuf::from("/a"), PathBuf::from("/b"), PathBuf::from("/c")]
+        );
+    }
+
+    #[test]
+    fn push_unique_dedupes_spellings_of_one_real_dir() {
+        // Two spellings of one existing dir must not become two roots —
+        // the scan would count every file twice.
+        let base = std::env::temp_dir()
+            .join(format!("pane-pi-dedupe-{}", std::process::id()));
+        let dir = base.join("real");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut out = Vec::new();
+        push_unique(&mut out, dir.clone());
+        push_unique(&mut out, dir.join(".")); // same dir, `a/.` spelling
+        push_unique(&mut out, base.join("other").join("..").join("real")); // `a/../a`
+        assert_eq!(out, vec![dir]);
+        // A missing dir can't canonicalize and dedupes by spelling only.
+        let ghost = base.join("missing");
+        push_unique(&mut out, ghost.clone());
+        push_unique(&mut out, ghost.clone());
+        assert_eq!(out.len(), 2);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// Overflowed Pi keys keep their routing prefix: take_tagged must still
     /// claim them, so capped usage lands on the right card instead of
     /// vanishing with the discarded scan.
@@ -4635,6 +5003,120 @@ mod tests {
         assert_eq!(mm.days.len(), 2);
         assert_eq!(mm.days[&(1000, "MiniMax-M3".to_string())], (0.5, 50.0));
         assert_eq!(mm.unpriced.get("MiniMax-Unknown"), Some(&3));
+    }
+
+    #[test]
+    fn build_spend_counts_month_to_date() {
+        let today = Local::now().date_naive().num_days_from_ce();
+        let month_start = Local::now()
+            .date_naive()
+            .with_day(1)
+            .unwrap()
+            .num_days_from_ce();
+        let mut data = FileData::default();
+        // Last month's final day: $5 that must not count toward month_cost.
+        data.days.insert((month_start - 1, "m".into()), (5.0, 100.0));
+        data.days.insert((today, "m".into()), (2.0, 50.0));
+        // Tomorrow's $9 (clock skew, synthetic row): also excluded.
+        data.days.insert((today + 1, "m".into()), (9.0, 90.0));
+        let sp = build_spend("test", "Test", data);
+        assert_eq!(sp.month_cost, 2.0);
+    }
+
+    /// Late in a 31-day month (the DST fall-back makes it 31d+1h), the
+    /// cutoff must still reach the month's first hour — files touched
+    /// there feed `month_cost`. Mid-month it's just now − 31d.
+    #[test]
+    fn scan_cutoff_covers_the_whole_current_month() {
+        use chrono::TimeZone;
+        let local_dt = |y, mo, d, h, mi| {
+            Local
+                .with_ymd_and_hms(y, mo, d, h, mi, 0)
+                .single()
+                .expect("unambiguous local time")
+        };
+        let last_day = local_dt(2026, 10, 31, 23, 30);
+        let month_start = local_dt(2026, 10, 1, 0, 0);
+        assert!(scan_cutoff(last_day) <= SystemTime::from(month_start));
+        let mid = local_dt(2026, 10, 15, 12, 0);
+        assert_eq!(
+            scan_cutoff(mid),
+            SystemTime::from(mid) - Duration::from_secs(31 * 86_400)
+        );
+        // The ms view OpenCode uses is the same instant, one source of
+        // truth for every spend window.
+        for now in [last_day, mid] {
+            assert_eq!(
+                spend_cutoff_ms(now),
+                scan_cutoff(now)
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as i64
+            );
+        }
+    }
+
+    #[test]
+    fn split_models_reroutes_stepfun_usage() {
+        let mut data = FileData::default();
+        data.days.insert((1000, "claude-fable-5".into()), (5.0, 100.0));
+        data.days.insert((1000, "step-3.7-flash".into()), (0.5, 50.0));
+        data.days.insert((1001, "step-3.5-flash".into()), (0.2, 20.0));
+        // The unpublished preview routes by prefix too (stays unpriced ⚠).
+        data.days.insert((1001, "step-5-preview".into()), (0.1, 10.0));
+        // The gateway-prefixed spelling (Claude/Codex logs can carry
+        // `stepfun/step-…`) routes the same — string kept as logged.
+        data.days.insert((1002, "stepfun/step-3.7-flash".into()), (0.3, 30.0));
+        data.days.insert((1002, "STEPFUN/Step-5-preview".into()), (0.4, 40.0));
+        // The token-billed audio-chat family routes too, prefixed or not.
+        data.days.insert((1003, "stepaudio-2.5-chat".into()), (0.6, 60.0));
+        data.days
+            .insert((1003, "stepfun/stepaudio-2.5-chat".into()), (0.7, 70.0));
+        // "step…" alone isn't a StepFun family — unrelated slugs stay.
+        data.days.insert((1003, "stepwise-model".into()), (9.0, 90.0));
+        data.unpriced.insert("step-3.7-flash".into(), 3);
+        data.unpriced.insert("stepfun/step-9-ultra".into(), 2);
+        data.unpriced.insert("mystery-model".into(), 1);
+
+        let sf = split_models_by(&mut data, is_stepfun_model);
+        assert_eq!(data.days.len(), 2);
+        assert_eq!(data.unpriced.len(), 1);
+        assert_eq!(sf.days.len(), 7);
+        assert_eq!(sf.days[&(1000, "step-3.7-flash".to_string())], (0.5, 50.0));
+        assert_eq!(
+            sf.days[&(1002, "stepfun/step-3.7-flash".to_string())],
+            (0.3, 30.0)
+        );
+        assert_eq!(
+            sf.days[&(1002, "STEPFUN/Step-5-preview".to_string())],
+            (0.4, 40.0)
+        );
+        assert_eq!(
+            sf.days[&(1003, "stepaudio-2.5-chat".to_string())],
+            (0.6, 60.0)
+        );
+        assert_eq!(
+            sf.days[&(1003, "stepfun/stepaudio-2.5-chat".to_string())],
+            (0.7, 70.0)
+        );
+        assert_eq!(sf.unpriced.get("step-3.7-flash"), Some(&3));
+        assert_eq!(sf.unpriced.get("stepfun/step-9-ultra"), Some(&2));
+    }
+
+    #[test]
+    fn opencode_provider_wins_over_stepfun_prefixed_model() {
+        // An aihubmix-routed row keeps its card even when the model slug
+        // itself would match StepFun — provider overrides stay.
+        let (_oc, aihubmix, stepfun) = fold_opencode_data([
+            (1000.0, 1.0, 10.0, "aihubmix/step-3.7-flash".into(), "aihubmix".into()),
+            (1000.0, 2.0, 20.0, "stepfun/step-3.7-flash".into(), "openrouter".into()),
+        ]);
+        assert_eq!(cost_sum(&aihubmix), 1.0);
+        assert_eq!(cost_sum(&stepfun), 2.0);
+        assert!(stepfun
+            .days
+            .keys()
+            .any(|(_, m)| m == "stepfun/step-3.7-flash"));
     }
 
     #[test]

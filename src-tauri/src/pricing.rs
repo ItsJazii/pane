@@ -253,7 +253,7 @@ pub fn generation() -> u64 {
 /// fingerprinted below — an app update that reprices the same files would
 /// otherwise leave history at the old dollars until upstream happens to
 /// rewrite a catalog.
-const CORRECTIONS_REV: u32 = 15; // 15: DeepSeek V4.1 Flash new card + 2x weekday peak windows
+const CORRECTIONS_REV: u32 = 16; // 16: StepFun builtins (step-5-preview, audio, CN-only models)
 
 /// The corrections revision on its own — the spend cache treats a changed
 /// revision as a hard discard (the *code* that prices changed), while a
@@ -1033,6 +1033,37 @@ fn builtin_price(canonical: &str) -> Option<Price> {
         "swe-1.7-lightning" | "swe-1-7-lightning" => {
             Some(Price::flat(2.50, 12.50, 1.00, 2.50))
         }
+        // StepFun Step Plan (platform.stepfun.ai pricing, USD/MTok):
+        // step-3.7-flash $0.20 in / $1.15 out / $0.04 cache hit;
+        // step-3.5-flash (+ the -2603 dated SKU) $0.10 / $0.30 / $0.02.
+        // No separate cache-write rate — writes bill at input. The
+        // last-segment peel above covers `stepfun/step-*` gateway slugs.
+        "step-3.7-flash" => Some(Price::flat(0.20, 1.15, 0.04, 0.20)),
+        "step-3.5-flash" | "step-3.5-flash-2603" => Some(Price::flat(0.10, 0.30, 0.02, 0.10)),
+        // step-5-preview is absent from StepFun's own price pages; the rate
+        // comes from Artificial Analysis (artificialanalysis.ai/models/step-5,
+        // 2026-09-19): $1.00 in / $2.70 out, 95% cache discount → $0.05.
+        "step-5-preview" => Some(Price::flat(1.00, 2.70, 0.05, 1.00)),
+        // StepFun audio models (platform.stepfun.ai pricing, USD/MTok).
+        "stepaudio-2.5-realtime" => Some(Price::flat(1.50, 10.00, 0.30, 1.50)),
+        "stepaudio-2.5-chat" => Some(Price::flat(1.50, 3.50, 0.30, 1.50)),
+        // free (limited time) per StepFun's price list.
+        "stepaudio-3-realtime-preview" | "stepaudio-3-chat-preview" => {
+            Some(Price::flat(0.0, 0.0, 0.0, 0.0))
+        }
+        // CN-only models — ≈ from CNY list price, 7 元/$
+        // (platform.stepfun.com): step-1o-turbo-vision 2.5/8/0.5 元,
+        // step-1o-audio 25/60/5 元, step-audio-2 10/70/2 元,
+        // step-audio-r1.5 10/105/2 元.
+        "step-1o-turbo-vision" => Some(Price::flat(0.36, 1.14, 0.07, 0.36)),
+        "step-1o-audio" => Some(Price::flat(3.57, 8.57, 0.71, 3.57)),
+        "step-audio-2" => Some(Price::flat(1.43, 10.00, 0.29, 1.43)),
+        "step-audio-r1.5" => Some(Price::flat(1.43, 15.00, 0.29, 1.43)),
+        // Deliberately unpriced — StepFun publishes no token rate for
+        // these, so rows keep the unpriced ⚠ instead of a guessed dollar
+        // figure: step-router-v1, step-overture-preview, step-2x-large,
+        // step-gui; step-image-edit-2 bills per image;
+        // TTS/ASR bill per character/hour.
         _ => None,
     }
 }
@@ -1441,6 +1472,54 @@ mod tests {
         ] {
             let p = super::lookup(slug).unwrap_or_else(|| panic!("{slug} did not price"));
             assert_eq!((p.input, p.output, p.cache_read), (1.90, 8.0, 0.38), "{slug}");
+        }
+    }
+
+    #[test]
+    fn stepfun_builtins_price() {
+        // Step Plan list prices (platform.stepfun.ai). Asserted at the
+        // builtin layer — a live catalog row outranks these at lookup().
+        let p = super::builtin_price("step-3.7-flash")
+            .expect("step-3.7-flash did not price");
+        assert_eq!((p.input, p.output, p.cache_read, p.cache_write), (0.20, 1.15, 0.04, 0.20));
+        // The gateway spelling peels to the same card.
+        let p = super::builtin_price("stepfun/step-3.7-flash")
+            .expect("stepfun/step-3.7-flash did not reach the builtin");
+        assert_eq!((p.input, p.output), (0.20, 1.15));
+        for slug in ["step-3.5-flash", "step-3.5-flash-2603"] {
+            let p = super::builtin_price(slug).unwrap_or_else(|| panic!("{slug} did not price"));
+            assert_eq!(
+                (p.input, p.output, p.cache_read, p.cache_write),
+                (0.10, 0.30, 0.02, 0.10),
+                "{slug}"
+            );
+        }
+        // Token-billed audio + CN-only models (≈ USD from the CNY list).
+        for (slug, want) in [
+            ("stepaudio-2.5-realtime", (1.50, 10.00, 0.30, 1.50)),
+            ("stepaudio-2.5-chat", (1.50, 3.50, 0.30, 1.50)),
+            ("step-1o-turbo-vision", (0.36, 1.14, 0.07, 0.36)),
+            ("step-1o-audio", (3.57, 8.57, 0.71, 3.57)),
+            ("step-audio-2", (1.43, 10.00, 0.29, 1.43)),
+            ("step-audio-r1.5", (1.43, 15.00, 0.29, 1.43)),
+        ] {
+            let p = super::builtin_price(slug).unwrap_or_else(|| panic!("{slug} did not price"));
+            assert_eq!(
+                (p.input, p.output, p.cache_read, p.cache_write),
+                want,
+                "{slug}"
+            );
+        }
+        // Limited-time-free: prices to $0.00, not unpriced.
+        for slug in ["stepaudio-3-realtime-preview", "stepaudio-3-chat-preview"] {
+            let p = super::builtin_price(slug).unwrap_or_else(|| panic!("{slug} did not price"));
+            assert_eq!((p.input, p.output), (0.0, 0.0), "{slug}");
+        }
+        // step-5-preview: Artificial Analysis rate ($1.00 / $2.70, 95% cache discount).
+        let p = super::builtin_price("step-5-preview").expect("step-5-preview prices");
+        assert_eq!((p.input, p.output, p.cache_read, p.cache_write), (1.00, 2.70, 0.05, 1.00));
+        for slug in ["step-router-v1", "step-overture-preview"] {
+            assert!(super::builtin_price(slug).is_none(), "{slug}");
         }
     }
 

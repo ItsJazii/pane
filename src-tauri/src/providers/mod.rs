@@ -19,6 +19,7 @@ pub mod onenewapi;
 pub mod opencode;
 pub mod openrouter;
 pub mod qwen;
+pub mod stepfun;
 pub mod sub2api;
 pub mod zai;
 
@@ -278,6 +279,18 @@ pub(crate) async fn read_body_bounded(
     Ok(bytes)
 }
 
+/// Lossy body text capped at `max_bytes` — "" when the read fails or
+/// the body exceeds the cap. For callers that only need a bounded peek
+/// at error text, not a parsed body. Built on `read_body_bounded` so
+/// the cap is enforced while streaming, not after buffering.
+pub(crate) async fn bounded_text(resp: reqwest::Response, max_bytes: usize) -> String {
+    let mut resp = resp;
+    match read_body_bounded(&mut resp, max_bytes, "response").await {
+        Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+        Err(_) => String::new(),
+    }
+}
+
 /// JSON bodies from vendor APIs are tiny (quota + token responses). Cap
 /// before parse so a huge payload can't stall a refresh or blow RAM —
 /// same idea as the share-card decode bound.
@@ -458,6 +471,18 @@ fn expected_credit_meter_generation(provider: &str) -> u64 {
 /// meter identically but shouldn't all be called "Credits used", and some
 /// carry an extra unit in the caption ("· N credits").
 
+/// First 12 hex chars of a digest of the trimmed credential — enough to
+/// tell one key from another without storing anything reversible. Never
+/// log it alongside anything that reveals the key, and never persist the
+/// raw credential.
+pub(crate) fn key_fingerprint(secret: &str) -> String {
+    use md5::Digest;
+    md5::Md5::digest(secret.trim().as_bytes())[..6]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 pub fn credit_meter_labeled(
     provider: &str,
     sign: &str,
@@ -483,6 +508,25 @@ pub fn credit_meter_labeled_in(
     label: &str,
     caption_suffix: &str,
 ) -> Option<Metric> {
+    credit_meter_labeled_identity_in(dir, provider, sign, balance, label, caption_suffix, None)
+}
+
+/// `credit_meter_labeled_in` that also binds the high-water mark to a
+/// fingerprint of the effective credential. `identity_key` is the key
+/// itself — it's hashed before it touches disk, never stored. When the
+/// stored fingerprint differs (new paste, env change, a different Step
+/// Code profile behind a fallback), the baseline resets before metering
+/// so the new wallet isn't compared against the old account's pot.
+/// `None` keeps the legacy behaviour: no fingerprint stored or checked.
+pub fn credit_meter_labeled_identity_in(
+    dir: &Path,
+    provider: &str,
+    sign: &str,
+    balance: f64,
+    label: &str,
+    caption_suffix: &str,
+    identity_key: Option<&str>,
+) -> Option<Metric> {
     if !balance.is_finite() || balance < 0.0 {
         return None;
     }
@@ -498,14 +542,38 @@ pub fn credit_meter_labeled_in(
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .filter(serde_json::Value::is_object)
         .unwrap_or_else(|| serde_json::json!({}));
-    let high = doc
-        .get(provider)
-        .and_then(serde_json::Value::as_f64)
-        .unwrap_or(0.0);
+    // Baselines persist as a bare number (no identity, or written before
+    // fingerprints existed) or {"b": balance, "fp": fingerprint}.
+    let entry = doc.get(provider);
+    let (stored_high, stored_fp) = match entry {
+        Some(v) if v.is_object() => (
+            v.get("b").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
+            v.get("fp")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+        ),
+        _ => (
+            entry.and_then(serde_json::Value::as_f64).unwrap_or(0.0),
+            None,
+        ),
+    };
+    let fp = identity_key.map(key_fingerprint);
+    // Only a stored fingerprint that differs proves a credential swap
+    // and resets the baseline. A bare number predates fingerprints —
+    // adopt it under this credential (trust on first sight) rather than
+    // wiping every existing user's high-water mark on upgrade.
+    let mut high = stored_high;
+    if stored_fp.is_some() && fp.as_deref() != stored_fp.as_deref() {
+        high = 0.0;
+    }
+    let adopt_fp = fp.is_some() && stored_fp.is_none() && entry.is_some();
     // A late result from a rotated key must not recreate the deleted
     // baseline from the old account's leftover balance.
-    if !stale && balance > high {
-        doc[provider] = serde_json::Value::from(balance);
+    if !stale && (balance > high || adopt_fp) {
+        doc[provider] = match &fp {
+            Some(fp) => serde_json::json!({"b": high.max(balance), "fp": fp}),
+            None => serde_json::Value::from(balance),
+        };
         let _ = std::fs::write(
             &path,
             serde_json::to_string_pretty(&doc).unwrap_or_default(),
@@ -606,18 +674,21 @@ pub(crate) fn account_scan_roots() -> Vec<std::path::PathBuf> {
     roots
 }
 
+/// One value from `%APPDATA%\Pane\config.json` — provider-facing read for
+/// settings the frontend persists (e.g. StepFun's plan-tier pick). `None`
+/// when the file is missing, unparseable, or lacks the key.
+pub fn config_value(key: &str) -> Option<serde_json::Value> {
+    let raw = std::fs::read_to_string(config_dir().join("config.json")).ok()?;
+    let cfg = serde_json::from_str::<serde_json::Value>(raw.trim_start_matches('\u{feff}')).ok()?;
+    cfg.get(key).cloned()
+}
+
 /// True when Customize has this provider switched off. Disabled providers
 /// must not make network calls — including a folded-in wallet fetch that
 /// lives on another card (Kimi Code's Moonshot API bar).
 pub fn provider_disabled(id: &str) -> bool {
-    let Ok(raw) = std::fs::read_to_string(config_dir().join("config.json")) else {
-        return false;
-    };
-    let Ok(cfg) = serde_json::from_str::<serde_json::Value>(raw.trim_start_matches('\u{feff}'))
-    else {
-        return false;
-    };
-    cfg.get("disabled")
+    config_value("disabled")
+        .as_ref()
         .and_then(serde_json::Value::as_array)
         .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(id)))
 }
