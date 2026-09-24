@@ -2285,40 +2285,71 @@ fn codex_extra_accounts() -> (Vec<ProviderSpend>, FileData, FileData) {
 // Pi coding agent — folded into the cards of the accounts it drives
 // ---------------------------------------------------------------------------
 
-/// Where pi keeps session logs, mirroring pi's own resolution: an explicit
-/// `PI_CODING_AGENT_SESSION_DIR` wins, else `PI_CODING_AGENT_DIR/sessions`
-/// (config-dir override), else the default `~/.pi/agent/sessions`.
-fn pi_sessions_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("PI_CODING_AGENT_SESSION_DIR") {
-        let dir = dir.trim();
-        if !dir.is_empty() {
-            return PathBuf::from(dir);
-        }
+/// Shared pi-family session-dir resolution: an explicit `*_SESSION_DIR`
+/// wins, else `*_DIR/sessions` (the config-dir override), else the
+/// per-tool default under home. Empty/whitespace env values count as
+/// unset — pi and Step Code document the same convention.
+fn sessions_dir_of(
+    session_env: Option<&str>,
+    agent_env: Option<&str>,
+    home: &Path,
+    default_tail: &[&str],
+) -> PathBuf {
+    if let Some(dir) = session_env.map(str::trim).filter(|d| !d.is_empty()) {
+        return PathBuf::from(dir);
     }
-    if let Ok(dir) = std::env::var("PI_CODING_AGENT_DIR") {
-        let dir = dir.trim();
-        if !dir.is_empty() {
-            return PathBuf::from(dir).join("sessions");
-        }
+    if let Some(dir) = agent_env.map(str::trim).filter(|d| !d.is_empty()) {
+        return PathBuf::from(dir).join("sessions");
     }
-    dirs::home_dir().unwrap_or_default().join(".pi").join("agent").join("sessions")
+    default_tail.iter().fold(home.to_path_buf(), |p, seg| p.join(seg))
 }
 
-/// pi plus oh-my-pi ("omp") — an omp session file is byte-for-byte the
-/// pi format, only rooted at `~/.omp/agent/sessions` instead. Deduped in
-/// case an env override points the pi dir at omp's tree.
+/// Where pi keeps session logs, mirroring pi's own resolution:
+/// `PI_CODING_AGENT_SESSION_DIR`, else `PI_CODING_AGENT_DIR/sessions`,
+/// else the default `~/.pi/agent/sessions`.
+fn pi_sessions_dir() -> PathBuf {
+    sessions_dir_of(
+        std::env::var("PI_CODING_AGENT_SESSION_DIR").ok().as_deref(),
+        std::env::var("PI_CODING_AGENT_DIR").ok().as_deref(),
+        &dirs::home_dir().unwrap_or_default(),
+        &[".pi", "agent", "sessions"],
+    )
+}
+
+/// Step Code, StepFun's official coding CLI, is a pi fork writing the
+/// same v3 session format: `STEP_CODING_AGENT_SESSION_DIR`, else
+/// `STEP_CODING_AGENT_DIR/sessions`, else `~/.stepcode/agent/sessions`.
+fn stepcode_sessions_dir() -> PathBuf {
+    sessions_dir_of(
+        std::env::var("STEP_CODING_AGENT_SESSION_DIR").ok().as_deref(),
+        std::env::var("STEP_CODING_AGENT_DIR").ok().as_deref(),
+        &dirs::home_dir().unwrap_or_default(),
+        &[".stepcode", "agent", "sessions"],
+    )
+}
+
+/// pi plus oh-my-pi ("omp") plus Step Code — an omp or Step Code
+/// session file is byte-for-byte the pi format, only rooted at
+/// `~/.omp/agent/sessions` / `~/.stepcode/agent/sessions` instead.
+/// Deduped against every earlier entry in case an env override points
+/// one tool's dir at another's tree.
 fn pi_sessions_dirs() -> Vec<PathBuf> {
-    let pi = pi_sessions_dir();
     let omp = dirs::home_dir()
         .unwrap_or_default()
         .join(".omp")
         .join("agent")
         .join("sessions");
-    let mut out = vec![pi];
-    if omp != out[0] {
-        out.push(omp);
+    let mut out: Vec<PathBuf> = Vec::new();
+    for dir in [pi_sessions_dir(), omp, stepcode_sessions_dir()] {
+        push_unique(&mut out, dir);
     }
     out
+}
+
+fn push_unique(out: &mut Vec<PathBuf>, dir: PathBuf) {
+    if !out.contains(&dir) {
+        out.push(dir);
+    }
 }
 
 /// The per-file cache stores ONE FileData per path, but a pi file can hold
@@ -2330,10 +2361,11 @@ const PI_SEP: char = '\u{1}';
 /// carry usage; pi's `provider` field says whose account it drove
 /// (mirroring upstream OpenUsage's mapping — pi providers with no local
 /// spend source here are skipped). `anthropic`/`claude-agent-sdk` →
-/// Claude, `openai-codex` → Codex, `aihubmix` → AihubMix, and any
-/// `stepfun*` provider name (omp calls its CN endpoint `stepfun-cn`) →
-/// StepFun — as does a `step-*` model on an unrecognized provider, since
-/// a custom-named StepFun endpoint still logs the upstream slug. Pi
+/// Claude, `openai-codex` → Codex, `aihubmix` → AihubMix, `step` →
+/// StepFun (Step Code's provider name), and any `stepfun*` provider
+/// name (omp calls its CN endpoint `stepfun-cn`) → StepFun — as does a
+/// `step-*` model on an unrecognized provider, since a custom-named
+/// StepFun endpoint still logs the upstream slug. Pi
 /// records an authoritative per-message usage.cost.total like OpenCode:
 /// a carried cost > 0 wins, a $0 cost (omp/subscription usage that isn't
 /// imputed) prices through the catalog. Duplicate message ids within a
@@ -2362,6 +2394,7 @@ fn pi_line(seen: &mut HashSet<String>, line: &str, data: &mut FileData) {
         "anthropic" | "claude-agent-sdk" => "claude",
         "openai-codex" => "codex",
         "aihubmix" => "aihubmix",
+        "step" => "stepfun",
         p if p.to_lowercase().starts_with("stepfun") => "stepfun",
         _ if model.to_lowercase().starts_with("step-") => "stepfun",
         _ => return,
@@ -2431,8 +2464,9 @@ fn take_tagged(data: &mut FileData, card: &str) -> FileData {
 /// of the account it drove rather than a card of its own — a Claude sub
 /// used inside pi lands on the Claude card, Codex likewise (the fold
 /// upstream OpenUsage ships). oh-my-pi ("omp") writes the same format
-/// under `~/.omp/agent/sessions`; its StepFun/AihubMix rows fold the same
-/// way.
+/// under `~/.omp/agent/sessions`, and Step Code (StepFun's pi-fork CLI)
+/// under `~/.stepcode/agent/sessions`; their StepFun/AihubMix rows fold
+/// the same way.
 fn pi() -> (FileData, FileData, FileData, FileData) {
     let mut files = Vec::new();
     for root in pi_sessions_dirs() {
@@ -4431,6 +4465,70 @@ mod tests {
         assert_eq!(tokens_sum(&stepfun), 26504.0 + 150.0);
         assert!(stepfun.days.keys().any(|(_, m)| m == "step-5-preview"));
         assert!(stepfun.days.keys().any(|(_, m)| m == "step-3.7-flash"));
+    }
+
+    /// Step Code (StepFun's pi fork) writes the same v3 format under
+    /// `provider: "step"` — routed to the StepFun card explicitly, so
+    /// even a non-`step-*` model slug lands there.
+    #[test]
+    fn stepcode_lines_route_to_stepfun() {
+        let mut seen = HashSet::new();
+        let mut data = FileData::default();
+        let normal = json!({"type": "message", "id": "s1", "timestamp": "2026-09-23T10:00:00Z",
+            "message": {"role": "assistant", "provider": "step", "model": "step-5-preview",
+                        "usage": {"input": 30000.0, "output": 1000.0, "cacheRead": 37.0,
+                                  "cacheWrite": 0.0, "totalTokens": 31037.0,
+                                  "cost": {"total": 0.0}}}})
+        .to_string();
+        // provider "step" routes on the provider name alone — no
+        // step-* model fallback needed.
+        let odd_model = normal
+            .replace("\"s1\"", "\"s2\"")
+            .replace("\"step-5-preview\"", "\"custom-alias\"");
+        pi_line(&mut seen, &normal, &mut data);
+        pi_line(&mut seen, &odd_model, &mut data);
+
+        let stepfun = take_tagged(&mut data, "stepfun");
+        assert!(data.days.is_empty());
+        assert_eq!(tokens_sum(&stepfun), 2.0 * 31037.0);
+        assert!(stepfun.days.keys().any(|(_, m)| m == "custom-alias"));
+    }
+
+    #[test]
+    fn sessions_dir_env_precedence() {
+        let home = Path::new("/home/u");
+        let tail = [".pi", "agent", "sessions"];
+        // The explicit session dir wins outright (and is trimmed).
+        assert_eq!(
+            sessions_dir_of(Some(" /x "), Some("/y"), home, &tail),
+            PathBuf::from("/x")
+        );
+        // The config-dir override appends /sessions.
+        assert_eq!(
+            sessions_dir_of(None, Some("/y"), home, &tail),
+            PathBuf::from("/y/sessions")
+        );
+        // Empty/whitespace env values count as unset → home default.
+        assert_eq!(
+            sessions_dir_of(Some("  "), Some("\t"), home, &tail),
+            home.join(".pi").join("agent").join("sessions")
+        );
+        assert_eq!(
+            sessions_dir_of(None, None, home, &tail),
+            home.join(".pi").join("agent").join("sessions")
+        );
+    }
+
+    #[test]
+    fn pi_sessions_dirs_dedupes_against_every_earlier_entry() {
+        let mut out = Vec::new();
+        for d in ["/a", "/b", "/a", "/c", "/b"] {
+            push_unique(&mut out, PathBuf::from(d));
+        }
+        assert_eq!(
+            out,
+            vec![PathBuf::from("/a"), PathBuf::from("/b"), PathBuf::from("/c")]
+        );
     }
 
     /// Overflowed Pi keys keep their routing prefix: take_tagged must still

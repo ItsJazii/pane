@@ -60,8 +60,42 @@ async fn try_urls<'u>(
     Ok(None)
 }
 
+/// Step Code (StepFun's official CLI) stores its credential in
+/// ~/.stepcode/auth.json as `{"step": {"type","access","profile",…}}`.
+/// For `platform_*` profiles `access` is a plain StepFun API key — the
+/// same key this card asks for — so a signed-in Step Code user needs
+/// no Settings entry. `step_plan*` profiles hold a browser OAuth token
+/// for the plan endpoint instead, which /v1/accounts can't use; those
+/// are ignored, as are missing or garbled files. Never logged.
+fn stepcode_api_key(auth_json: &str) -> Option<String> {
+    let step = serde_json::from_str::<Value>(auth_json).ok()?.get("step")?.clone();
+    let profile = step.get("profile").and_then(Value::as_str)?;
+    if !profile.starts_with("platform_") {
+        return None;
+    }
+    step.get("access")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(str::to_string)
+}
+
+/// The Step Code credential file, if it holds a platform API key.
+fn stepcode_key() -> Option<String> {
+    let raw = std::fs::read_to_string(
+        dirs::home_dir()
+            .unwrap_or_default()
+            .join(".stepcode")
+            .join("auth.json"),
+    )
+    .ok()?;
+    stepcode_api_key(&raw)
+}
+
 async fn fetch() -> Result<Snapshot, String> {
-    let Some(key) = stored_api_key("stepfun", &["STEPFUN_API_KEY", "STEP_API_KEY"]) else {
+    let Some(key) = stored_api_key("stepfun", &["STEPFUN_API_KEY", "STEP_API_KEY"])
+        .or_else(stepcode_key)
+    else {
         return Ok(Snapshot::no_credentials(
             ID,
             NAME,
@@ -269,7 +303,7 @@ fn parse_account_in(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_account_in, plan_metrics, Metric};
+    use super::{parse_account_in, plan_metrics, stepcode_api_key, Metric};
     use serde_json::json;
     use std::path::PathBuf;
 
@@ -437,5 +471,29 @@ mod tests {
     fn plan_metrics_clamps_over_the_pool() {
         let (_, metrics, _) = plan_metrics(Some(1000.0), Some((400, "Flash Mini")));
         assert_eq!(metrics[0].used_percent, Some(100.0));
+    }
+
+    /// Step Code's auth.json only lends its key for platform_*
+    /// profiles — a step_plan OAuth token can't call /v1/accounts.
+    #[test]
+    fn stepcode_key_only_for_platform_profiles() {
+        let platform = r#"{"step": {"type": "api_key", "access": "sk-test-123",
+            "refresh": "r", "expires": 0, "profile": "platform_oversea"}}"#;
+        assert_eq!(stepcode_api_key(platform).as_deref(), Some("sk-test-123"));
+        let cn = platform.replace("platform_oversea", "platform_cn");
+        assert_eq!(stepcode_api_key(&cn).as_deref(), Some("sk-test-123"));
+        // Step Plan profiles carry an OAuth token, not an API key.
+        let plan = platform.replace("platform_oversea", "step_plan_oversea");
+        assert_eq!(stepcode_api_key(&plan), None);
+        let plan2 = platform.replace("platform_oversea", "step_plan");
+        assert_eq!(stepcode_api_key(&plan2), None);
+        // Missing step/access, empty access, garbled JSON → nothing.
+        assert_eq!(stepcode_api_key(r#"{"other": {}}"#), None);
+        assert_eq!(stepcode_api_key(r#"{"step": {"profile": "platform_cn"}}"#), None);
+        assert_eq!(
+            stepcode_api_key(r#"{"step": {"profile": "platform_cn", "access": "  "}}"#),
+            None
+        );
+        assert_eq!(stepcode_api_key("not json"), None);
     }
 }

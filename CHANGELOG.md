@@ -20,6 +20,13 @@
   scanned alongside pi's own logs; `stepfun*` provider rows (incl.
   `stepfun-cn`) and `step-*` models land on the StepFun card,
   `aihubmix` rows on AihubMix.
+- **Step Code sessions count toward StepFun spend.** StepFun's official
+  coding CLI (a pi fork) writes the same session format under
+  `~/.stepcode/agent/sessions` (honoring `STEP_CODING_AGENT_SESSION_DIR`
+  and `STEP_CODING_AGENT_DIR`); its `step` provider rows land on the
+  StepFun card, and when no StepFun key is configured the card falls
+  back to the API key Step Code stores in `~/.stepcode/auth.json` for
+  `platform_*` profiles.
 
 ## 0.4.53 — 2026-09-21
 

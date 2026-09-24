@@ -42,7 +42,8 @@ Ground rules that apply to every provider:
   parent's message under a fresh request id are deduplicated. Sessions
   of the pi coding agent that drove this Claude account
   (`~\.pi\agent\sessions`, providers `anthropic`/`claude-agent-sdk`;
-  oh-my-pi writes the same format under `~\.omp\agent\sessions`)
+  oh-my-pi writes the same format under `~\.omp\agent\sessions`, and
+  Step Code under `~\.stepcode\agent\sessions`)
   fold into this card's spend — pi's own recorded cost when present,
   catalog pricing otherwise.
 
@@ -246,8 +247,11 @@ Ground rules that apply to every provider:
 
 ## StepFun
 
-- **Reads:** pasted key or env var only (`STEPFUN_API_KEY`,
-  `STEP_API_KEY`).
+- **Reads:** pasted key or env var (`STEPFUN_API_KEY`,
+  `STEP_API_KEY`), or — when neither is set — the API key Step Code
+  (StepFun's official CLI) stores in `~\.stepcode\auth.json` for its
+  `platform_*` profiles (`step_plan*` profiles hold an OAuth token the
+  accounts endpoint can't use, so those are ignored).
 - **Calls:** `api.stepfun.ai/v1/accounts` then `api.stepfun.com` on a
   401 (CN keys live on the mirror host). If both reject the key it may
   be a Step Plan key — `/step_plan/v1/models` is probed on both hosts
@@ -277,9 +281,11 @@ Ground rules that apply to every provider:
   `step-image-edit-2`, TTS/ASR — stay unpriced ⚠ rather than guess. A
   Claude Code run from its own `CLAUDE_CONFIG_DIR` (e.g. `~/.claude-step`)
   with no Claude login is scanned too, so API-key sessions against
-  StepFun count here. pi and oh-my-pi sessions
-  (`~\.pi\agent\sessions`, `~\.omp\agent\sessions`) with a `stepfun*`
-  provider name (`stepfun-cn` is omp's CN endpoint) or a `step-*`
+  StepFun count here. pi, oh-my-pi, and Step Code sessions
+  (`~\.pi\agent\sessions`, `~\.omp\agent\sessions`,
+  `~\.stepcode\agent\sessions`) with a `step` or `stepfun*`
+  provider name (Step Code logs `step`; `stepfun-cn` is omp's CN
+  endpoint) or a `step-*`
   model on any provider route here as well; `aihubmix` provider rows
   land on the AihubMix card.
 
