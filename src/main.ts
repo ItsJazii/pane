@@ -1782,10 +1782,9 @@ function renderTotalSpend(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Footer update flow — popover opens re-check, but the backend gates the
-// launch + every-4-h cadence per docs/privacy.md (invoke is a cheap cache
-// read inside the window). The version stamp becomes "Checking for
-// updates…" and then an Update button on a hit.
+// Footer update flow — check on launch and every popover open; the backend
+// also checks at launch and every 4 h. The version stamp becomes "Checking
+// for updates…" and then an Update button on a hit.
 // ---------------------------------------------------------------------------
 
 let buildText = "";
@@ -1850,7 +1849,7 @@ async function checkForUpdate(showError = false): Promise<void> {
     if (reportUpdateCheckError && !updateVersion) {
       updateCheckError = t("footer.updateCheckFailed", { err: String(err) });
       const status = document.querySelector("#status");
-      if (status) status.textContent = updateCheckError;
+      if (status && !configSaveError) status.textContent = updateCheckError;
     }
   }
   reportUpdateCheckError = false;
