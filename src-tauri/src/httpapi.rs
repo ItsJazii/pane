@@ -82,6 +82,9 @@ pub(crate) fn provider_json(s: &Snapshot, fetched_at: &str) -> Value {
                     "periodDurationMs": m.period_ms,
                     "color": Value::Null,
                 });
+                if m.expires {
+                    line["expires"] = json!(true);
+                }
                 if s.id.starts_with("sub2api@") {
                     line["value"] = json!(m.value);
                     line["subtitle"] = json!(m.detail);

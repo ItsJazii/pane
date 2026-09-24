@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+- **Claude: Cloud session credits.** The included credit for Claude
+  Code cloud sessions (e.g. $100) shows as a bar with its expiry.
+
 ## 0.4.54 — 2026-09-24
 
 ### Added

@@ -77,6 +77,8 @@ interface Metric {
   value: string | null;
   resets_at: number | null;
   period_ms: number | null;
+  /** Set when resets_at is an expiry — the value is lost, not renewed. */
+  expires?: boolean;
 }
 
 /// One banked reset credit inside a "resets" row's detail JSON. `id` is
@@ -1135,7 +1137,17 @@ function renderMetric(m: Metric, providerId: string): string {
     const headlineAlt = config.showUsed ? t("card.pctLeft", { n: left }) : t("card.pctUsed", { n: Math.round(used) });
 
     let resetHtml = "";
-    if (m.resets_at !== null && m.resets_at > Date.now()) {
+    if (m.expires && m.resets_at !== null && m.resets_at > Date.now()) {
+      // Expiring credit (e.g. Claude Cloud credits): the remaining value
+      // dies at resets_at rather than refreshing — count down to the
+      // loss, and never apply the notStarted grace (its clock doesn't
+      // start on first use).
+      const remain = m.resets_at - Date.now();
+      const countdown = remain < 60_000 ? t("card.expiresSoon") : t("card.expiresIn", { time: fmtDuration(remain) });
+      const exact = t("card.expires", { when: fmtExact(m.resets_at) });
+      const [text, alt] = config.resetExact ? [exact, countdown] : [countdown, exact];
+      resetHtml = `<span class="clickable" data-flip="reset" title="${escapeHtml(alt)}">${escapeHtml(text)}</span>`;
+    } else if (m.resets_at !== null && m.resets_at > Date.now()) {
       // A rolling session window (≤6h period) that is still full-length
       // hasn't begun — its clock starts on the first message, so a
       // countdown would lie. Codex floors percentages and reports 1% on an
