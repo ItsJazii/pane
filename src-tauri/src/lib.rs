@@ -7,6 +7,7 @@ mod providers;
 mod spend;
 mod telemetry;
 mod tray_projection;
+mod widget;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -150,6 +151,9 @@ fn config_with_defaults(mut cfg: Value) -> Value {
     // StepFun's plan tier pick — null = "Not set" (Credits row stays an
     // estimate-only text row instead of a bar against a monthly pool).
     obj.entry("stepfunPlanCredits").or_insert(Value::Null);
+    obj.entry("widgetMode").or_insert(json!(false));
+    obj.entry("widgetCollapsed").or_insert(json!(false));
+    obj.entry("widgetLocked").or_insert(json!(false));
     cfg
 }
 
@@ -203,6 +207,9 @@ const CONFIG_KEYS: &[&str] = &[
     "reduceAnimations",
     "locale",
     "stepfunPlanCredits",
+    "widgetMode",
+    "widgetCollapsed",
+    "widgetLocked",
 ];
 
 static CONFIG_WRITE: Mutex<()> = Mutex::new(());
@@ -3360,11 +3367,14 @@ fn toggle_popover(app: &tauri::AppHandle, click: tauri::PhysicalPosition<f64>) {
     let size = window
         .outer_size()
         .unwrap_or(tauri::PhysicalSize::new(380, 600));
+    // The widget reopens wherever the user last dragged it.
+    let anchor = !widget::widget_mode();
     if let Some(monitor) = window
         .monitor_from_point(click.x, click.y)
         .ok()
         .flatten()
         .or_else(|| window.primary_monitor().ok().flatten())
+        .filter(|_| anchor)
     {
         let rect = ScreenRect {
             x: i64::from(monitor.position().x),
@@ -3449,6 +3459,8 @@ pub fn run() {
             claude_redeem_credit,
             install_update,
             check_update,
+            widget::widget_apply,
+            widget::widget_start_drag,
             hide_popover
         ])
         .setup(|app| {
@@ -3491,6 +3503,9 @@ pub fn run() {
                 set_webview_memory_level(&wv, true);
             }
 
+            widget::init_from_config(&load_config(), app.handle());
+            widget::spawn_taskbar_keeper(app.handle());
+
             httpapi::start();
 
             let saved_shortcut = load_config()
@@ -3523,6 +3538,10 @@ pub fn run() {
         .on_window_event(|window, event| {
             if window.label() == "main" {
                 if let WindowEvent::Focused(false) = event {
+                    // The widget stays on screen instead of auto-hiding.
+                    if widget::widget_mode() {
+                        return;
+                    }
                     if window.hide().is_ok() {
                         LAST_AUTO_HIDE_MS.store(now_ms(), Ordering::Relaxed);
                         if let Some(wv) = window.app_handle().get_webview_window("main") {

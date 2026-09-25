@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { reconcileSub2ApiLayout, sub2ApiLiveLayout, sub2ApiOnDemand, sub2ApiPrimaryMetric, Sub2ApiSnapshotContexts, sub2ApiStatusDetails } from "./sub2api-display";
+import { applyWidgetState, initWidget } from "./widget";
 import {
   applyStaticI18n,
   displayLinkLabel,
@@ -196,7 +197,7 @@ interface Layout {
   providers: Record<string, ProviderLayout>;
 }
 
-interface Config {
+export interface Config {
   refreshMinutes: number;
   disabled: string[];
   pinned: { provider: string; label: string } | null;
@@ -229,6 +230,9 @@ interface Config {
   reduceAnimations: boolean;
   locale: LocalePref;
   stepfunPlanCredits: number | null;
+  widgetMode: boolean;
+  widgetCollapsed: boolean;
+  widgetLocked: boolean;
 }
 
 const FRONTEND_CONFIG_KEYS = [
@@ -264,6 +268,9 @@ const FRONTEND_CONFIG_KEYS = [
   "reduceAnimations",
   "locale",
   "stepfunPlanCredits",
+  "widgetMode",
+  "widgetCollapsed",
+  "widgetLocked",
 ] as const satisfies readonly (keyof Config)[];
 type _AssertAllConfigKeys = Exclude<keyof Config, (typeof FRONTEND_CONFIG_KEYS)[number]> extends never
   ? true
@@ -459,6 +466,9 @@ let config: Config = {
   reduceAnimations: false,
   locale: "auto",
   stepfunPlanCredits: null,
+  widgetMode: false,
+  widgetCollapsed: false,
+  widgetLocked: false,
 };
 let lastFetch = 0;
 let refreshing = false;
@@ -2482,6 +2492,9 @@ function setupTooltips(): void {
   };
 
   document.addEventListener("mouseover", (e) => {
+    // The collapsed widget is too short for the bubble — keep the native
+    // tooltip there, which the OS draws outside the window.
+    if (document.body.classList.contains("widget-collapsed")) return;
     const el = (e.target as HTMLElement).closest<HTMLElement>("[title], [data-tip]");
     if (!el) return;
     const title = el.getAttribute("title");
@@ -5137,6 +5150,8 @@ async function initSettings(): Promise<void> {
   });
 
   for (const manager of siteKeyManagers) manager.init();
+
+  initWidget({ getConfig: () => config, patchConfig, brandColor: spendColor });
 }
 
 /// Restore every preference to the same defaults a fresh install gets.
@@ -5186,6 +5201,9 @@ async function resetAllSettings(): Promise<void> {
     reduceAnimations: false,
     locale: "auto",
     stepfunPlanCredits: null,
+    widgetMode: false,
+    widgetCollapsed: false,
+    widgetLocked: false,
   }).catch(() => {});
   spendTab = "today";
   applyLocale();
@@ -5194,6 +5212,7 @@ async function resetAllSettings(): Promise<void> {
   applyAppearance();
   applyGlass();
   applyReduceMotion();
+  void applyWidgetState();
   document.body.classList.remove("settings-open");
   document.querySelector("#settings-btn")?.classList.remove("active");
   void forceUsageRefreshAttempt(false).then(requestTraySync);

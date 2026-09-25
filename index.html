@@ -56,6 +56,23 @@
 
     <main class="popover">
       <div class="main-col">
+        <!-- Widget mode only (body.widget-on): drag bar; collapsed, it is the
+             whole window and rolls through each provider's usage. -->
+        <header id="widget-bar" data-i18n-aria="widget.barTitle">
+          <span id="widget-logo" class="app-logo"></span>
+          <span class="widget-title">Pane</span>
+          <span id="widget-ticker"></span>
+          <button id="widget-lock">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2"/><path class="shackle-open" d="M7 11V7a5 5 0 0 1 9.9-1"/><path class="shackle-closed" d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          </button>
+          <button id="widget-collapse">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <button id="widget-minimize">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/></svg>
+          </button>
+        </header>
+
         <div class="content">
           <section id="providers">
             <div class="skeleton-card">
@@ -128,6 +145,11 @@
           </div>
           <div class="setting-row">
             <label class="toggle"><input id="autostart" type="checkbox" /> <span data-i18n="settings.startWithWindows">Start with Windows</span></label>
+          </div>
+          <div class="setting-row">
+            <label class="toggle" data-i18n-title="settings.widgetModeTip" title="Keep Pane pinned on screen as a movable, collapsible widget — it stays visible instead of auto-hiding.">
+              <input id="widget-mode-setting" type="checkbox" /> <span data-i18n="settings.widgetMode">Widget mode</span>
+            </label>
           </div>
           <div class="setting-row">
             <label class="toggle"><input id="pacing" type="checkbox" /> <span data-i18n="settings.pacing">Always show pacing</span></label>

@@ -2843,3 +2843,189 @@ body.no-glass #star-box {
     animation: none;
   }
 }
+
+/* ------------------------------------------------------------ widget mode */
+/* Opt-in (Settings → General). Everything is gated on body.widget-on, so the
+   stock popover is unchanged with the feature off. The collapsed bar height
+   matches COLLAPSED_HEIGHT in src-tauri/src/widget.rs. */
+#widget-bar {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  flex: none;
+  padding: 0 6px 0 12px;
+  cursor: move;
+  background: rgba(9, 9, 11, 0.4);
+  backdrop-filter: var(--bar-filter);
+  -webkit-backdrop-filter: var(--bar-filter);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+body.widget-on #widget-bar {
+  display: flex;
+}
+
+:root[data-theme="light"] #widget-bar {
+  background: rgba(255, 255, 255, 0.55);
+  border-bottom-color: rgba(0, 0, 0, 0.08);
+}
+
+body.no-glass #widget-bar {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: var(--background);
+  border-bottom-color: var(--border);
+}
+
+body.widget-locked #widget-bar {
+  cursor: default;
+}
+
+#widget-bar .widget-title {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+#widget-bar button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: 7px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+#widget-bar button:hover {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+#widget-bar button svg {
+  width: 14px;
+  height: 14px;
+}
+
+body.widget-collapsed #widget-collapse svg {
+  transform: rotate(180deg);
+}
+
+#widget-lock .shackle-closed,
+body.widget-locked #widget-lock .shackle-open {
+  display: none;
+}
+
+body.widget-locked #widget-lock .shackle-closed {
+  display: inline;
+}
+
+/* Collapsed: the bar is the whole window and the usage ticker replaces
+   the title (which stays as a fallback while no card has a quota bar). */
+body.widget-collapsed .main-col .content,
+body.widget-collapsed footer,
+body.widget-collapsed #side-zone,
+body.widget-collapsed #widget-bar.has-usage :is(#widget-logo, .widget-title) {
+  display: none;
+}
+
+body.widget-collapsed #widget-bar {
+  gap: 4px;
+  border-bottom: none;
+  overflow: hidden;
+}
+
+/* Brand tile | name · window        ↻ 2h 13m
+               | ━━━━━━━━━━━━━━━━━━  59% left */
+#widget-ticker {
+  display: none;
+  flex: 1;
+  min-width: 0;
+  margin-right: 8px;
+  padding-right: 12px;
+  border-right: 1px solid var(--border);
+  grid-template-columns: 26px minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 9px;
+  row-gap: 4px;
+  font-size: 11px;
+  line-height: 15px;
+  white-space: nowrap;
+  color: var(--muted-foreground);
+}
+
+body.widget-collapsed #widget-bar.has-usage #widget-ticker {
+  display: grid;
+}
+
+/* The mark in its brand color on a tile tinted with the same color. */
+#widget-ticker .provider-icon {
+  grid-row: span 2;
+  box-sizing: border-box;
+  width: 26px;
+  height: 26px;
+  padding: 6px;
+  border-radius: 8px;
+  background: color-mix(in srgb, currentColor 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 28%, transparent);
+}
+
+#widget-ticker .ticker-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#widget-ticker .ticker-name {
+  margin-right: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+#widget-ticker .ticker-reset {
+  justify-self: end;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--muted);
+  font-size: 10.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--foreground);
+}
+
+#widget-ticker .ticker-reset svg {
+  width: 10px;
+  height: 10px;
+  color: var(--muted-foreground);
+}
+
+#widget-ticker .bar {
+  height: 4px;
+}
+
+#widget-ticker .ticker-pct {
+  justify-self: end;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--foreground);
+}
+
+#widget-ticker .ticker-pct.warn {
+  color: #eab308;
+}
+
+#widget-ticker .ticker-pct.low {
+  color: var(--destructive);
+}
