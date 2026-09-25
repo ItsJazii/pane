@@ -1,6 +1,6 @@
 # Roadmap — full Mac parity (and beyond)
 
-**Status (v0.4.54, 2026-09-24): every wave below is shipped, and the
+**Status (v0.4.55, 2026-09-25): every wave below is shipped, and the
 post-launch releases keep going.** Pane has full feature parity with the
 macOS original plus 23 providers (Sub2API multi-site key tracking
 landed), multi-site One/New API key management,

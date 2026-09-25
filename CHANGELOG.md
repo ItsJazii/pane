@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.55 — 2026-09-25
 
 ### Added
 - **Claude: Cloud session credits.** The included credit for Claude
@@ -28,8 +28,14 @@
   `~/.stepcode/agent/sessions` (honoring `STEP_CODING_AGENT_SESSION_DIR`
   and `STEP_CODING_AGENT_DIR`); its `step` provider rows land on the
   StepFun card, and when no StepFun key is configured the card falls
-  back to the API key Step Code stores in `~/.stepcode/auth.json` for
-  `platform_*` profiles.
+  back to the API key Step Code stores in `~/.stepcode/agent/auth.json`
+  (or `~/.stepcode/auth.json`) for `platform_*` profiles.
+
+### Fixed
+- **Update checks honor the network proxy (#244 by @JaminYe).** Update
+  checks and downloads now go through the proxy set in Settings →
+  Network (HTTP or SOCKS), and a failed check shows the error with a
+  "Retry check" button in the footer instead of failing silently.
 
 ## 0.4.54 — 2026-09-24
 
