@@ -57,6 +57,27 @@ fn apply(app: &tauri::AppHandle, mode: bool, collapsed: bool) {
     let _ = window.set_resizable(true);
     let _ = window.set_size(tauri::LogicalSize::new(WIDTH, height));
     let _ = window.set_resizable(false);
+    if !collapsed {
+        keep_on_screen(&window);
+    }
+}
+
+/// A bar dragged near the bottom edge would expand off-screen: shift the
+/// expanded window back into its monitor's work area.
+fn keep_on_screen(window: &tauri::WebviewWindow) {
+    let (Ok(Some(monitor)), Ok(pos)) = (window.current_monitor(), window.outer_position()) else {
+        return;
+    };
+    let size = tauri::LogicalSize::new(WIDTH, EXPANDED_HEIGHT).to_physical::<i32>(monitor.scale_factor());
+    let area = monitor.work_area();
+    let (left, top) = (area.position.x, area.position.y);
+    let right = left + area.size.width as i32 - size.width;
+    let bottom = top + area.size.height as i32 - size.height;
+    let x = pos.x.min(right).max(left);
+    let y = pos.y.min(bottom).max(top);
+    if (x, y) != (pos.x, pos.y) {
+        let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    }
 }
 
 /// Frontend → Rust sync after every widget setting change. Persistence

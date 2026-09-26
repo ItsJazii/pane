@@ -52,6 +52,12 @@ export function initWidget(d: WidgetDeps): void {
   }
   setInterval(roll, 8000);
 
+  // Dialogs (What's New, star prompt, confirms) need the full window.
+  new MutationObserver((records) => {
+    const dialog = records.some((r) => [...r.addedNodes].some((n) => n instanceof HTMLElement && n.id.endsWith("-overlay")));
+    if (dialog && document.body.classList.contains("widget-collapsed")) void update({ widgetCollapsed: false });
+  }).observe(document.body, { childList: true });
+
   void applyWidgetState();
 }
 
@@ -99,14 +105,22 @@ function paintTicker(): void {
   const title = span("ticker-title", text(row?.querySelector(".metric-label")));
   title.prepend(span("ticker-name", text(card.querySelector(".provider-name"))));
 
-  // "Resets in 2h 13m" → "↻ 2h 13m": the icon says "reset", the pill keeps
-  // only the time. The affixes come from the same localized template.
-  const full = text(row?.querySelector('[data-flip="reset"]'));
-  const [pre, post] = t("card.resetsIn", { time: "|" }).split("|");
-  const time = full.startsWith(pre) && full.endsWith(post) ? full.slice(pre.length, full.length - post.length) : full;
-  const reset = span("ticker-reset", time);
+  // "Resets in 2h 13m" → "↻ 2h 13m", "Expires in 2h" → "⌛ 2h": the icon
+  // names the event, the pill keeps only the countdown. The card shows the
+  // exact time instead when resetExact is on, with the countdown as its
+  // tooltip, so both forms are matched against the localized templates.
+  const el = row?.querySelector<HTMLElement>('[data-flip="reset"]');
+  const full = text(el);
+  const forms = [full, el?.title || el?.dataset.tip || ""];
+  const countdown = (key: string) => {
+    const [pre, post] = t(key, { time: "|" }).split("|");
+    const f = forms.find((f) => f.length > pre.length + post.length && f.startsWith(pre) && f.endsWith(post));
+    return f?.slice(pre.length, f.length - post.length);
+  };
+  const expires = countdown("card.expiresIn");
+  const reset = span("ticker-reset", expires ?? countdown("card.resetsIn") ?? full);
   reset.title = full;
-  reset.insertAdjacentHTML("afterbegin", RESET_ICON);
+  reset.insertAdjacentHTML("afterbegin", expires ? EXPIRES_ICON : RESET_ICON);
 
   const bar = span("bar");
   bar.append(fill.cloneNode());
@@ -114,8 +128,9 @@ function paintTicker(): void {
   ticker.replaceChildren(icon, title, full ? reset : span(""), bar, span(`ticker-pct ${state}`, left));
 }
 
-const RESET_ICON =
-  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>';
+const ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">';
+const RESET_ICON = `${ICON}<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>`;
+const EXPIRES_ICON = `${ICON}<path d="M5 22h14M5 2h14M17 22v-4.17a2 2 0 0 0-.59-1.42L12 12l-4.41 4.41A2 2 0 0 0 7 17.83V22M7 2v4.17a2 2 0 0 0 .59 1.42L12 12l4.41-4.41A2 2 0 0 0 17 6.17V2"/></svg>`;
 
 function roll(): void {
   const ticker = $("#widget-ticker");

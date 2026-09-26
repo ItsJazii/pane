@@ -4965,6 +4965,7 @@ function applyLocale(): void {
   config.locale = normalizeLocalePref(config.locale);
   setActiveLocale(resolveLocale(config.locale));
   applyStaticI18n();
+  void applyWidgetState(); // its button hints are stateful, not data-i18n
   for (const manager of siteKeyManagers) manager.render();
   applyAppearance();
   const status = document.querySelector("#status");
