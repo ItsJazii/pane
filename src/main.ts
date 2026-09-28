@@ -1058,15 +1058,17 @@ interface Pace {
   noteClass: string;
   title: string;
   tick: number | null;
+  /// Running out before reset — renderMetric draws a flame glyph.
+  flame: boolean;
 }
 
 function computePace(m: Metric): Pace {
   const used = clampPercent(m.used_percent ?? 0);
   const left = 100 - used;
-  const none: Pace = { cls: "", note: "", noteClass: "", title: "", tick: null };
+  const none: Pace = { cls: "", note: "", noteClass: "", title: "", tick: null, flame: false };
 
   if (left < 0.5) {
-    return { cls: "low", note: t("pace.limitReached"), noteClass: "danger", title: t("pace.limitReachedTitle"), tick: null };
+    return { cls: "low", note: t("pace.limitReached"), noteClass: "danger", title: t("pace.limitReachedTitle"), tick: null, flame: true };
   }
 
   const byLevel = (): Pace => {
@@ -1096,9 +1098,9 @@ function computePace(m: Metric): Pace {
       const when = config.resetExact
         ? t("pace.limitAt", { when: fmtExact(runOutAt) })
         : t("pace.limitIn", { time: fmtDuration(runOutAt - now) });
-      return { cls: "low", note: `🔥 ${when}`, noteClass: "danger", title: t("pace.overReset", { n: over }), tick };
+      return { cls: "low", note: when, noteClass: "danger", title: t("pace.overReset", { n: over }), tick, flame: true };
     }
-    return { cls: "low", note: "🔥", noteClass: "danger", title: t("pace.fullReset"), tick };
+    return { cls: "low", note: "", noteClass: "danger", title: t("pace.fullReset"), tick, flame: true };
   }
 
   const spare = Math.max(1, Math.round(100 - projected));
@@ -1109,6 +1111,7 @@ function computePace(m: Metric): Pace {
       noteClass: "warn",
       title: t("pace.usedReset", { n: Math.round(projected) }),
       tick,
+      flame: false,
     };
   }
   return {
@@ -1117,6 +1120,7 @@ function computePace(m: Metric): Pace {
     noteClass: "",
     title: t("pace.leftReset", { n: spare }),
     tick: config.pacingAlways ? tick : null,
+    flame: false,
   };
 }
 
@@ -1155,14 +1159,19 @@ function renderMetric(m: Metric, providerId: string): string {
     const used = expired ? 100 : clampPercent(m.used_percent);
     const left = Math.round(100 - used);
     const pace: Pace = expired
-      ? { cls: "low", note: "", noteClass: "", title: "", tick: null }
+      ? { cls: "low", note: "", noteClass: "", title: "", tick: null, flame: false }
       : computePace(m);
     const tick =
       pace.tick !== null && pace.tick > 1 && pace.tick < 99
         ? `<span class="tick" style="left:${pace.tick}%"></span>`
         : "";
-    const note = pace.note
-      ? `<span class="pace-note ${pace.noteClass}" title="${escapeHtml(pace.title)}">${escapeHtml(pace.note)}</span>`
+    // The running-out glyph is drawn, not an emoji, so it matches the
+    // note's color (danger red) and scales with the row's font.
+    const flame = pace.flame
+      ? `<svg class="pace-flame" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 16c3.314 0 6-2 6-5.5 0-1.5-.5-4-2.5-6 .25 1.5-1.25 2-1.25 2C11 4 9 .5 6 0c.357 2 .5 4-2 6-1.25 1-2 2.729-2 4.5C2 14 4.686 16 8 16Zm0-1c-1.657 0-3-1-3-2.75 0-.75.25-2 1.25-3C6.125 10 7 10.5 7 10.5c-.375-1.25.5-3.25 2-3.5-.179 1-.25 2 1 3 .625.5 1 1.364 1 2.25C11 14 9.657 15 8 15Z"/></svg>`
+      : "";
+    const note = pace.flame || pace.note
+      ? `<span class="pace-note ${pace.noteClass}" title="${escapeHtml(pace.title)}">${flame}${escapeHtml(pace.note)}</span>`
       : "";
     const headline = expired
       ? t("card.expired")

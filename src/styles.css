@@ -913,6 +913,14 @@ body.row-dragging #resets-pop {
   white-space: nowrap;
 }
 
+/* Drawn flame in running-out notes — inherits the note's color. */
+.pace-flame {
+  width: 11px;
+  height: 11px;
+  margin-right: 4px;
+  vertical-align: -1.5px;
+}
+
 .pace-note.warn {
   color: #eab308;
 }
