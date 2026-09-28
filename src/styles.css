@@ -829,6 +829,34 @@ select:focus-visible {
   opacity: 0.45;
 }
 
+/* In-card row dragging: the row lifts out as a fixed element while a
+   placeholder holds its slot back in the card (main.ts RowDrag). */
+.row-placeholder {
+  border-radius: 8px;
+}
+.row-lifted {
+  position: fixed;
+  z-index: 60;
+  /* .metric-text's -4px hover inset would offset the fixed box. */
+  margin: 0;
+  transform: scale(1.02);
+  background: var(--card);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.45);
+}
+body.row-dragging {
+  cursor: grabbing;
+}
+body.row-dragging * {
+  cursor: grabbing !important;
+  user-select: none;
+}
+/* Hover chrome stays down while a row is in the air. */
+body.row-dragging #model-tip,
+body.row-dragging #resets-pop {
+  display: none !important;
+}
+
 /* Usage Trend as a compact sparkline row: label left, chart right. */
 .metric.trend {
   display: flex;
