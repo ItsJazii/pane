@@ -17,6 +17,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 static WIDGET_MODE: AtomicBool = AtomicBool::new(false);
 static WIDGET_COLLAPSED: AtomicBool = AtomicBool::new(false);
+static KEEPER: std::sync::OnceLock<std::thread::Thread> = std::sync::OnceLock::new();
 
 /// Window size from tauri.conf.json; only the height changes when collapsed.
 const WIDTH: f64 = 380.0;
@@ -45,6 +46,11 @@ pub fn init_from_config(cfg: &serde_json::Value, app: &tauri::AppHandle) {
 fn apply(app: &tauri::AppHandle, mode: bool, collapsed: bool) {
     let collapsed = mode && collapsed;
     WIDGET_MODE.store(mode, Ordering::Relaxed);
+    if mode {
+        if let Some(t) = KEEPER.get() {
+            t.unpark();
+        }
+    }
     if WIDGET_COLLAPSED.swap(collapsed, Ordering::Relaxed) == collapsed {
         return;
     }
@@ -98,25 +104,33 @@ pub fn widget_start_drag(app: tauri::AppHandle) {
 
 /// Keeps the widget above the taskbar. The taskbar is topmost too, so
 /// clicking it covers the widget — and when it already has focus, our
-/// window sees no event at all. So a light loop checks every 25 ms whether
-/// a taskbar sits above the widget and overlaps it, and only then
+/// window sees no event at all. So a light loop checks whether a
+/// taskbar sits above the widget and overlaps it, and only then
 /// re-inserts the widget at the top of the topmost band. (tao's
 /// `set_always_on_top(true)` is a no-op on a window that has the flag.)
+/// The thread sleeps parked while widget mode is off — the default —
+/// and `apply()` unparks it on enable; while the mode is on it checks
+/// every 100 ms.
 pub fn spawn_taskbar_keeper(app: &tauri::AppHandle) {
     let Some(hwnd) = app.get_webview_window("main").and_then(|w| w.hwnd().ok()) else {
         return;
     };
     let hwnd = hwnd.0 as isize; // HWND is not Send
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_millis(25));
+    let handle = std::thread::spawn(move || loop {
+        if !widget_mode() {
+            std::thread::park();
+            continue;
+        }
+        std::thread::sleep(Duration::from_millis(100));
         let hwnd = HWND(hwnd as _);
         unsafe {
-            if widget_mode() && IsWindowVisible(hwnd).as_bool() && under_taskbar(hwnd) {
+            if IsWindowVisible(hwnd).as_bool() && under_taskbar(hwnd) {
                 let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS;
                 let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
             }
         }
     });
+    let _ = KEEPER.set(handle.thread().clone());
 }
 
 /// Whether a visible taskbar (`Shell_TrayWnd`, or `Shell_SecondaryTrayWnd`
