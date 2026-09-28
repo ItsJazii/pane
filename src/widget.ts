@@ -117,7 +117,9 @@ function paintTicker(): void {
     const f = forms.find((f) => f.length > pre.length + post.length && f.startsWith(pre) && f.endsWith(post));
     return f?.slice(pre.length, f.length - post.length);
   };
-  const expires = countdown("card.expiresIn");
+  // In its last minute an expiring credit reads "Expires soon" — no
+  // countdown to extract, but still the expiry icon, not the reset one.
+  const expires = countdown("card.expiresIn") ?? (forms.includes(t("card.expiresSoon")) ? full : undefined);
   const reset = span("ticker-reset", expires ?? countdown("card.resetsIn") ?? full);
   reset.title = full;
   reset.insertAdjacentHTML("afterbegin", expires ? EXPIRES_ICON : RESET_ICON);

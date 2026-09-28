@@ -124,7 +124,9 @@ pub fn spawn_taskbar_keeper(app: &tauri::AppHandle) {
         std::thread::sleep(Duration::from_millis(100));
         let hwnd = HWND(hwnd as _);
         unsafe {
-            if IsWindowVisible(hwnd).as_bool() && under_taskbar(hwnd) {
+            // Re-checked after the sleep: the mode may have been turned off
+            // meanwhile, and a plain popover must not be raised over the taskbar.
+            if widget_mode() && IsWindowVisible(hwnd).as_bool() && under_taskbar(hwnd) {
                 let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS;
                 let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
             }
