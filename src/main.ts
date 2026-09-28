@@ -2815,6 +2815,7 @@ function liftRowDrag(d: RowDrag): void {
   ph.className = "row-placeholder";
   ph.style.height = `${rect.height}px`;
   row.parentNode!.insertBefore(ph, row);
+  d.placeholder = ph;
   row.classList.add("row-lifted");
   row.style.width = `${rect.width}px`;
   row.style.left = `${rect.left}px`;
@@ -2826,6 +2827,8 @@ function liftRowDrag(d: RowDrag): void {
     // The pointer may already be gone; pointerup still settles the drag.
   }
   document.body.classList.add("row-dragging");
+  // The pre-lift movement can leave text selected under the pointer.
+  window.getSelection()?.removeAllRanges();
   // Hover chrome must not float over a dragged row.
   document.querySelector<HTMLElement>("#model-tip")!.hidden = true;
   resetsPopover.dismiss();
@@ -2935,15 +2938,16 @@ function finishRowDrag(d: RowDrag, commit: boolean): void {
     if (deferred) renderAll();
   }
   // The release that ends a lifted drag must not also fire the click
-  // handlers under the pointer (data-flip, caret, spend rows, ...).
-  document.addEventListener(
-    "click",
-    (e) => {
-      e.stopPropagation();
-      e.preventDefault();
-    },
-    { capture: true, once: true },
-  );
+  // handlers under the pointer (data-flip, caret, spend rows, ...). The
+  // re-render above can destroy the press targets so the click never
+  // dispatches — disarm the swallower on the next tick rather than let
+  // it linger and eat a later, real click.
+  const swallow = (e: MouseEvent): void => {
+    e.stopPropagation();
+    e.preventDefault();
+  };
+  document.addEventListener("click", swallow, { capture: true, once: true });
+  setTimeout(() => document.removeEventListener("click", swallow, { capture: true }), 0);
 }
 
 function renderAll(): void {
