@@ -1203,10 +1203,9 @@ body.row-dragging #resets-pop {
   background: var(--accent);
 }
 
+/* No divider: the tucked rows sit at normal row spacing under the caret. */
 .on-demand {
-  border-top: 1px dashed var(--border);
-  margin-top: 6px;
-  padding-top: 8px;
+  margin-top: 2px;
 }
 
 .customize-bar {
