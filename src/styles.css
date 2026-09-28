@@ -61,9 +61,6 @@
 :root[data-density="compact"] .metric {
   padding: 5px 0;
 }
-:root[data-density="compact"] .metric.trend {
-  padding: 4px 0;
-}
 :root[data-density="compact"] .metric-label {
   font-size: 12px;
 }
@@ -858,20 +855,11 @@ body.row-dragging #resets-pop {
 }
 
 /* Usage Trend as a compact sparkline row: label left, chart right. */
-.metric.trend {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 0;
-}
-.metric.trend .metric-label {
-  font-size: 12px;
-  font-weight: 600;
-}
-.metric.trend .trend-chart {
-  flex: 1;
-  min-width: 0;
-  height: 22px;
+.trend-row .trend-spark {
+  width: 128px;
+  height: 18px;
+  flex: none;
+  align-self: center;
 }
 
 .provider-head {
@@ -1352,11 +1340,7 @@ body.row-dragging #resets-pop {
   margin-bottom: 8px;
 }
 
-.trend-chart {
-  width: 100%;
-  height: 32px;
-  display: block;
-}
+
 
 .spend-row {
   cursor: default;
@@ -1849,7 +1833,7 @@ footer {
 }
 
 #providers.reveal .donut-wrap,
-#providers.reveal .trend-chart {
+#providers.reveal .trend-spark {
   animation: fade-in 0.45s ease 0.2s both;
 }
 

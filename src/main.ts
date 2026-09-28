@@ -1299,12 +1299,13 @@ function renderTrend(spend: ProviderSpend): string {
     new Date(Date.now() - (29 - i) * dayMs).toLocaleDateString(localeTag(), { month: "short", day: "numeric" });
   // Each day is a group: the visible bar plus a full-height invisible hit
   // area so thin bars are easy to hover; [data-trend] drives the tooltip.
+  const slot = 128 / spend.trend.length;
   const bars = spend.trend
     .map((v, i) => {
-      const h = v > 0 ? Math.max(2, (v / max) * 30) : 1;
+      const h = v > 0 ? Math.max(2, (v / max) * 16) : 1;
       return `<g class="trend-day">
-        <rect class="${v > 0 ? "trend-bar" : "trend-zero"}" x="${i * 10}" y="${32 - h}" width="7" height="${h}" rx="1.5"/>
-        <rect class="trend-hit" data-trend="${escapeHtml(spend.id)}|${i}" x="${i * 10 - 1.5}" y="0" width="10" height="32" fill="transparent"/>
+        <rect class="${v > 0 ? "trend-bar" : "trend-zero"}" x="${i * slot + slot / 4}" y="${18 - h}" width="${slot / 2}" height="${h}" rx="1"/>
+        <rect class="trend-hit" data-trend="${escapeHtml(spend.id)}|${i}" x="${i * slot}" y="0" width="${slot}" height="18" fill="transparent"/>
       </g>`;
     })
     .join("");
@@ -1315,9 +1316,9 @@ function renderTrend(spend: ProviderSpend): string {
     peak: dateOf(peakIdx),
   });
   return `
-    <div class="metric trend">
-      <span class="metric-label" title="${escapeHtml(title)}">${escapeHtml(t("spend.trend"))}</span>
-      <svg class="trend-chart" viewBox="0 0 297 32" preserveAspectRatio="none">${bars}</svg>
+    <div class="metric-text trend-row">
+      <span title="${escapeHtml(title)}">${escapeHtml(t("spend.trend"))}</span>
+      <svg class="trend-spark" viewBox="0 0 128 18" preserveAspectRatio="none">${bars}</svg>
     </div>`;
 }
 
