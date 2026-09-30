@@ -2,6 +2,8 @@
 
 # Pane
 
+[English](README.md) · [Русский](README.ru.md)
+
 **Pane tracker: all your AI plans and subscriptions in one Windows tray.**
 
 One click on the tray icon answers the questions every AI power user keeps
