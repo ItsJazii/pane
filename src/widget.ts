@@ -181,8 +181,8 @@ export async function applyWidgetState(): Promise<void> {
   hint("#widget-minimize", "widget.minimize");
   if (collapsed) paintTicker();
 
-  // glass drives the real see-through state (shadow off, optional blur)
-  // on the collapsed window; it must ride along even when only the
+  // glass drives the real see-through state (shadow off) on the
+  // collapsed window; it must ride along even when only the
   // glassEffects setting changed.
   await invoke("widget_apply", {
     enabled: on,

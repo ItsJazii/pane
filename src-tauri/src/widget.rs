@@ -71,7 +71,6 @@ fn apply(app: &tauri::AppHandle, mode: bool, collapsed: bool, glass: bool) {
     // A DWM shadow would draw a rectangle around the transparent 380x40
     // window; it only belongs on the opaque popover/expanded widget.
     let _ = window.set_shadow(!see_through);
-    set_accent(&window, see_through);
     if WIDGET_COLLAPSED.swap(collapsed, Ordering::Relaxed) == collapsed {
         return;
     }
@@ -101,76 +100,6 @@ fn keep_on_screen(window: &tauri::WebviewWindow) {
     let y = pos.y.min(bottom).max(top);
     if (x, y) != (pos.x, pos.y) {
         let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
-    }
-}
-
-/// Behind-the-window blur for the see-through slab, via the undocumented
-/// SetWindowCompositionAttribute (the same API window-vibrancy wraps).
-/// Applied only while collapsed + glass; ACCENT_DISABLED clears it.
-/// `PANE_WIDGET_ACCENT` overrides the accent state for experiments
-/// (3 = blur-behind, 4 = acrylic; 0 skips the call entirely).
-fn set_accent(window: &tauri::WebviewWindow, on: bool) {
-    const ACCENT_DISABLED: u32 = 0;
-    const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
-    const WCA_ACCENT_POLICY: u32 = 0x13;
-
-    #[repr(C)]
-    struct AccentPolicy {
-        state: u32,
-        flags: u32,
-        color: u32, // ABGR
-        anim: u32,
-    }
-    #[repr(C)]
-    struct AttrData {
-        attrib: u32,
-        data: *const AccentPolicy,
-        size: usize,
-    }
-
-    let state = if !on {
-        ACCENT_DISABLED
-    } else {
-        match std::env::var("PANE_WIDGET_ACCENT")
-            .ok()
-            .and_then(|v| v.parse::<u32>().ok())
-        {
-            Some(0) => return, // experiments only: plain see-through
-            Some(s) => s,
-            None => ACCENT_ENABLE_ACRYLICBLURBEHIND,
-        }
-    };
-    let Ok(hwnd) = window.hwnd() else {
-        return;
-    };
-    unsafe {
-        let Ok(user32) =
-            windows::Win32::System::LibraryLoader::GetModuleHandleW(windows::core::w!("user32.dll"))
-        else {
-            return;
-        };
-        let Some(proc) = windows::Win32::System::LibraryLoader::GetProcAddress(
-            user32,
-            windows::core::s!("SetWindowCompositionAttribute"),
-        ) else {
-            return;
-        };
-        let set: unsafe extern "system" fn(HWND, *const AttrData) -> i32 =
-            std::mem::transmute(proc);
-        // Acrylic needs a nonzero alpha or it paints black; tint ABGR
-        // = low alpha over #121216, matching the slab fill.
-        let policy = AccentPolicy {
-            state,
-            flags: 0,
-            color: if on { 0x40161212 } else { 0 },
-            anim: 0,
-        };
-        let data = AttrData {
-            attrib: WCA_ACCENT_POLICY,
-            data: &policy,
-            size: std::mem::size_of::<AccentPolicy>(),
-        };
-        let _ = set(hwnd, &data);
     }
 }
 

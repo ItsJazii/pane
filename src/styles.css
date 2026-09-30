@@ -3056,7 +3056,7 @@ body.widget-collapsed:not(.no-glass) #widget-bar {
   overflow: hidden;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.02) 55%, transparent),
-    rgba(18, 18, 22, 0.42);
+    rgba(18, 18, 22, 0.55);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 7px;
   /* backdrop-filter only sees page pixels — dead cost over the
@@ -3074,7 +3074,7 @@ body.widget-collapsed:not(.no-glass) #widget-bar {
 :root[data-theme="light"] body.widget-collapsed:not(.no-glass) #widget-bar {
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.7), rgba(255, 255, 255, 0.2) 55%, transparent),
-    rgba(255, 255, 255, 0.5);
+    rgba(255, 255, 255, 0.62);
   border-color: rgba(0, 0, 0, 0.06);
   box-shadow:
     0 4px 16px -6px rgba(0, 0, 0, 0.18),
@@ -3087,6 +3087,27 @@ body.widget-collapsed:not(.no-glass) #widget-bar {
 body.widget-collapsed:not(.no-glass) #widget-ticker {
   line-height: 14px;
   row-gap: 2px;
+}
+
+/* No real blur is available behind a transparent window, so a faint
+   shadow keeps the ticker text and button icons readable over light or
+   busy backgrounds. */
+body.widget-collapsed:not(.no-glass) #widget-ticker,
+body.widget-collapsed:not(.no-glass) #widget-bar button {
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+
+body.widget-collapsed:not(.no-glass) #widget-bar button svg {
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.5));
+}
+
+:root[data-theme="light"] body.widget-collapsed:not(.no-glass) #widget-ticker,
+:root[data-theme="light"] body.widget-collapsed:not(.no-glass) #widget-bar button {
+  text-shadow: 0 1px 1px rgba(255, 255, 255, 0.7);
+}
+
+:root[data-theme="light"] body.widget-collapsed:not(.no-glass) #widget-bar button svg {
+  filter: drop-shadow(0 1px 1px rgba(255, 255, 255, 0.6));
 }
 
 /* One diagonal specular sweep each time the ticker rolls — the .sweep
