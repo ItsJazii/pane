@@ -40,10 +40,21 @@ fn flags_from_config(cfg: &serde_json::Value) -> (bool, bool) {
 /// Restore the persisted state at boot, before the window is first shown.
 pub fn init_from_config(cfg: &serde_json::Value, app: &tauri::AppHandle) {
     let (mode, collapsed) = flags_from_config(cfg);
-    apply(app, mode, collapsed);
+    // Mirrors the frontend's `glassEffects !== false` default.
+    let glass = cfg
+        .get("glassEffects")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    apply(app, mode, collapsed, glass);
 }
 
-fn apply(app: &tauri::AppHandle, mode: bool, collapsed: bool) {
+/// The collapsed bar is see-through only when widget mode, the collapse
+/// and liquid glass effects are all on.
+fn see_through(mode: bool, collapsed: bool, glass: bool) -> bool {
+    mode && collapsed && glass
+}
+
+fn apply(app: &tauri::AppHandle, mode: bool, collapsed: bool, glass: bool) {
     let collapsed = mode && collapsed;
     WIDGET_MODE.store(mode, Ordering::Relaxed);
     if mode {
@@ -51,12 +62,19 @@ fn apply(app: &tauri::AppHandle, mode: bool, collapsed: bool) {
             t.unpark();
         }
     }
-    if WIDGET_COLLAPSED.swap(collapsed, Ordering::Relaxed) == collapsed {
-        return;
-    }
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
+    // See-through state must track the glass flag too, so it updates even
+    // when `collapsed` itself did not change and the resize below bails.
+    let see_through = see_through(mode, collapsed, glass);
+    // A DWM shadow would draw a rectangle around the transparent 380x40
+    // window; it only belongs on the opaque popover/expanded widget.
+    let _ = window.set_shadow(!see_through);
+    set_accent(&window, see_through);
+    if WIDGET_COLLAPSED.swap(collapsed, Ordering::Relaxed) == collapsed {
+        return;
+    }
     let height = if collapsed { COLLAPSED_HEIGHT } else { EXPANDED_HEIGHT };
     // The window is `resizable: false`, which makes set_size a no-op on
     // Windows — lift it just for the programmatic resize.
@@ -86,11 +104,81 @@ fn keep_on_screen(window: &tauri::WebviewWindow) {
     }
 }
 
+/// Behind-the-window blur for the see-through slab, via the undocumented
+/// SetWindowCompositionAttribute (the same API window-vibrancy wraps).
+/// Applied only while collapsed + glass; ACCENT_DISABLED clears it.
+/// `PANE_WIDGET_ACCENT` overrides the accent state for experiments
+/// (3 = blur-behind, 4 = acrylic; 0 skips the call entirely).
+fn set_accent(window: &tauri::WebviewWindow, on: bool) {
+    const ACCENT_DISABLED: u32 = 0;
+    const ACCENT_ENABLE_ACRYLICBLURBEHIND: u32 = 4;
+    const WCA_ACCENT_POLICY: u32 = 0x13;
+
+    #[repr(C)]
+    struct AccentPolicy {
+        state: u32,
+        flags: u32,
+        color: u32, // ABGR
+        anim: u32,
+    }
+    #[repr(C)]
+    struct AttrData {
+        attrib: u32,
+        data: *const AccentPolicy,
+        size: usize,
+    }
+
+    let state = if !on {
+        ACCENT_DISABLED
+    } else {
+        match std::env::var("PANE_WIDGET_ACCENT")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+        {
+            Some(0) => return, // experiments only: plain see-through
+            Some(s) => s,
+            None => ACCENT_ENABLE_ACRYLICBLURBEHIND,
+        }
+    };
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+    unsafe {
+        let Ok(user32) =
+            windows::Win32::System::LibraryLoader::GetModuleHandleW(windows::core::w!("user32.dll"))
+        else {
+            return;
+        };
+        let Some(proc) = windows::Win32::System::LibraryLoader::GetProcAddress(
+            user32,
+            windows::core::s!("SetWindowCompositionAttribute"),
+        ) else {
+            return;
+        };
+        let set: unsafe extern "system" fn(HWND, *const AttrData) -> i32 =
+            std::mem::transmute(proc);
+        // Acrylic needs a nonzero alpha or it paints black; tint ABGR
+        // = low alpha over #121216, matching the slab fill.
+        let policy = AccentPolicy {
+            state,
+            flags: 0,
+            color: if on { 0x40161212 } else { 0 },
+            anim: 0,
+        };
+        let data = AttrData {
+            attrib: WCA_ACCENT_POLICY,
+            data: &policy,
+            size: std::mem::size_of::<AccentPolicy>(),
+        };
+        let _ = set(hwnd, &data);
+    }
+}
+
 /// Frontend → Rust sync after every widget setting change. Persistence
 /// stays in the frontend (`set_config`), like every other setting.
 #[tauri::command]
-pub fn widget_apply(app: tauri::AppHandle, enabled: bool, collapsed: bool) {
-    apply(&app, enabled, collapsed);
+pub fn widget_apply(app: tauri::AppHandle, enabled: bool, collapsed: bool, glass: bool) {
+    apply(&app, enabled, collapsed, glass);
 }
 
 /// Start the native window drag from the widget bar. A command instead of
@@ -182,5 +270,19 @@ mod tests {
             flags_from_config(&json!({ "widgetMode": "yes", "widgetCollapsed": 1 })),
             (false, false)
         );
+    }
+
+    #[test]
+    fn see_through_needs_mode_collapse_and_glass() {
+        use super::see_through;
+        assert!(see_through(true, true, true));
+        for &(mode, collapsed, glass) in &[
+            (false, true, true),
+            (true, false, true),
+            (true, true, false),
+            (false, false, false),
+        ] {
+            assert!(!see_through(mode, collapsed, glass));
+        }
     }
 }

@@ -102,12 +102,6 @@ function paintTicker(): void {
   const icon = span("provider-icon");
   icon.innerHTML = card.querySelector(".provider-icon")?.innerHTML ?? ""; // the app's own SVG
   icon.style.color = deps?.brandColor(card.dataset.provider ?? "") ?? "";
-  // The aurora behind the collapsed bar tints itself with the provider's
-  // brand color; the registered <color> property cross-fades on each roll.
-  document.body.style.setProperty(
-    "--widget-tint",
-    deps?.brandColor(card.dataset.provider ?? "") ?? "",
-  );
   const title = span("ticker-title", text(row?.querySelector(".metric-label")));
   title.prepend(span("ticker-name", text(card.querySelector(".provider-name"))));
 
@@ -187,5 +181,12 @@ export async function applyWidgetState(): Promise<void> {
   hint("#widget-minimize", "widget.minimize");
   if (collapsed) paintTicker();
 
-  await invoke("widget_apply", { enabled: on, collapsed });
+  // glass drives the real see-through state (shadow off, optional blur)
+  // on the collapsed window; it must ride along even when only the
+  // glassEffects setting changed.
+  await invoke("widget_apply", {
+    enabled: on,
+    collapsed,
+    glass: cfg.glassEffects !== false,
+  });
 }
