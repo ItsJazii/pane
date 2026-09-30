@@ -48,6 +48,15 @@
   color-scheme: light;
 }
 
+/* Collapsed widget's aurora tint — the current ticker provider's brand
+   color, set by paintTicker(). Registered as <color> so the 0.8s
+   cross-fade can interpolate it. */
+@property --widget-tint {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #38bdf8;
+}
+
 /* Compact density: tighter rows, smaller type, thinner meters. */
 :root[data-density="compact"] {
   font-size: 13px;
@@ -2325,14 +2334,16 @@ body.party .trail-tick.active {
 body.no-glass .sidebar,
 body.no-glass .main-col footer,
 body.no-glass .glass-bar,
-body.no-glass .cust-dock {
+body.no-glass .cust-dock,
+body.no-glass #widget-bar {
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
 }
 body.no-glass .sidebar,
 body.no-glass .main-col footer,
 body.no-glass .glass-bar,
-body.no-glass .cust-dock {
+body.no-glass .cust-dock,
+body.no-glass #widget-bar {
   background: var(--background) !important;
 }
 
@@ -3028,4 +3039,138 @@ body.widget-collapsed #widget-bar.has-usage #widget-ticker {
 
 #widget-ticker .ticker-pct.low {
   color: var(--destructive);
+}
+
+/* ── widget liquid glass ── In-page glass for widget mode only. Everything
+   here is gated on body.widget-on:not(.no-glass); the Liquid-glass-effects-off
+   path keeps the flat opaque look, and the normal popover is untouched. */
+
+/* Aurora behind the collapsed slab: dark base + two blobs in the current
+   provider's brand color + one neutral cool wash. --widget-tint is set by
+   paintTicker(); the registered <color> property cross-fades on each roll.
+   No looping animation — the only motion is that tint transition. */
+body.widget-collapsed:not(.no-glass) {
+  background:
+    radial-gradient(120% 190% at 12% -10%, color-mix(in srgb, var(--widget-tint) 34%, transparent), transparent 62%),
+    radial-gradient(130% 190% at 88% 115%, color-mix(in srgb, var(--widget-tint) 26%, transparent), transparent 62%),
+    radial-gradient(90% 150% at 55% 50%, rgba(96, 165, 250, 0.12), transparent 65%),
+    #09090b;
+  transition: --widget-tint 0.8s ease;
+}
+
+:root[data-theme="light"] body.widget-collapsed:not(.no-glass) {
+  background:
+    radial-gradient(120% 190% at 12% -10%, color-mix(in srgb, var(--widget-tint) 26%, transparent), transparent 62%),
+    radial-gradient(130% 190% at 88% 115%, color-mix(in srgb, var(--widget-tint) 18%, transparent), transparent 62%),
+    radial-gradient(90% 150% at 55% 50%, rgba(59, 130, 246, 0.1), transparent 65%),
+    #f4f4f5;
+}
+
+/* Collapsed: the bar floats as a 36px glass slab inset 2px from the window
+   edges (40px window, aurora visible in the gap). Fill + top sheen, rim
+   light via inset shadows (same recipe as .sidebar/.glass-bar), soft outer
+   shadow, hairline border. The #lens-widget SDF filter provides refraction
+   via applyLens's inline backdrop-filter. */
+body.widget-collapsed:not(.no-glass) #widget-bar {
+  position: relative;
+  height: 36px;
+  margin: 2px;
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.02) 55%, transparent),
+    rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 7px;
+  box-shadow:
+    0 4px 16px -6px rgba(0, 0, 0, 0.5),
+    inset 0 1px 1px rgba(255, 255, 255, 0.35),
+    inset 0 -0.5px 1px rgba(255, 255, 255, 0.08),
+    inset 1px 0 1px rgba(255, 255, 255, 0.1),
+    inset -1px 0 1px rgba(255, 255, 255, 0.1);
+}
+
+:root[data-theme="light"] body.widget-collapsed:not(.no-glass) #widget-bar {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.7), rgba(255, 255, 255, 0.2) 55%, transparent),
+    rgba(255, 255, 255, 0.45);
+  border-color: rgba(0, 0, 0, 0.06);
+  box-shadow:
+    0 4px 16px -6px rgba(0, 0, 0, 0.18),
+    inset 0 1px 1px rgba(255, 255, 255, 0.8),
+    inset 0 -0.5px 1px rgba(0, 0, 0, 0.05);
+}
+
+/* The 36px slab leaves ~34px of content height; the two-line ticker is
+   34px at the default metrics, so tighten it a couple of px to be safe. */
+body.widget-collapsed:not(.no-glass) #widget-ticker {
+  line-height: 14px;
+  row-gap: 2px;
+}
+
+/* One diagonal specular sweep each time the ticker rolls — the .sweep
+   class is toggled by roll(); nothing loops and reduce-anim clamps it. */
+body.widget-collapsed:not(.no-glass) #widget-bar::after {
+  content: "";
+  position: absolute;
+  inset: -20% -30%;
+  background: linear-gradient(105deg, transparent 42%, rgba(255, 255, 255, 0.22) 50%, transparent 58%);
+  transform: translateX(-120%);
+  pointer-events: none;
+}
+
+body.widget-collapsed:not(.no-glass) #widget-bar.sweep::after {
+  animation: widget-sweep 0.9s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes widget-sweep {
+  to { transform: translateX(120%); }
+}
+
+/* Glass hairline separator and a small glass chip for the reset pill. */
+body.widget-collapsed:not(.no-glass) #widget-ticker {
+  border-right-color: rgba(255, 255, 255, 0.1);
+}
+
+:root[data-theme="light"] body.widget-collapsed:not(.no-glass) #widget-ticker {
+  border-right-color: rgba(0, 0, 0, 0.08);
+}
+
+body.widget-collapsed:not(.no-glass) #widget-ticker .ticker-reset {
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
+
+:root[data-theme="light"] body.widget-collapsed:not(.no-glass) #widget-ticker .ticker-reset {
+  background: rgba(255, 255, 255, 0.5);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+
+/* Glass hover instead of the flat accent fill. */
+body.widget-on:not(.no-glass) #widget-bar button:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+:root[data-theme="light"] body.widget-on:not(.no-glass) #widget-bar button:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+/* Expanded: the full-width header keeps --bar-filter and gets the same
+   rim-light + sheen the panel glass bars wear. */
+body.widget-on:not(.no-glass):not(.widget-collapsed) #widget-bar {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.02) 55%, transparent),
+    rgba(9, 9, 11, 0.4);
+  box-shadow:
+    0 8px 32px -8px rgba(0, 0, 0, 0.22),
+    inset 0 1px 1.5px rgba(255, 255, 255, 0.35),
+    inset 0 -0.5px 1px rgba(255, 255, 255, 0.08);
+}
+
+:root[data-theme="light"] body.widget-on:not(.no-glass):not(.widget-collapsed) #widget-bar {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.7), rgba(255, 255, 255, 0.2) 55%, transparent),
+    rgba(255, 255, 255, 0.55);
+  box-shadow:
+    0 8px 32px -8px rgba(0, 0, 0, 0.1),
+    inset 0 1px 1.5px rgba(255, 255, 255, 0.6);
 }

@@ -2440,6 +2440,9 @@ function initLiquidLens(): void {
   const surfaces: [string, string, HTMLElement | null][] = [
     ["lens-side", "lens-map-side", document.querySelector(".sidebar")],
     ["lens-footer", "lens-map-footer", document.querySelector(".main-col footer")],
+    // The widget bar is display:none until widget mode is on; the observer
+    // fires on the 0→real-size change, and applyLens skips sub-8px sizes.
+    ["lens-widget", "lens-map-widget", document.querySelector("#widget-bar")],
   ];
   for (const [filterId, imgId, el] of surfaces) {
     if (!el) continue;

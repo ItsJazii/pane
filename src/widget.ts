@@ -102,6 +102,12 @@ function paintTicker(): void {
   const icon = span("provider-icon");
   icon.innerHTML = card.querySelector(".provider-icon")?.innerHTML ?? ""; // the app's own SVG
   icon.style.color = deps?.brandColor(card.dataset.provider ?? "") ?? "";
+  // The aurora behind the collapsed bar tints itself with the provider's
+  // brand color; the registered <color> property cross-fades on each roll.
+  document.body.style.setProperty(
+    "--widget-tint",
+    deps?.brandColor(card.dataset.provider ?? "") ?? "",
+  );
   const title = span("ticker-title", text(row?.querySelector(".metric-label")));
   title.prepend(span("ticker-name", text(card.querySelector(".provider-name"))));
 
@@ -142,6 +148,11 @@ function roll(): void {
   if (document.body.classList.contains("reduce-anim")) return paintTicker();
 
   rolling = true;
+  // One specular sweep across the glass slab per roll (no looping motion).
+  const barEl = $("#widget-bar");
+  barEl?.classList.remove("sweep");
+  void barEl?.offsetWidth;
+  barEl?.classList.add("sweep");
   const timing = { duration: 280, easing: "cubic-bezier(0.4, 0, 0.2, 1)" };
   ticker
     .animate([{}, { transform: "translateY(-50%)", opacity: 0 }], timing)

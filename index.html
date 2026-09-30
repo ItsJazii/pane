@@ -51,6 +51,20 @@
           <feBlend in="rg" in2="chB" mode="screen" result="rgb" />
           <feGaussianBlur in="rgb" stdDeviation="0.35" />
         </filter>
+        <!-- Widget bar: same lens, its own map — it resizes (40px expanded,
+             36px inset when collapsed) independently of the panel bars. -->
+        <filter id="lens-widget" x="0" y="0" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+          <feImage id="lens-map-widget" href="" x="0" y="0" result="map" />
+          <feDisplacementMap in="SourceGraphic" in2="map" scale="39" xChannelSelector="R" yChannelSelector="G" result="dispR" />
+          <feColorMatrix in="dispR" type="matrix" values="1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0" result="chR" />
+          <feDisplacementMap in="SourceGraphic" in2="map" scale="32" xChannelSelector="R" yChannelSelector="G" result="dispG" />
+          <feColorMatrix in="dispG" type="matrix" values="0 0 0 0 0  1 0 0 0 0  0 0 0 0 0  0 0 0 1 0" result="chG" />
+          <feDisplacementMap in="SourceGraphic" in2="map" scale="25" xChannelSelector="R" yChannelSelector="G" result="dispB" />
+          <feColorMatrix in="dispB" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 1 0" result="chB" />
+          <feBlend in="chR" in2="chG" mode="screen" result="rg" />
+          <feBlend in="rg" in2="chB" mode="screen" result="rgb" />
+          <feGaussianBlur in="rgb" stdDeviation="0.35" />
+        </filter>
       </defs>
     </svg>
 
