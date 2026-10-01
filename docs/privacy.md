@@ -11,11 +11,11 @@ This is the complete list. Anything not listed here does not happen.
 
 | Destination | When | What is sent |
 |---|---|---|
-| Each provider's own API (Anthropic, OpenAI/ChatGPT, cursor.com, GitHub, x.ai, opencode.ai, Devin, MiniMax, OpenRouter, Z.ai, Google, DeepSeek, Moonshot, Kimi Code, ElevenLabs, Codebuff, Kilo, AihubMix, Alibaba Model Studio…) | Every refresh (default 1 min), only for providers you have enabled | That provider's own token/key, exactly as its official tool would send it. Full per-provider detail: [providers.md](providers.md) |
+| Each provider's own API (Anthropic, OpenAI/ChatGPT, cursor.com, GitHub, x.ai, opencode.ai, Devin, MiniMax, OpenRouter, Z.ai, Google, DeepSeek, StepFun, Moonshot, Kimi Code, ElevenLabs, Codebuff, Kilo, AihubMix, Alibaba Model Studio…) | Every refresh (default 1 min), only for providers you have enabled | That provider's own token/key, exactly as its official tool would send it. Full per-provider detail: [providers.md](providers.md) |
 | User-configured One/New API origins | Status probe when saving/changing a site, plus one unauthenticated backfill if a stored site has no display unit; billing on every refresh for enabled keys | `/api/status` with no key. Subscription + usage send that site's key as Bearer, **only to that origin** — never to Pane servers. |
 | User-configured Sub2API origins | Each enabled key's scheduled refresh; saving only validates local input | `GET /v1/usage` with that key as Bearer, only to its configured origin, without redirects or fallback endpoints. |
 | `raw.githubusercontent.com` (LiteLLM), `models.dev`, `robinebers.github.io` | ~Daily | Anonymous GET for public model price tables (no identifying data) |
-| `trypane.xyz/api/update` (the legacy `pane.jazii.dev/api/update` redirects there; GitHub Releases is the final fallback) | On launch, whenever the popover opens, and every 4 h in the background | Anonymous GET for the update manifest, carrying the app version. See "The update check" below for exactly what this counts. |
+| `trypane.xyz/api/update` (the legacy `pane.jazii.dev/api/update` redirects there; GitHub Releases is the final fallback) | On launch, whenever the popover opens, and every 4 h in the background | Anonymous GET for the update manifest, carrying the app version. Goes through the outbound proxy from Settings when one is set. See "The update check" below for exactly what this counts. |
 | `us.i.posthog.com` | Once per day | The two anonymous daily-statistic events described in "Anonymous usage statistics" below — a random ID, version, enabled-provider list, and per-provider success/failure counts. Never usage amounts, spend, keys, or error text. |
 | `127.0.0.1:11434` (your own PC) | Every refresh, if Ollama is enabled | Local-only query of your Ollama server |
 
@@ -66,7 +66,8 @@ popover, and every 4 h in the background if the popover never opens. New builds 
 the automatic fallback. Old builds that still call `pane.jazii.dev` are
 handled by a permanent redirect to `trypane.xyz`. Every endpoint serves
 the same manifest, and every update is still signature-verified against
-the key baked into the app. The server counts, per day: **how many
+the key baked into the app. Update checks and downloads go through the
+outbound proxy configured in Settings when one is set. The server counts, per day: **how many
 distinct installs checked in, from which country, on which version.** That's
 the entire list. Concretely:
 
@@ -130,8 +131,9 @@ can read your usage. It is loopback-only (nothing on your network can
 reach it), serves usage numbers only (never credentials or keys), and
 sends **no CORS headers**, and refuses non-loopback `Host` headers — so
 websites you visit cannot read it through your browser, not even via
-DNS rebinding. One/New API key cards are addressable by full snapshot
-id (`onenewapi@<key-id>`) and omit dashboard URL, origin, and secrets.
+DNS rebinding. One/New API and Sub2API key cards are addressable by full
+snapshot id (`onenewapi@<key-id>` / `sub2api@<key-id>`) and omit
+dashboard URL, origin, and secrets.
 Details: [local-http-api.md](local-http-api.md).
 
 ## Verifying all of this

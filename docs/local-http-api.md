@@ -12,7 +12,9 @@ Sub2API entries additionally expose `error` and `warning`. Progress
 entries retain display amounts in `value`/`subtitle` as well as the
 percentage. A Rate Limit Resets row is a text line whose `value` is
 "N available" and whose `resetsAt` is the soonest expiry; per-credit ids
-are never served.
+are never served. A line whose `resetsAt` is an expiry rather than a
+window reset — e.g. Claude's Cloud session credits — additionally
+carries `"expires": true`.
 
 This reads Pane's published snapshots and never initiates a remote usage
 request. Disabled or deleted keys return 404 and disappear from the
