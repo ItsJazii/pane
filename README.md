@@ -11,9 +11,9 @@ asking: *How much of my Claude session is left? When does my Codex weekly
 reset? What did today actually cost me?*
 
 Pane is the [OpenUsage](https://www.openusage.ai/) port for Windows: a free
-AI plan tracker for Claude, Codex, Cursor, Copilot, Kimi, Grok, and 16 more.
+AI plan tracker for Claude, Codex, Cursor, Copilot, Kimi, Grok, and 18 more.
 
-**[trypane.xyz](https://trypane.xyz)** · [Guides](https://trypane.xyz/guides) · [Install](#install) · [How it works](#how-it-works) · [Providers](#providers-22-and-counting) · [Features](#features) · [Privacy](#privacy--security) · [Credits](#credits)
+**[trypane.xyz](https://trypane.xyz)** · [Guides](https://trypane.xyz/guides) · [Install](#install) · [How it works](#how-it-works) · [Providers](#providers-24-and-counting) · [Features](#features) · [Privacy](#privacy--security) · [Credits](#credits)
 
 <img src="docs/promo.png" width="760" alt="Pane — track all your AI subscription limits in one tray app: Total Spend donut with per-provider slices, usage cards with pace bars" />
 
@@ -131,8 +131,8 @@ resets ("Limit reset").
 
 **4. Counting the money.** Your CLIs already log every request locally.
 Pane scans those logs (Claude, Codex, Grok, OpenCode, Devin CLI, Cursor
-CSV, MiniMax CLI, Kimi Code, Qwen Code, the pi coding agent, the Hermes
-desktop app), prices each
+CSV, MiniMax CLI, Kimi Code, Qwen Code, the pi coding agent and its
+oh-my-pi / Step Code forks, the Hermes desktop app), prices each
 request with live per-model rates (LiteLLM /
 models.dev, refreshed daily — hourly while unknown models are around, so
 brand-new models price within the hour), and draws the Today /
@@ -152,11 +152,11 @@ statistic — always on, no in-app switch — (random ID, version, which
 providers are enabled, provider success/failure counts — never amounts or
 error text) — see [Privacy](#privacy--security) for the full contract.
 
-## Providers (22 and counting)
+## Providers (24 and counting)
 
 | Provider | How Pane connects |
 |---|---|
-| Claude (Claude Code) | `%USERPROFILE%\.claude\.credentials.json` + Anthropic usage API; multi-account — every discovered config-dir login gets its own card |
+| Claude (Claude Code) | `%USERPROFILE%\.claude\.credentials.json` + Anthropic usage API; multi-account — every discovered config-dir login gets its own card; Cloud session credits bar counting down to its expiry; banked Rate Limit Resets claimable like Codex's |
 | Codex (Codex CLI) | `%USERPROFILE%\.codex\auth.json` + ChatGPT usage API, incl. reset-credit redemption; multi-account like Claude |
 | Cursor | Cursor's local state database + modern usage RPC; `cursor.com/api/usage-summary` keeps plan bars live when the RPC host is unreachable |
 | OpenCode (Go plan) | Official account-wide usage API (Go key from `auth.json`); local `opencode.db` for spend* |
@@ -168,7 +168,7 @@ error text) — see [Privacy](#privacy--security) for the full contract.
 | Z.ai | API key (Settings), CLI key file, or env var |
 | Antigravity | Local language server, or Google Cloud Code API via Credential Manager |
 | DeepSeek | API key (Settings) → balance |
-| StepFun | API key (Settings) → balance + vouchers with credits-used meter; Step Plan keys show dashboard-only; `step-*` spend routed from Claude Code / Codex / OpenCode |
+| StepFun | API key (Settings, or Step Code's saved `platform_*` key as fallback) → balance + vouchers with credits-used meter; Step Plan tier is opt-in in Settings; `step-*` spend routed from Claude Code / Codex / OpenCode / oh-my-pi / Step Code |
 | Kimi API | Platform API key (Settings) → wallet balance and credits-used meter (global + CN endpoints) |
 | Kimi Code | Official CLI login (`kimi login`) or pasted Kimi For Coding plan key → Session + Weekly bars and membership name (Moderato / Allegretto / Allegro / Vivace); optional Kimi API wallet bar; local session spend |
 | ElevenLabs | API key (Settings) → character quota with reset pacing |
@@ -177,6 +177,7 @@ error text) — see [Privacy](#privacy--security) for the full contract.
 | Kilo | Kilo CLI login file or API key → credit blocks + Kilo Pass |
 | AihubMix | API key (Settings or auto-detected from OpenCode) → usage vs spending limit |
 | One/New API | Add multiple compatible sites and keys in Settings; one quota card per key, with owner-only local secret storage |
+| Sub2API | Add multiple Sub2API sites and keys in Settings; one card per key from each site's `GET /v1/usage` — keys stay owner-only local and are sent only to the configured origin |
 | Qwen Code | Coding Plan key (Settings or env) → 5h/weekly/monthly request quotas + local spend |
 | Hermes | Local ledger `%LOCALAPPDATA%\hermes\state.db` → two recent user models, routes, and catalog-priced spend, including scoped AihubMix launch-model rates |
 
@@ -211,18 +212,27 @@ whatever the community asks for loudest.
   breakdown and a 30-day trend, priced with live model rates. Hover a
   slice and it pops out with its legend row; click the ring to flip
   dollars ⇄ tokens.
-- **Codex reset credits** — see each banked credit's exact expiry and
-  redeem it with one click.
+- **Banked reset credits** — Claude and Codex both bank rate-limit
+  resets: see each credit's exact expiry and redeem it with one click.
 - **Signed auto-updates** — Pane checks for updates every time you open
   it (and every 4 hours in the background); when a release is out, the
   footer version stamp becomes an Update button — one click downloads,
-  verifies the signature, and restarts.
+  verifies the signature, and restarts. Checks and downloads honor the
+  outbound proxy from Settings.
 - **Live tray numbers** — star up to two metrics per provider and they
   render as logo + percentage pairs directly in the tray.
-- **Customize** — drag any card by its grip right in the popover to
-  reorder, or open the Customize screen (☰) to reorder metrics, hide
-  rows, and tuck rarely-needed ones behind an "On Demand" caret. Ctrl+Z
-  undoes.
+- **Widget mode** — Settings → General keeps Pane pinned on screen
+  instead of auto-hiding: drag it by the top bar, lock its position,
+  collapse it to a slim 40 px bar that cycles your providers every
+  8 seconds (main limit, % left, reset countdown), or minimize it to the
+  tray. With Liquid glass effects on, the collapsed bar is a
+  see-through tinted glass slab — no Windows transparency setting
+  needed.
+- **Customize** — drag any metric row right on the card to reorder it,
+  including into and out of the expanded "On Demand" area (Esc
+  cancels); drag whole cards by their grip; or open the Customize
+  screen (☰) to reorder metrics, hide rows, and tuck rarely-needed ones
+  behind the caret. Ctrl+Z undoes.
 - **Liquid glass UI** — real SDF lens refraction on the auto-hiding
   sidebar and glass bars, magnetic minimap trail, circular day/night wipe.
 - **Share cards** — hover a card, click ⧉, and paste anywhere: the copy
@@ -266,9 +276,10 @@ signature-verified.
 ## Settings (gear icon)
 
 Language (Auto / English / 中文 / Русский) · refresh interval · Start with
-Windows · tray metric picker · appearance and compact density · time format ·
+Windows · Widget mode · Liquid glass effects · tray metric picker ·
+appearance and compact density · time format ·
 global shortcut · notification toggles · outbound proxy · provider API keys ·
-One/New API site and key management.
+One/New API and Sub2API site and key management.
 
 ## Credits
 

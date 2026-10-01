@@ -1,9 +1,11 @@
 # Roadmap — full Mac parity (and beyond)
 
-**Status (v0.4.55, 2026-09-25): every wave below is shipped, and the
+**Status (v0.4.56, 2026-10-01): every wave below is shipped, and the
 post-launch releases keep going.** Pane has full feature parity with the
-macOS original plus 23 providers (Sub2API multi-site key tracking
-landed), multi-site One/New API key management,
+macOS original plus 24 providers (StepFun and Sub2API multi-site key
+tracking landed), multi-site One/New API key management,
+widget mode (pinned, draggable, collapsible to a cycling see-through
+glass bar), in-card metric-row reordering, Claude Cloud session credits,
 Kimi Code plan keys without a CLI login, resilient modern Cursor plan
 fallbacks, English/Chinese/Russian UI, signed CI updates, live model
 pricing (now with time-of-day peak windows), and a Mac-parity design
@@ -75,7 +77,8 @@ wave ends with a shipped, installed build.
 - [x] Theme setting: System / Light / Dark (light palette via CSS vars).
 - [x] Density: Default / Compact.
 - [x] Global shortcut to toggle the popover (tauri-plugin-global-shortcut).
-- [x] Proxy setting for all provider requests.
+- [x] Proxy setting for all provider requests (update checks and
+      downloads use it too).
 
 ## Wave 7 — Antigravity (research project)
 - [x] Discover Antigravity's local language-server process on Windows
