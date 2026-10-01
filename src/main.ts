@@ -2793,6 +2793,7 @@ interface RowDrag {
   startY: number;
   offsetY: number;
   lifted: boolean;
+  fromDemand: boolean;
   placeholder: HTMLElement | null;
   originParent: Node | null;
   originNext: Node | null;
@@ -2866,7 +2867,10 @@ function moveRowDrag(d: RowDrag, clientY: number): void {
   d.row.style.top = `${clientY - d.offsetY}px`;
   const panel = d.card.querySelector<HTMLElement>(".card-panel")!;
   const onDemand = panel.querySelector<HTMLElement>(":scope > .on-demand");
-  const zone = onDemand && clientY >= onDemand.getBoundingClientRect().top ? onDemand : panel;
+  // Never tuck the card's last always-visible row: an empty card would be
+  // undone by ensureLayout promoting everything back anyway.
+  const canTuck = panel.querySelector(":scope > [data-row]") !== null;
+  const zone = onDemand && canTuck && clientY >= onDemand.getBoundingClientRect().top ? onDemand : panel;
   const ph = d.placeholder!;
   const rows = Array.from(zone.querySelectorAll<HTMLElement>(":scope > [data-row]"));
   let before: Element | null = null;
@@ -2890,7 +2894,9 @@ function moveRowDrag(d: RowDrag, clientY: number): void {
 /// Slot-fills the card's new DOM order back into the stored layout: only
 /// slots whose key was rendered get dealt a new key, so hidden or
 /// not-currently-rendered metrics keep their positions. On-demand
-/// membership follows the zone each row sits in.
+/// membership changes only for the dragged row, and only when it crossed
+/// zones — sibling membership is left untouched (sub2ApiLiveLayout's
+/// projection can render stored-tucked rows above the caret).
 function persistRowDrag(d: RowDrag): void {
   ensureLayout();
   // The real stored layout — not sub2ApiLiveLayout's projection, which is
@@ -2898,7 +2904,6 @@ function persistRowDrag(d: RowDrag): void {
   const L = providerLayout(d.id);
   const panel = d.card.querySelector<HTMLElement>(".card-panel")!;
   const keys: string[] = [];
-  const inDemand = new Set<string>();
   panel.querySelectorAll<HTMLElement>(":scope > [data-row]").forEach((r) => {
     keys.push(r.dataset.row!);
   });
@@ -2906,12 +2911,19 @@ function persistRowDrag(d: RowDrag): void {
     .querySelectorAll<HTMLElement>(":scope > .on-demand > [data-row]")
     .forEach((r) => {
       keys.push(r.dataset.row!);
-      inDemand.add(r.dataset.row!);
     });
   const keySet = new Set(keys);
   const queue = [...keys];
   L.metricOrder = L.metricOrder.map((k) => (keySet.has(k) ? queue.shift() ?? k : k));
-  L.onDemand = [...L.onDemand.filter((k) => !keySet.has(k)), ...inDemand];
+  // The row is already back in the placeholder's slot, so its zone is
+  // readable from the DOM. Only crossing zones flips membership.
+  const key = d.row.dataset.row!;
+  const nowDemand = !!d.row.parentElement?.classList.contains("on-demand");
+  if (nowDemand !== d.fromDemand) {
+    L.onDemand = nowDemand
+      ? [...L.onDemand, key]
+      : L.onDemand.filter((k) => k !== key);
+  }
   saveLayout(true);
   renderAll(); // also re-renders the Customize drawer when it is open
 }
@@ -5650,6 +5662,7 @@ window.addEventListener("DOMContentLoaded", () => {
       startY: e.clientY,
       offsetY: e.clientY - row.getBoundingClientRect().top,
       lifted: false,
+      fromDemand: !!row.parentElement?.classList.contains("on-demand"),
       placeholder: null,
       originParent: null,
       originNext: null,
@@ -5676,7 +5689,12 @@ window.addEventListener("DOMContentLoaded", () => {
     finishRowDrag(d, false);
   });
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && rowDrag) finishRowDrag(rowDrag, false);
+    if (e.key !== "Escape" || !rowDrag) return;
+    const lifted = rowDrag.lifted;
+    finishRowDrag(rowDrag, false);
+    // Only a real drag swallows Esc — otherwise it still closes the
+    // popover via the window-level Escape handler.
+    if (lifted) e.stopPropagation();
   });
 
   providersEl.addEventListener("click", (e) => {
