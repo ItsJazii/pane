@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.56 — 2026-10-01
+
+### Added
+- **Widget mode (#248 by @SheroAbi).** Settings → General → Widget
+  mode keeps Pane pinned on screen instead of auto-hiding. Drag it by
+  the top bar, lock its position, collapse it to a slim bar that cycles
+  through your providers every 8 seconds (main limit, % left, reset
+  countdown), or minimize it to the tray. Off by default.
+- **See-through glass widget bar (#252).** With Liquid glass effects
+  on, the collapsed widget is a tinted glass bar your desktop shows
+  through. No Windows transparency setting needed; turning Liquid glass
+  off brings back the solid bar.
+- **Drag rows right on the card (#251).** Press any row and pull it up
+  or down, including into and out of the Show more area. Esc cancels,
+  and the order is shared with Customize.
+- **Chinese and Russian READMEs (#249, #250 by @JaminYe).**
+
+### Changed
+- **Compact Usage Trend (#251).** The 30-day trend is now a normal row
+  with a small chart on the right. The dashed line above Show more rows
+  is gone, and the running-out warning uses a drawn flame instead of an
+  emoji.
+
 ## 0.4.55 — 2026-09-25
 
 ### Added
