@@ -2,7 +2,7 @@
 
 # Pane
 
-**English** · [简体中文](README.zh-CN.md)
+**English** · [简体中文](README.zh-CN.md) · [Русский](README.ru.md)
 
 **Pane tracker: all your AI plans and subscriptions in one Windows tray.**
 

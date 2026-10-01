@@ -2,7 +2,7 @@
 
 # Pane
 
-[English](README.md) · **简体中文**
+[English](README.md) · **简体中文** · [Русский](README.ru.md)
 
 **Pane：在 Windows 托盘中查看所有 AI 套餐与订阅。**
 
