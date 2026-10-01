@@ -223,8 +223,8 @@ whatever the community asks for loudest.
   render as logo + percentage pairs directly in the tray.
 - **Widget mode** — Settings → General keeps Pane pinned on screen
   instead of auto-hiding: drag it by the top bar, lock its position,
-  collapse it to a slim 40 px bar that cycles your providers every few
-  seconds (main limit, % left, reset countdown), or minimize it to the
+  collapse it to a slim 40 px bar that cycles your providers every
+  8 seconds (main limit, % left, reset countdown), or minimize it to the
   tray. With Liquid glass effects on, the collapsed bar is a
   see-through tinted glass slab — no Windows transparency setting
   needed.
