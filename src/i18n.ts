@@ -229,7 +229,7 @@ const en: Dict = {
   "card.tokensEst": "{cost} · {n} tokens · estimated",
   "card.tokensPlain": "{cost} · {n} tokens",
 
-  "pace.limitReached": "🔥 Limit reached",
+  "pace.limitReached": "Limit reached",
   "pace.limitReachedTitle": "Limit reached",
   "pace.limitAt": "Limit {when}",
   "pace.limitIn": "Limit in {time}",
@@ -649,7 +649,7 @@ const zh: Dict = {
   "card.tokensEst": "{cost} · {n} tokens · 估算",
   "card.tokensPlain": "{cost} · {n} tokens",
 
-  "pace.limitReached": "🔥 已达上限",
+  "pace.limitReached": "已达上限",
   "pace.limitReachedTitle": "已达上限",
   "pace.limitAt": "{when} 达上限",
   "pace.limitIn": "{time}后达上限",
@@ -1003,7 +1003,7 @@ const ru: Dict = {
   "card.tokensEst": "{cost} · {n} tokens · оценка",
   "card.tokensPlain": "{cost} · {n} tokens",
 
-  "pace.limitReached": "🔥 Лимит исчерпан",
+  "pace.limitReached": "Лимит исчерпан",
   "pace.limitReachedTitle": "Лимит исчерпан",
   "pace.limitAt": "Лимит {when}",
   "pace.limitIn": "Лимит через {time}",

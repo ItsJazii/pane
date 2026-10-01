@@ -1058,15 +1058,17 @@ interface Pace {
   noteClass: string;
   title: string;
   tick: number | null;
+  /// Running out before reset — renderMetric draws a flame glyph.
+  flame: boolean;
 }
 
 function computePace(m: Metric): Pace {
   const used = clampPercent(m.used_percent ?? 0);
   const left = 100 - used;
-  const none: Pace = { cls: "", note: "", noteClass: "", title: "", tick: null };
+  const none: Pace = { cls: "", note: "", noteClass: "", title: "", tick: null, flame: false };
 
   if (left < 0.5) {
-    return { cls: "low", note: t("pace.limitReached"), noteClass: "danger", title: t("pace.limitReachedTitle"), tick: null };
+    return { cls: "low", note: t("pace.limitReached"), noteClass: "danger", title: t("pace.limitReachedTitle"), tick: null, flame: true };
   }
 
   const byLevel = (): Pace => {
@@ -1096,9 +1098,9 @@ function computePace(m: Metric): Pace {
       const when = config.resetExact
         ? t("pace.limitAt", { when: fmtExact(runOutAt) })
         : t("pace.limitIn", { time: fmtDuration(runOutAt - now) });
-      return { cls: "low", note: `🔥 ${when}`, noteClass: "danger", title: t("pace.overReset", { n: over }), tick };
+      return { cls: "low", note: when, noteClass: "danger", title: t("pace.overReset", { n: over }), tick, flame: true };
     }
-    return { cls: "low", note: "🔥", noteClass: "danger", title: t("pace.fullReset"), tick };
+    return { cls: "low", note: "", noteClass: "danger", title: t("pace.fullReset"), tick, flame: true };
   }
 
   const spare = Math.max(1, Math.round(100 - projected));
@@ -1109,6 +1111,7 @@ function computePace(m: Metric): Pace {
       noteClass: "warn",
       title: t("pace.usedReset", { n: Math.round(projected) }),
       tick,
+      flame: false,
     };
   }
   return {
@@ -1117,6 +1120,7 @@ function computePace(m: Metric): Pace {
     noteClass: "",
     title: t("pace.leftReset", { n: spare }),
     tick: config.pacingAlways ? tick : null,
+    flame: false,
   };
 }
 
@@ -1155,14 +1159,19 @@ function renderMetric(m: Metric, providerId: string): string {
     const used = expired ? 100 : clampPercent(m.used_percent);
     const left = Math.round(100 - used);
     const pace: Pace = expired
-      ? { cls: "low", note: "", noteClass: "", title: "", tick: null }
+      ? { cls: "low", note: "", noteClass: "", title: "", tick: null, flame: false }
       : computePace(m);
     const tick =
       pace.tick !== null && pace.tick > 1 && pace.tick < 99
         ? `<span class="tick" style="left:${pace.tick}%"></span>`
         : "";
-    const note = pace.note
-      ? `<span class="pace-note ${pace.noteClass}" title="${escapeHtml(pace.title)}">${escapeHtml(pace.note)}</span>`
+    // The running-out glyph is drawn, not an emoji, so it matches the
+    // note's color (danger red) and scales with the row's font.
+    const flame = pace.flame
+      ? `<svg class="pace-flame" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 16c3.314 0 6-2 6-5.5 0-1.5-.5-4-2.5-6 .25 1.5-1.25 2-1.25 2C11 4 9 .5 6 0c.357 2 .5 4-2 6-1.25 1-2 2.729-2 4.5C2 14 4.686 16 8 16Zm0-1c-1.657 0-3-1-3-2.75 0-.75.25-2 1.25-3C6.125 10 7 10.5 7 10.5c-.375-1.25.5-3.25 2-3.5-.179 1-.25 2 1 3 .625.5 1 1.364 1 2.25C11 14 9.657 15 8 15Z"/></svg>`
+      : "";
+    const note = pace.flame || pace.note
+      ? `<span class="pace-note ${pace.noteClass}" title="${escapeHtml(pace.title)}">${flame}${escapeHtml(pace.note)}</span>`
       : "";
     const headline = expired
       ? t("card.expired")
@@ -1299,12 +1308,13 @@ function renderTrend(spend: ProviderSpend): string {
     new Date(Date.now() - (29 - i) * dayMs).toLocaleDateString(localeTag(), { month: "short", day: "numeric" });
   // Each day is a group: the visible bar plus a full-height invisible hit
   // area so thin bars are easy to hover; [data-trend] drives the tooltip.
+  const slot = 128 / spend.trend.length;
   const bars = spend.trend
     .map((v, i) => {
-      const h = v > 0 ? Math.max(2, (v / max) * 30) : 1;
+      const h = v > 0 ? Math.max(2, (v / max) * 16) : 1;
       return `<g class="trend-day">
-        <rect class="${v > 0 ? "trend-bar" : "trend-zero"}" x="${i * 10}" y="${32 - h}" width="7" height="${h}" rx="1.5"/>
-        <rect class="trend-hit" data-trend="${escapeHtml(spend.id)}|${i}" x="${i * 10 - 1.5}" y="0" width="10" height="32" fill="transparent"/>
+        <rect class="${v > 0 ? "trend-bar" : "trend-zero"}" x="${i * slot + slot / 4}" y="${18 - h}" width="${slot / 2}" height="${h}" rx="1"/>
+        <rect class="trend-hit" data-trend="${escapeHtml(spend.id)}|${i}" x="${i * slot}" y="0" width="${slot}" height="18" fill="transparent"/>
       </g>`;
     })
     .join("");
@@ -1315,9 +1325,9 @@ function renderTrend(spend: ProviderSpend): string {
     peak: dateOf(peakIdx),
   });
   return `
-    <div class="metric trend">
-      <span class="metric-label" title="${escapeHtml(title)}">${escapeHtml(t("spend.trend"))}</span>
-      <svg class="trend-chart" viewBox="0 0 297 32" preserveAspectRatio="none">${bars}</svg>
+    <div class="metric-text trend-row">
+      <span title="${escapeHtml(title)}">${escapeHtml(t("spend.trend"))}</span>
+      <svg class="trend-spark" viewBox="0 0 128 18" preserveAspectRatio="none">${bars}</svg>
     </div>`;
 }
 
@@ -1343,14 +1353,23 @@ function renderSpendRow(
     </div>`;
 }
 
-/// One card row addressed by its layout key.
+/// One card row addressed by its layout key. The key rides on the row's
+/// root element as data-row so an in-card pointer drag can address it;
+/// every renderer below returns a <div> root.
 function renderItem(s: Snapshot, spend: ProviderSpend | undefined, key: string): string {
-  if (key === TREND_KEY) return spend ? renderTrend(spend) : "";
-  const spendKey = SPEND_KEYS.find(([label]) => label === key);
-  if (spendKey)
-    return spend ? renderSpendRow(s.id, spendKey[0], spendKey[1], spend[spendKey[1]], spend) : "";
-  const metric = s.metrics.find((m) => m.label === key);
-  return metric ? renderMetric(metric, s.id) : "";
+  let html: string;
+  if (key === TREND_KEY) {
+    html = spend ? renderTrend(spend) : "";
+  } else {
+    const spendKey = SPEND_KEYS.find(([label]) => label === key);
+    if (spendKey) {
+      html = spend ? renderSpendRow(s.id, spendKey[0], spendKey[1], spend[spendKey[1]], spend) : "";
+    } else {
+      const metric = s.metrics.find((m) => m.label === key);
+      html = metric ? renderMetric(metric, s.id) : "";
+    }
+  }
+  return html.replace("<div", `<div data-row="${escapeHtml(key)}"`);
 }
 
 /// Account-scoped cards (claude@<hash>) inherit their family's chrome —
@@ -2761,7 +2780,193 @@ function renderWelcome(): string {
     </article>`;
 }
 
+// ---------------------------------------------------------------------------
+// In-card row dragging — pointer-based, wired onto #providers at init.
+// Cards themselves keep their HTML5 grip drag; rows never touch it.
+// ---------------------------------------------------------------------------
+
+interface RowDrag {
+  id: string;
+  card: HTMLElement;
+  row: HTMLElement;
+  pointerId: number;
+  startY: number;
+  offsetY: number;
+  lifted: boolean;
+  fromDemand: boolean;
+  placeholder: HTMLElement | null;
+  originParent: Node | null;
+  originNext: Node | null;
+}
+
+let rowDrag: RowDrag | null = null;
+// A renderAll arriving mid-gesture is queued, not run — the lifted row
+// floats in document.body and a re-render would orphan the gesture.
+let rowRenderDeferred = false;
+
+/// Lifts the row out of the card: a placeholder holds its slot while the
+/// row follows the pointer as a fixed element in document.body.
+function liftRowDrag(d: RowDrag): void {
+  const row = d.row;
+  const rect = row.getBoundingClientRect();
+  d.lifted = true;
+  d.originParent = row.parentNode;
+  d.originNext = row.nextSibling;
+  const ph = document.createElement("div");
+  ph.className = "row-placeholder";
+  ph.style.height = `${rect.height}px`;
+  row.parentNode!.insertBefore(ph, row);
+  d.placeholder = ph;
+  row.classList.add("row-lifted");
+  row.style.width = `${rect.width}px`;
+  row.style.left = `${rect.left}px`;
+  row.style.top = `${rect.top}px`;
+  document.body.appendChild(row);
+  try {
+    row.setPointerCapture(d.pointerId);
+  } catch {
+    // The pointer may already be gone; pointerup still settles the drag.
+  }
+  document.body.classList.add("row-dragging");
+  // The pre-lift movement can leave text selected under the pointer.
+  window.getSelection()?.removeAllRanges();
+  // Hover chrome must not float over a dragged row.
+  document.querySelector<HTMLElement>("#model-tip")!.hidden = true;
+  resetsPopover.dismiss();
+}
+
+/// FLIP pass for the live reorder: measure rows, move the placeholder,
+/// then translate each shifted row from its old spot back to zero.
+/// Skipped under reduce-anim.
+function slideRows(card: HTMLElement, mutate: () => void): void {
+  const rows = Array.from(card.querySelectorAll<HTMLElement>("[data-row]"));
+  if (document.body.classList.contains("reduce-anim")) {
+    mutate();
+    return;
+  }
+  const tops = rows.map((r) => r.getBoundingClientRect().top);
+  mutate();
+  rows.forEach((r, i) => {
+    const dy = tops[i] - r.getBoundingClientRect().top;
+    if (!dy) return;
+    r.style.transition = "none";
+    r.style.transform = `translateY(${dy}px)`;
+    requestAnimationFrame(() => {
+      r.style.transition = "transform .18s ease";
+      r.style.transform = "";
+      r.addEventListener("transitionend", () => (r.style.transition = ""), { once: true });
+    });
+  });
+}
+
+/// Follows the pointer: the row tracks vertically while the placeholder
+/// live-sorts among the card's rows by midpoint. The expanded .on-demand
+/// container is a drop zone of its own (landing there makes the row
+/// on-demand; leaving it makes the row always-visible).
+function moveRowDrag(d: RowDrag, clientY: number): void {
+  d.row.style.top = `${clientY - d.offsetY}px`;
+  const panel = d.card.querySelector<HTMLElement>(".card-panel")!;
+  const onDemand = panel.querySelector<HTMLElement>(":scope > .on-demand");
+  // Never tuck the card's last always-visible row: an empty card would be
+  // undone by ensureLayout promoting everything back anyway.
+  const canTuck = panel.querySelector(":scope > [data-row]") !== null;
+  const zone = onDemand && canTuck && clientY >= onDemand.getBoundingClientRect().top ? onDemand : panel;
+  const ph = d.placeholder!;
+  const rows = Array.from(zone.querySelectorAll<HTMLElement>(":scope > [data-row]"));
+  let before: Element | null = null;
+  for (const sib of rows) {
+    const r = sib.getBoundingClientRect();
+    if (clientY < r.top + r.height / 2) {
+      before = sib;
+      break;
+    }
+  }
+  if (!before) {
+    // Past the last row: land at the run's end (before the quick-links /
+    // caret chrome in the always zone; the container end in .on-demand).
+    const last = rows[rows.length - 1];
+    before = last ? last.nextElementSibling : zone.firstElementChild;
+  }
+  if (before === ph || ph.nextElementSibling === before) return;
+  slideRows(d.card, () => zone.insertBefore(ph, before));
+}
+
+/// Slot-fills the card's new DOM order back into the stored layout: only
+/// slots whose key was rendered get dealt a new key, so hidden or
+/// not-currently-rendered metrics keep their positions. On-demand
+/// membership changes only for the dragged row, and only when it crossed
+/// zones — sibling membership is left untouched (sub2ApiLiveLayout's
+/// projection can render stored-tucked rows above the caret).
+function persistRowDrag(d: RowDrag): void {
+  ensureLayout();
+  // The real stored layout — not sub2ApiLiveLayout's projection, which is
+  // what the card renders from but drops keys that aren't live.
+  const L = providerLayout(d.id);
+  const panel = d.card.querySelector<HTMLElement>(".card-panel")!;
+  const keys: string[] = [];
+  panel.querySelectorAll<HTMLElement>(":scope > [data-row]").forEach((r) => {
+    keys.push(r.dataset.row!);
+  });
+  panel
+    .querySelectorAll<HTMLElement>(":scope > .on-demand > [data-row]")
+    .forEach((r) => {
+      keys.push(r.dataset.row!);
+    });
+  const keySet = new Set(keys);
+  const queue = [...keys];
+  L.metricOrder = L.metricOrder.map((k) => (keySet.has(k) ? queue.shift() ?? k : k));
+  // The row is already back in the placeholder's slot, so its zone is
+  // readable from the DOM. Only crossing zones flips membership.
+  const key = d.row.dataset.row!;
+  const nowDemand = !!d.row.parentElement?.classList.contains("on-demand");
+  if (nowDemand !== d.fromDemand) {
+    L.onDemand = nowDemand
+      ? [...L.onDemand, key]
+      : L.onDemand.filter((k) => k !== key);
+  }
+  saveLayout(true);
+  renderAll(); // also re-renders the Customize drawer when it is open
+}
+
+/// Settles the gesture: commit drops the row where its placeholder sits
+/// and persists; cancel restores the row to its pre-lift position.
+function finishRowDrag(d: RowDrag, commit: boolean): void {
+  rowDrag = null;
+  const deferred = rowRenderDeferred;
+  rowRenderDeferred = false;
+  if (!d.lifted) {
+    if (deferred) renderAll();
+    return;
+  }
+  d.row.classList.remove("row-lifted");
+  d.row.removeAttribute("style");
+  document.body.classList.remove("row-dragging");
+  if (commit && d.placeholder) {
+    d.placeholder.replaceWith(d.row);
+    persistRowDrag(d);
+  } else {
+    d.placeholder?.remove();
+    d.originParent?.insertBefore(d.row, d.originNext);
+    if (deferred) renderAll();
+  }
+  // The release that ends a lifted drag must not also fire the click
+  // handlers under the pointer (data-flip, caret, spend rows, ...). The
+  // re-render above can destroy the press targets so the click never
+  // dispatches — disarm the swallower on the next tick rather than let
+  // it linger and eat a later, real click.
+  const swallow = (e: MouseEvent): void => {
+    e.stopPropagation();
+    e.preventDefault();
+  };
+  document.addEventListener("click", swallow, { capture: true, once: true });
+  setTimeout(() => document.removeEventListener("click", swallow, { capture: true }), 0);
+}
+
 function renderAll(): void {
+  if (rowDrag) {
+    rowRenderDeferred = true;
+    return;
+  }
   const el = document.querySelector("#providers")!;
   el.innerHTML =
     renderWelcome() + renderTotalSpend() + orderedSnapshots().map(renderCard).join("");
@@ -5431,6 +5636,66 @@ window.addEventListener("DOMContentLoaded", () => {
     endCardDrag();
   });
   providersEl.addEventListener("dragend", endCardDrag);
+
+  // In-card row reordering: press a row and pull it 5 px vertically to
+  // lift it. Pointer Events — not HTML5 drag — so the gesture never
+  // collides with the card-grip drag above, and until the lift every
+  // click/hover target inside the row keeps working normally.
+  providersEl.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 || config.minimal) return;
+    const target = e.target as HTMLElement;
+    if (
+      target.closest(
+        "button, a, input, select, textarea, .quick-links, .card-caret, .provider-head",
+      )
+    )
+      return;
+    const row = target.closest<HTMLElement>(".card-panel [data-row]");
+    const card = row?.closest<HTMLElement>("article[data-provider]");
+    if (!row || !card) return;
+    if (rowDrag) finishRowDrag(rowDrag, false); // a press that never released
+    rowDrag = {
+      id: card.dataset.provider!,
+      card,
+      row,
+      pointerId: e.pointerId,
+      startY: e.clientY,
+      offsetY: e.clientY - row.getBoundingClientRect().top,
+      lifted: false,
+      fromDemand: !!row.parentElement?.classList.contains("on-demand"),
+      placeholder: null,
+      originParent: null,
+      originNext: null,
+    };
+  });
+  document.addEventListener("pointermove", (e) => {
+    const d = rowDrag;
+    if (!d || e.pointerId !== d.pointerId) return;
+    if (!d.lifted) {
+      if (Math.abs(e.clientY - d.startY) < 5) return;
+      liftRowDrag(d);
+    }
+    moveRowDrag(d, e.clientY);
+    e.preventDefault();
+  });
+  document.addEventListener("pointerup", (e) => {
+    const d = rowDrag;
+    if (!d || e.pointerId !== d.pointerId) return;
+    finishRowDrag(d, true);
+  });
+  document.addEventListener("pointercancel", (e) => {
+    const d = rowDrag;
+    if (!d || e.pointerId !== d.pointerId) return;
+    finishRowDrag(d, false);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || !rowDrag) return;
+    const lifted = rowDrag.lifted;
+    finishRowDrag(rowDrag, false);
+    // Only a real drag swallows Esc — otherwise it still closes the
+    // popover via the window-level Escape handler.
+    if (lifted) e.stopPropagation();
+  });
 
   providersEl.addEventListener("click", (e) => {
     const target = e.target as HTMLElement;

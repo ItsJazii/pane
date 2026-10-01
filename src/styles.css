@@ -61,9 +61,6 @@
 :root[data-density="compact"] .metric {
   padding: 5px 0;
 }
-:root[data-density="compact"] .metric.trend {
-  padding: 4px 0;
-}
 :root[data-density="compact"] .metric-label {
   font-size: 12px;
 }
@@ -829,21 +826,40 @@ select:focus-visible {
   opacity: 0.45;
 }
 
+/* In-card row dragging: the row lifts out as a fixed element while a
+   placeholder holds its slot back in the card (main.ts RowDrag). */
+.row-placeholder {
+  border-radius: 8px;
+}
+.row-lifted {
+  position: fixed;
+  z-index: 60;
+  /* .metric-text's -4px hover inset would offset the fixed box. */
+  margin: 0;
+  transform: scale(1.02);
+  background: var(--card);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.45);
+}
+body.row-dragging {
+  cursor: grabbing;
+}
+body.row-dragging * {
+  cursor: grabbing !important;
+  user-select: none;
+}
+/* Hover chrome stays down while a row is in the air. */
+body.row-dragging #model-tip,
+body.row-dragging #resets-pop {
+  display: none !important;
+}
+
 /* Usage Trend as a compact sparkline row: label left, chart right. */
-.metric.trend {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 0;
-}
-.metric.trend .metric-label {
-  font-size: 12px;
-  font-weight: 600;
-}
-.metric.trend .trend-chart {
-  flex: 1;
-  min-width: 0;
-  height: 22px;
+.trend-row .trend-spark {
+  width: 128px;
+  height: 18px;
+  flex: none;
+  align-self: center;
 }
 
 .provider-head {
@@ -895,6 +911,14 @@ select:focus-visible {
   font-size: 12px;
   color: var(--muted-foreground);
   white-space: nowrap;
+}
+
+/* Drawn flame in running-out notes — inherits the note's color. */
+.pace-flame {
+  width: 11px;
+  height: 11px;
+  margin-right: 4px;
+  vertical-align: -1.5px;
 }
 
 .pace-note.warn {
@@ -1187,10 +1211,9 @@ select:focus-visible {
   background: var(--accent);
 }
 
+/* No divider: the tucked rows sit at normal row spacing under the caret. */
 .on-demand {
-  border-top: 1px dashed var(--border);
-  margin-top: 6px;
-  padding-top: 8px;
+  margin-top: 2px;
 }
 
 .customize-bar {
@@ -1324,11 +1347,7 @@ select:focus-visible {
   margin-bottom: 8px;
 }
 
-.trend-chart {
-  width: 100%;
-  height: 32px;
-  display: block;
-}
+
 
 .spend-row {
   cursor: default;
@@ -1821,7 +1840,7 @@ footer {
 }
 
 #providers.reveal .donut-wrap,
-#providers.reveal .trend-chart {
+#providers.reveal .trend-spark {
   animation: fade-in 0.45s ease 0.2s both;
 }
 
