@@ -2,7 +2,11 @@
 
 # Pane
 
+<<<<<<< HEAD
 [English](README.md) · [Русский](README.ru.md)
+=======
+**English** · [简体中文](README.zh-CN.md)
+>>>>>>> origin/main
 
 **Pane tracker: all your AI plans and subscriptions in one Windows tray.**
 
