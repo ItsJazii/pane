@@ -2,7 +2,7 @@
 
 # Pane
 
-[English](README.md) · [Русский](README.ru.md)
+[English](README.md) · [简体中文](README.zh-CN.md) · **Русский**
 
 **Pane — все ваши тарифы и подписки на ИИ в системном трее Windows.**
 
