@@ -142,6 +142,11 @@ function roll(): void {
   if (document.body.classList.contains("reduce-anim")) return paintTicker();
 
   rolling = true;
+  // One specular sweep across the glass slab per roll (no looping motion).
+  const barEl = $("#widget-bar");
+  barEl?.classList.remove("sweep");
+  void barEl?.offsetWidth;
+  barEl?.classList.add("sweep");
   const timing = { duration: 280, easing: "cubic-bezier(0.4, 0, 0.2, 1)" };
   ticker
     .animate([{}, { transform: "translateY(-50%)", opacity: 0 }], timing)
@@ -176,5 +181,12 @@ export async function applyWidgetState(): Promise<void> {
   hint("#widget-minimize", "widget.minimize");
   if (collapsed) paintTicker();
 
-  await invoke("widget_apply", { enabled: on, collapsed });
+  // glass drives the real see-through state (shadow off) on the
+  // collapsed window; it must ride along even when only the
+  // glassEffects setting changed.
+  await invoke("widget_apply", {
+    enabled: on,
+    collapsed,
+    glass: cfg.glassEffects !== false,
+  });
 }

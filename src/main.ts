@@ -5311,7 +5311,9 @@ async function initSettings(): Promise<void> {
   const glass = document.querySelector<HTMLInputElement>("#glass")!;
   glass.checked = config.glassEffects !== false;
   glass.addEventListener("change", () => {
-    void patchConfig({ glassEffects: glass.checked }).then(applyGlass);
+    // Widget see-through is applied Rust-side, so the widget state must
+    // be re-synced after the glass flag flips too.
+    void patchConfig({ glassEffects: glass.checked }).then(applyGlass).then(applyWidgetState);
   });
   applyGlass();
 
