@@ -154,6 +154,8 @@ fn config_with_defaults(mut cfg: Value) -> Value {
     obj.entry("widgetMode").or_insert(json!(false));
     obj.entry("widgetCollapsed").or_insert(json!(false));
     obj.entry("widgetLocked").or_insert(json!(false));
+    // Extra Codex session folders the user synced in from other machines.
+    obj.entry("codexExtraDirs").or_insert(json!([]));
     cfg
 }
 
@@ -210,6 +212,7 @@ const CONFIG_KEYS: &[&str] = &[
     "widgetMode",
     "widgetCollapsed",
     "widgetLocked",
+    "codexExtraDirs",
 ];
 
 static CONFIG_WRITE: Mutex<()> = Mutex::new(());
@@ -353,6 +356,20 @@ fn apply_tray_locale(app: &tauri::AppHandle, cfg: &Value) {
     if let Some(tray) = app.tray_by_id("tray") {
         let _ = tray.set_menu(Some(menu));
     }
+}
+
+/// Settings validation for "Codex session folders": the path must be
+/// absolute and point at a directory that exists.
+#[tauri::command]
+fn check_dir(path: String) -> Result<(), String> {
+    let dir = Path::new(path.trim());
+    if !dir.is_absolute() {
+        return Err("not an absolute path".into());
+    }
+    if !dir.is_dir() {
+        return Err("folder does not exist".into());
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -3448,6 +3465,7 @@ pub fn run() {
             sub2api_delete_key,
             get_config,
             set_config,
+            check_dir,
             system_ui_locale,
             get_autostart,
             set_autostart,

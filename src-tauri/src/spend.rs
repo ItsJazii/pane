@@ -2599,16 +2599,108 @@ fn orca_runtime_card(
     orca_account_card(dir, default_id, extra_accounts).or(default_is_system.then_some(0))
 }
 
-/// Every (card index, home) pair in global dedup-priority order: the
+/// One scan root feeding the Codex spend plan.
+enum CodexSource {
+    /// A full Codex home: sessions/ + archived_sessions/ deduped by
+    /// relative path, the original rule.
+    Home(PathBuf),
+    /// A bare sessions tree synced from another machine — only rollout-*
+    /// names count, so a copied auth.json or stray .jsonl in the folder
+    /// never enters the scan.
+    SessionsTree(PathBuf),
+}
+
+impl CodexSource {
+    fn dir(&self) -> &Path {
+        match self {
+            CodexSource::Home(d) | CodexSource::SessionsTree(d) => d,
+        }
+    }
+
+    fn files(&self) -> Vec<PathBuf> {
+        match self {
+            CodexSource::Home(home) => codex_session_files(home),
+            CodexSource::SessionsTree(dir) => {
+                let mut out = Vec::new();
+                recent_jsonl_files(dir, &mut out);
+                out.retain(|f| {
+                    f.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("rollout-"))
+                });
+                out
+            }
+        }
+    }
+}
+
+/// The "Codex session folders" the user added in Settings — copies of
+/// other machines' `~/.codex` (or just their sessions tree), synced by
+/// OneDrive/Syncthing/scp. Absolute dirs only, deduped, capped at 10.
+fn codex_extra_dirs() -> Vec<PathBuf> {
+    providers::config_value("codexExtraDirs")
+        .map(|raw| codex_extra_dirs_from(&raw))
+        .unwrap_or_default()
+}
+
+fn codex_extra_dirs_from(raw: &Value) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let Some(dirs) = raw.as_array() else {
+        return out;
+    };
+    for v in dirs {
+        let Some(s) = v.as_str().map(str::trim) else { continue };
+        let dir = PathBuf::from(s);
+        if s.is_empty() || !dir.is_absolute() || !dir.is_dir() || out.contains(&dir) {
+            continue;
+        }
+        out.push(dir);
+        if out.len() >= 10 {
+            break;
+        }
+    }
+    out
+}
+
+/// An extra folder holding sessions/ or archived_sessions/ is a copied
+/// Codex home; anything else is treated as a bare sessions tree.
+fn codex_extra_dir_source(dir: PathBuf) -> CodexSource {
+    if dir.join("sessions").is_dir() || dir.join("archived_sessions").is_dir() {
+        CodexSource::Home(dir)
+    } else {
+        CodexSource::SessionsTree(dir)
+    }
+}
+
+/// Which card an extra folder's sessions join: a home-form folder keeps
+/// its login's card when its auth.json names a known account; everything
+/// else (sessions-tree form, no auth.json, unknown account) lands on the
+/// default card — these folders never become cards of their own.
+fn extra_dir_card(source: &CodexSource, default_id: Option<&str>, extra_ids: &[String]) -> usize {
+    match source {
+        CodexSource::Home(home) => {
+            orca_account_card(home, default_id, extra_ids).unwrap_or(0)
+        }
+        CodexSource::SessionsTree(_) => 0,
+    }
+}
+
+/// Every (card index, source) pair in global dedup-priority order: the
 /// default home, each discovered extra account in discovery order, then
-/// Orca's runtime home and its account homes. Card 0 is the default.
-fn codex_homes_plan() -> (Vec<(String, String)>, Vec<(usize, PathBuf)>) {
+/// Orca's runtime home and its account homes, then the user's extra
+/// folders. Card 0 is the default.
+fn codex_homes_plan() -> (Vec<(String, String)>, Vec<(usize, CodexSource)>) {
     let default = providers::codex::default_home();
     let extras = providers::codex::discover_extra_accounts();
     let mut cards: Vec<(String, String)> = vec![("codex".into(), "Codex".into())];
     cards.extend(extras.iter().map(|a| (a.id.clone(), a.name.clone())));
-    let mut homes: Vec<(usize, PathBuf)> = vec![(0, default)];
-    homes.extend(extras.iter().enumerate().map(|(i, a)| (i + 1, a.dir.clone())));
+    let mut homes: Vec<(usize, CodexSource)> = vec![(0, CodexSource::Home(default))];
+    homes.extend(
+        extras
+            .iter()
+            .enumerate()
+            .map(|(i, a)| (i + 1, CodexSource::Home(a.dir.clone()))),
+    );
     let default_id = providers::codex::default_identity();
     let extra_accounts: Vec<String> =
         extras.iter().map(|a| a.account_id.clone()).collect();
@@ -2645,39 +2737,46 @@ fn codex_homes_plan() -> (Vec<(String, String)>, Vec<(usize, PathBuf)>) {
             }
         };
         if let Some(c) = card {
-            homes.push((c, orca.dir));
+            homes.push((c, CodexSource::Home(orca.dir)));
         }
+    }
+    for dir in codex_extra_dirs() {
+        let source = codex_extra_dir_source(dir);
+        let card = extra_dir_card(&source, default_id.as_deref(), &extra_accounts);
+        homes.push((card, source));
     }
     (cards, homes)
 }
 
 /// The files each card scans. Two dedups apply globally across every
-/// home: canonical home paths (CODEX_HOME may itself point at one of the
-/// other scanned dirs, e.g. Orca's runtime home), then session file names
-/// — Orca mirrors rollouts between homes, so `rollout-<ts>-<uuid>.jsonl`
-/// can exist in several; the largest copy wins (an Orca copy may have
-/// been resumed further) with earlier homes winning ties.
-fn codex_files_plan(card_count: usize, homes: Vec<(usize, PathBuf)>) -> Vec<Vec<PathBuf>> {
-    let mut seen_homes: HashSet<PathBuf> = HashSet::new();
-    let homes: Vec<(usize, PathBuf)> = homes
+/// source: canonical dir paths (CODEX_HOME may itself point at one of the
+/// other scanned dirs, e.g. Orca's runtime home or a synced folder), then
+/// session file names — Orca mirrors rollouts between homes and synced
+/// copies may overlap too, so `rollout-<ts>-<uuid>.jsonl` can exist in
+/// several; the largest copy wins (a copy may have been resumed further)
+/// with earlier sources winning ties.
+fn codex_files_plan(card_count: usize, sources: Vec<(usize, CodexSource)>) -> Vec<Vec<PathBuf>> {
+    let mut seen_dirs: HashSet<PathBuf> = HashSet::new();
+    let sources: Vec<(usize, CodexSource)> = sources
         .into_iter()
-        .filter(|(_, dir)| {
-            let key = fs::canonicalize(dir).unwrap_or_else(|_| dir.clone());
-            seen_homes.insert(key)
+        .filter(|(_, src)| {
+            let key = fs::canonicalize(src.dir()).unwrap_or_else(|_| src.dir().to_path_buf());
+            seen_dirs.insert(key)
         })
         .collect();
-    // name -> (rank, size, path, card)
+    // session key -> (rank, size, path, card)
     let mut winners: HashMap<std::ffi::OsString, (usize, u64, PathBuf, usize)> = HashMap::new();
-    for (rank, (card, dir)) in homes.iter().enumerate() {
-        for file in codex_session_files(dir) {
+    for (rank, (card, src)) in sources.iter().enumerate() {
+        for file in src.files() {
             let Some(name) = file.file_name().map(|n| n.to_os_string()) else {
                 continue;
             };
+            let key = session_dedup_key(&name);
             let size = fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
-            match winners.get(&name) {
+            match winners.get(&key) {
                 Some((_, have, _, _)) if *have >= size => {}
                 _ => {
-                    winners.insert(name, (rank, size, file, *card));
+                    winners.insert(key, (rank, size, file, *card));
                 }
             }
         }
@@ -2692,6 +2791,41 @@ fn codex_files_plan(card_count: usize, homes: Vec<(usize, PathBuf)>) -> Vec<Vec<
         files.sort();
     }
     per_card
+}
+
+/// The identity one session is deduped on across homes: the 8-4-4-12
+/// uuid in its file name. Synced copies keep the uuid but pick up
+/// conflict suffixes — Syncthing's `.sync-conflict-20261005-123456-ABCDEFG`,
+/// OneDrive's `-DESKTOP-X`, `… (1)` — so the name alone can't identify
+/// them. The last uuid-shaped window wins (conflict tails come after the
+/// real uuid); names without one fall back to themselves.
+fn session_dedup_key(name: &std::ffi::OsStr) -> std::ffi::OsString {
+    let s = name.to_string_lossy();
+    uuid_in_name(&s)
+        .map(std::ffi::OsString::from)
+        .unwrap_or_else(|| name.to_os_string())
+}
+
+/// The rightmost `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` group in a file
+/// name, if any.
+fn uuid_in_name(name: &str) -> Option<&str> {
+    const DASHES: [usize; 4] = [8, 13, 18, 23];
+    let b = name.as_bytes();
+    for end in (36..=b.len()).rev() {
+        let start = end - 36;
+        if !name.is_char_boundary(start) {
+            continue;
+        }
+        let w = &b[start..end];
+        if DASHES.iter().all(|&i| w[i] == b'-')
+            && w.iter()
+                .enumerate()
+                .all(|(i, &c)| DASHES.contains(&i) || c.is_ascii_hexdigit())
+        {
+            return Some(&name[start..end]);
+        }
+    }
+    None
 }
 
 /// Codex spend: card 0 is the default account, then each discovered extra
@@ -4573,7 +4707,10 @@ mod tests {
         let runtime = base.join("orca/codex-runtime-home/home");
         let orca_file = write_rollout(&runtime, "rollout-2026-08-18T10-00-00-aaaa.jsonl", 1);
 
-        let plan = codex_files_plan(1, vec![(0, default_home), (0, runtime)]);
+        let plan = codex_files_plan(
+            1,
+            vec![(0, CodexSource::Home(default_home)), (0, CodexSource::Home(runtime))],
+        );
         assert_eq!(plan[0], vec![orca_file]);
         assert_eq!(tokens_sum(&codex_scan_files(&plan[0])), 1_100.0);
         let _ = fs::remove_dir_all(&base);
@@ -4592,7 +4729,10 @@ mod tests {
 
         let plan = codex_files_plan(
             1,
-            vec![(0, default_home.clone()), (0, runtime.clone())],
+            vec![
+                (0, CodexSource::Home(default_home.clone())),
+                (0, CodexSource::Home(runtime.clone())),
+            ],
         );
         // One winner, the larger Orca copy — its three turns scan to 6600;
         // 1100 would mean the default copy won, 7700 both counted.
@@ -4609,7 +4749,10 @@ mod tests {
         );
         let plan = codex_files_plan(
             1,
-            vec![(0, default_home.clone()), (0, runtime.clone())],
+            vec![
+                (0, CodexSource::Home(default_home.clone())),
+                (0, CodexSource::Home(runtime.clone())),
+            ],
         );
         // And the round-one larger copy still wins over the smaller one.
         assert!(plan[0].contains(&orca_file));
@@ -4715,7 +4858,7 @@ mod tests {
         let f1 = write_rollout(&default_home, "rollout-2026-08-18T10-00-00-dddd.jsonl", 1);
         let f2 = write_rollout(&default_home, "rollout-2026-08-18T10-30-00-eeee.jsonl", 1);
 
-        let plan = codex_files_plan(1, vec![(0, default_home.clone())]);
+        let plan = codex_files_plan(1, vec![(0, CodexSource::Home(default_home.clone()))]);
         let mut expected = codex_session_files(&default_home);
         expected.sort();
         assert_eq!(plan[0], expected);
@@ -4737,10 +4880,195 @@ mod tests {
 
         let plan = codex_files_plan(
             1,
-            vec![(0, runtime.clone()), (0, runtime.join("."))],
+            vec![(0, CodexSource::Home(runtime.clone())), (0, CodexSource::Home(runtime.join(".")))],
         );
         assert_eq!(plan[0], vec![file]);
         assert_eq!(tokens_sum(&codex_scan_files(&plan[0])), 1_100.0);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    // ---- Codex: user-added session folders (#256) ------------------------
+
+    /// A synced `~/.codex` copy (sessions/ inside) lands on the default
+    /// card like any other home.
+    #[test]
+    fn codex_extra_home_folder_counts_on_the_default_card() {
+        let base = orca_test_root("extrahome");
+        let default_home = base.join("default");
+        let extra = base.join("synced-mac-codex");
+        let file = write_rollout(&extra, "rollout-2026-08-18T10-00-00-1111.jsonl", 1);
+
+        assert!(matches!(codex_extra_dir_source(extra.clone()), CodexSource::Home(_)));
+        let plan = codex_files_plan(
+            1,
+            vec![(0, CodexSource::Home(default_home)), (0, CodexSource::Home(extra))],
+        );
+        assert_eq!(plan[0], vec![file]);
+        assert_eq!(tokens_sum(&codex_scan_files(&plan[0])), 1_100.0);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A bare sessions tree is scanned recursively but only rollout-*
+    /// files count — a copied auth.json-adjacent .jsonl stays out.
+    #[test]
+    fn codex_sessions_tree_ignores_non_rollout_files() {
+        let base = orca_test_root("tree");
+        let tree = base.join("mac-sessions");
+        let dir = tree.join("2026/08/18");
+        fs::create_dir_all(&dir).unwrap();
+        let keep = dir.join("rollout-2026-08-18T10-00-00-2222.jsonl");
+        fs::write(
+            &keep,
+            [
+                json!({"timestamp": "2026-08-18T10:00:00Z", "type": "turn_context",
+                       "payload": {"model": "gpt-5.6-sol"}}).to_string(),
+                token_count_line("2026-08-18T10:00:01Z", Some((1_000.0, 100.0)), (1_000.0, 100.0)),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        fs::write(dir.join("notes.jsonl"), "{\"junk\":true}").unwrap();
+        fs::write(tree.join("auth.json"), "{}").unwrap();
+
+        assert!(matches!(
+            codex_extra_dir_source(tree.clone()),
+            CodexSource::SessionsTree(_)
+        ));
+        let plan = codex_files_plan(1, vec![(0, CodexSource::SessionsTree(tree))]);
+        assert_eq!(plan[0], vec![keep]);
+        assert_eq!(tokens_sum(&codex_scan_files(&plan[0])), 1_100.0);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// The same rollout name in the default home and an extra folder is
+    /// counted once; the extra folder ranks last so a larger synced copy
+    /// still wins but equal copies keep the default's.
+    #[test]
+    fn codex_extra_folder_dedupes_against_default_home() {
+        let base = orca_test_root("extradedup");
+        let default_home = base.join("default");
+        let extra = base.join("synced");
+        let name = "rollout-2026-08-18T10-00-00-3333.jsonl";
+        let default_file = write_rollout(&default_home, name, 1);
+        let extra_file = write_rollout(&extra, name, 2);
+
+        let plan = codex_files_plan(
+            1,
+            vec![
+                (0, CodexSource::Home(default_home.clone())),
+                (0, CodexSource::SessionsTree(extra.clone())),
+            ],
+        );
+        // Larger synced copy wins once — 3300 tokens, never 1100 + 3300.
+        assert_eq!(plan[0], vec![extra_file]);
+        assert_eq!(tokens_sum(&codex_scan_files(&plan[0])), 3_300.0);
+        assert!(!plan[0].contains(&default_file));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Synced copies keep the rollout's uuid but gain conflict suffixes
+    /// (Syncthing `.sync-conflict-…`, OneDrive `-DESKTOP-X`, `… (1)`), so
+    /// dedup keys on the uuid, not the file name: same uuid = one count,
+    /// largest copy wins.
+    #[test]
+    fn codex_dedup_keys_on_session_uuid_across_conflict_names() {
+        let base = orca_test_root("uuidconflict");
+        let default_home = base.join("default");
+        let extra = base.join("synced");
+        let uuid = "01a10d4d-8547-7dd1-b4dd-3335af230003";
+        let default_file = write_rollout(
+            &default_home,
+            &format!("rollout-2026-10-05T23-22-26-{uuid}.jsonl"),
+            1,
+        );
+        // Conflict copies with ever-larger contents (2, 3, 4 turns) —
+        // all bigger than the default home's single turn.
+        let mut conflict_files = Vec::new();
+        for (i, name) in [
+            format!("rollout-2026-10-05T23-22-26-{uuid}.sync-conflict-20261005-123456-ABCDEFG.jsonl"),
+            format!("rollout-2026-10-05T23-22-26-{uuid}-DESKTOP-X.jsonl"),
+            format!("rollout-2026-10-05T23-22-26-{uuid} (1).jsonl"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            conflict_files.push(write_rollout(&extra, name, 2 + i));
+        }
+        let biggest = conflict_files.last().unwrap().clone();
+
+        let plan = codex_files_plan(
+            1,
+            vec![
+                (0, CodexSource::Home(default_home.clone())),
+                (0, CodexSource::SessionsTree(extra.clone())),
+            ],
+        );
+        // One session across four names → one winner: the largest copy.
+        assert_eq!(plan[0], vec![biggest.clone()]);
+        assert!(!plan[0].contains(&default_file));
+        let expected = tokens_sum(&codex_scan_files(std::slice::from_ref(&biggest)));
+        assert_eq!(tokens_sum(&codex_scan_files(&plan[0])), expected);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Config hygiene: relative paths, missing dirs, non-strings and
+    /// duplicates are dropped; the list caps at 10.
+    #[test]
+    fn codex_extra_dirs_rejects_bad_entries() {
+        let base = orca_test_root("dirs");
+        let real = base.join("real");
+        fs::create_dir_all(&real).unwrap();
+        let real_str = real.to_string_lossy().to_string();
+        let raw = json!([
+            "relative/path",          // not absolute
+            base.join("missing").to_string_lossy(), // doesn't exist
+            real_str.clone(),
+            real_str.clone(),         // duplicate
+            "  ",                     // blank
+            42,                       // not a string
+        ]);
+        assert_eq!(codex_extra_dirs_from(&raw), vec![real.clone()]);
+        assert_eq!(codex_extra_dirs_from(&json!(null)), Vec::<PathBuf>::new());
+        // Cap at 10.
+        let many = json!((0..15).map(|_| real_str.clone()).collect::<Vec<_>>());
+        assert_eq!(codex_extra_dirs_from(&many).len(), 1); // all dupes of `real`
+        let mut distinct = Vec::new();
+        for i in 0..12 {
+            let d = base.join(format!("d{i}"));
+            fs::create_dir_all(&d).unwrap();
+            distinct.push(d.to_string_lossy().to_string());
+        }
+        assert_eq!(codex_extra_dirs_from(&json!(distinct)).len(), 10);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// An extra folder whose auth.json names a discovered extra account
+    /// routes to that card; the default login and anything unknown or
+    /// auth-less land on the default card.
+    #[test]
+    fn codex_extra_dir_attribution() {
+        let base = orca_test_root("extrattr");
+        let as_default = base.join("as-default");
+        let as_extra = base.join("as-extra");
+        let unknown = base.join("unknown");
+        let anonymous = base.join("anonymous");
+        for d in [&as_default, &as_extra, &unknown, &anonymous] {
+            fs::create_dir_all(d.join("sessions")).unwrap();
+        }
+        write_codex_auth(&as_default, "acct-default");
+        write_codex_auth(&as_extra, "acct-work");
+        write_codex_auth(&unknown, "acct-stranger");
+
+        let extras = vec!["acct-work".to_string()];
+        let home = |d: &PathBuf| CodexSource::Home(d.clone());
+        assert_eq!(extra_dir_card(&home(&as_default), Some("acct-default"), &extras), 0);
+        assert_eq!(extra_dir_card(&home(&as_extra), Some("acct-default"), &extras), 1);
+        assert_eq!(extra_dir_card(&home(&unknown), Some("acct-default"), &extras), 0);
+        assert_eq!(extra_dir_card(&home(&anonymous), Some("acct-default"), &extras), 0);
+        assert_eq!(
+            extra_dir_card(&CodexSource::SessionsTree(anonymous), Some("acct-default"), &extras),
+            0
+        );
         let _ = fs::remove_dir_all(&base);
     }
 
