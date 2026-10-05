@@ -356,6 +356,25 @@
       </div>
 
       <div class="acc-group">
+        <button class="acc-head"><span data-i18n="settings.codexDirs">Codex session folders</span> <span class="chev">&#8964;</span></button>
+        <div class="acc-body"><div class="acc-inner">
+          <p class="settings-note" data-i18n="settings.codexDirsNote">
+            Include Codex sessions from other machines. Sync or copy their
+            ~/.codex folder (or its sessions folder) to this PC with
+            OneDrive, Syncthing or scp, then add the folder here. Pane only
+            reads it, and counts each session once.
+          </p>
+          <div id="codex-dirs"></div>
+          <form id="codex-dirs-add" class="ona-add" autocomplete="off">
+            <div class="ona-add-row">
+              <input id="codex-dirs-input" type="text" spellcheck="false" placeholder="C:\Sync\mac-codex" />
+              <button type="submit" data-i18n="settings.codexDirsAdd">Add</button>
+            </div>
+          </form>
+        </div></div>
+      </div>
+
+      <div class="acc-group">
         <button class="acc-head"><span data-i18n="settings.advanced">Advanced</span> <span class="chev">&#8964;</span></button>
         <div class="acc-body"><div class="acc-inner">
           <p class="settings-note" data-i18n="settings.advancedNote">

@@ -643,6 +643,27 @@ select:focus-visible {
   margin: 0;
 }
 
+.codex-dir-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+}
+
+.codex-dir-row .path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--secondary-foreground);
+}
+
+.codex-dir-row .mini-btn {
+  flex: none;
+}
+
 .ona-site .mini-btn.danger {
   color: var(--destructive);
 }

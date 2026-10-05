@@ -121,8 +121,9 @@ origins, dashboard URLs and raw responses. See [providers.md](providers.md).
 - **Usage snapshots & spend cache**: `%APPDATA%\Pane\` — cached locally so
   the app opens instantly; never uploaded.
 - **Spend accounting**: computed by reading the CLIs' local log files on
-  your disk. The logs never leave your machine; only the public price
-  tables are downloaded.
+  your disk — including folders you add under Settings → Codex session
+  folders, which Pane only reads. The logs never leave your machine;
+  only the public price tables are downloaded.
 
 ## The local HTTP API
 

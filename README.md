@@ -279,7 +279,7 @@ Language (Auto / English / 中文 / Русский) · refresh interval · Start
 Windows · Widget mode · Liquid glass effects · tray metric picker ·
 appearance and compact density · time format ·
 global shortcut · notification toggles · outbound proxy · provider API keys ·
-One/New API and Sub2API site and key management.
+extra Codex session folders · One/New API and Sub2API site and key management.
 
 ## Credits
 

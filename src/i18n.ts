@@ -152,6 +152,16 @@ const en: Dict = {
   "settings.keyPhAihubmix": "sk-… (auto-detected from OpenCode)",
   "settings.keyPhQwen": "sk-sp-… (auto-detected from env)",
 
+  "settings.codexDirs": "Codex session folders",
+  "settings.codexDirsNote":
+    "Include Codex sessions from other machines. Sync or copy their ~/.codex folder (or its sessions folder) to this PC with OneDrive, Syncthing or scp, then add the folder here. Pane only reads it, and counts each session once.",
+  "settings.codexDirsAdd": "Add",
+  "settings.codexDirsAdded": "Folder added",
+  "settings.codexDirsRemoved": "Folder removed",
+  "settings.codexDirsDup": "Folder already added",
+  "settings.codexDirsMax": "Up to 10 folders",
+  "settings.codexDirRemove": "Remove",
+
   "settings.advanced": "Advanced",
   "settings.advancedNote":
     "Restores every preference to its default and re-detects installed tools. API keys and your usage history stay. Proxy changes still need a restart.",
@@ -572,6 +582,16 @@ const zh: Dict = {
   "settings.keyPhAihubmix": "sk-…（可从 OpenCode 自动读取）",
   "settings.keyPhQwen": "sk-sp-…（可从环境变量自动读取）",
 
+  "settings.codexDirs": "Codex 会话目录",
+  "settings.codexDirsNote":
+    "把其他电脑上的 Codex 会话算进来。用 OneDrive、Syncthing 或 scp 把它们的 ~/.codex 目录（或其中的 sessions 目录）同步/复制到这台电脑，然后在这里添加该目录。Pane 只读取它，每个会话只计一次。",
+  "settings.codexDirsAdd": "添加",
+  "settings.codexDirsAdded": "已添加目录",
+  "settings.codexDirsRemoved": "已移除目录",
+  "settings.codexDirsDup": "该目录已添加",
+  "settings.codexDirsMax": "最多 10 个目录",
+  "settings.codexDirRemove": "移除",
+
   "settings.advanced": "高级",
   "settings.advancedNote":
     "把所有偏好恢复成默认值，并重新检测已安装的工具。API 密钥和用量记录会保留。代理更改仍需重启。",
@@ -952,6 +972,16 @@ const ru: Dict = {
   "settings.keyPhKilo": "Ключ API (можно взять из CLI)",
   "settings.keyPhAihubmix": "sk-… (можно взять из OpenCode)",
   "settings.keyPhQwen": "sk-sp-… (можно взять из переменных среды)",
+
+  "settings.codexDirs": "Папки сессий Codex",
+  "settings.codexDirsNote":
+    "Учитывайте сессии Codex с других машин. Синхронизируйте или скопируйте их папку ~/.codex (или её подпапку sessions) на этот ПК через OneDrive, Syncthing или scp и добавьте её здесь. Pane только читает её и считает каждую сессию один раз.",
+  "settings.codexDirsAdd": "Добавить",
+  "settings.codexDirsAdded": "Папка добавлена",
+  "settings.codexDirsRemoved": "Папка удалена",
+  "settings.codexDirsDup": "Папка уже добавлена",
+  "settings.codexDirsMax": "Не более 10 папок",
+  "settings.codexDirRemove": "Удалить",
 
   "settings.advanced": "Дополнительно",
   "settings.advancedNote":

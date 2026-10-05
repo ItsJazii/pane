@@ -233,6 +233,7 @@ export interface Config {
   widgetMode: boolean;
   widgetCollapsed: boolean;
   widgetLocked: boolean;
+  codexExtraDirs: string[];
 }
 
 const FRONTEND_CONFIG_KEYS = [
@@ -271,6 +272,7 @@ const FRONTEND_CONFIG_KEYS = [
   "widgetMode",
   "widgetCollapsed",
   "widgetLocked",
+  "codexExtraDirs",
 ] as const satisfies readonly (keyof Config)[];
 type _AssertAllConfigKeys = Exclude<keyof Config, (typeof FRONTEND_CONFIG_KEYS)[number]> extends never
   ? true
@@ -469,6 +471,7 @@ let config: Config = {
   widgetMode: false,
   widgetCollapsed: false,
   widgetLocked: false,
+  codexExtraDirs: [],
 };
 let lastFetch = 0;
 let refreshing = false;
@@ -5190,6 +5193,65 @@ function applyLocale(): void {
   renderBuildInfo();
 }
 
+function renderCodexDirs(): void {
+  const host = document.querySelector("#codex-dirs");
+  if (!host) return;
+  host.innerHTML = (config.codexExtraDirs ?? [])
+    .map(
+      (dir) =>
+        `<div class="codex-dir-row"><span class="path" title="${escapeHtml(dir)}">${escapeHtml(dir)}</span>` +
+        `<button type="button" class="mini-btn danger" data-codex-dir-remove="${escapeHtml(dir)}" ` +
+        `data-i18n-aria="settings.codexDirRemove" data-i18n-title="settings.codexDirRemove" ` +
+        `aria-label="${escapeHtml(t("settings.codexDirRemove"))}" title="${escapeHtml(t("settings.codexDirRemove"))}">×</button></div>`,
+    )
+    .join("");
+}
+
+async function addCodexDir(rawPath: string): Promise<void> {
+  const status = document.querySelector("#status")!;
+  // Trailing separators are spelling, not a different folder.
+  let path = rawPath.trim().replace(/[\\/]+$/, "");
+  if (/^[A-Za-z]:$/.test(path)) path += "\\"; // C: -> C:\
+  if (!path) return;
+  const dirs = config.codexExtraDirs ?? [];
+  if (dirs.some((d) => d.trim().replace(/[\\/]+$/, "").toLowerCase() === path.toLowerCase())) {
+    status.textContent = t("settings.codexDirsDup");
+    return;
+  }
+  if (dirs.length >= 10) {
+    status.textContent = t("settings.codexDirsMax");
+    return;
+  }
+  try {
+    await invoke("check_dir", { path });
+  } catch (err) {
+    status.textContent = `${err}`;
+    return;
+  }
+  try {
+    await patchConfig({ codexExtraDirs: [...dirs, path] });
+  } catch {
+    return;
+  }
+  const input = document.querySelector<HTMLInputElement>("#codex-dirs-input");
+  if (input) input.value = "";
+  renderCodexDirs();
+  status.textContent = t("settings.codexDirsAdded");
+  void refresh(true); // rescan spend with the new folder
+}
+
+async function removeCodexDir(dir: string): Promise<void> {
+  const dirs = (config.codexExtraDirs ?? []).filter((d) => d !== dir);
+  try {
+    await patchConfig({ codexExtraDirs: dirs });
+  } catch {
+    return;
+  }
+  renderCodexDirs();
+  document.querySelector("#status")!.textContent = t("settings.codexDirsRemoved");
+  void refresh(true);
+}
+
 async function initSettings(): Promise<void> {
   config = await invoke<Config>("get_config");
   // First launch timestamp — backs the star prompt's "a few days old"
@@ -5351,6 +5413,18 @@ async function initSettings(): Promise<void> {
   proxyEnabled.addEventListener("change", saveProxy);
   proxyUrl.addEventListener("change", saveProxy);
 
+  const codexDirsForm = document.querySelector<HTMLFormElement>("#codex-dirs-add")!;
+  codexDirsForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const input = document.querySelector<HTMLInputElement>("#codex-dirs-input")!;
+    void addCodexDir(input.value);
+  });
+  document.querySelector("#codex-dirs")!.addEventListener("click", (e) => {
+    const btn = (e.target as HTMLElement).closest<HTMLElement>("[data-codex-dir-remove]");
+    if (btn?.dataset.codexDirRemove) void removeCodexDir(btn.dataset.codexDirRemove);
+  });
+  renderCodexDirs();
+
   populatePinnedOptions();
 
   document.querySelector("#reset-all-settings")!.addEventListener("click", () => {
@@ -5412,6 +5486,7 @@ async function resetAllSettings(): Promise<void> {
     widgetMode: false,
     widgetCollapsed: false,
     widgetLocked: false,
+    codexExtraDirs: [],
   }).catch(() => {});
   spendTab = "today";
   applyLocale();
@@ -5462,6 +5537,7 @@ function syncSettingsControls(): void {
   setNum("#proxy-url", config.proxy?.url ?? "");
   const autostart = document.querySelector<HTMLInputElement>("#autostart");
   if (autostart) autostart.checked = true;
+  renderCodexDirs();
   populatePinnedOptions();
   // Resetting toggles programmatically fires no change events — re-arm
   // (or clear) the reset-moment timer against the restored values.

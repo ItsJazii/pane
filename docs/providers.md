@@ -84,7 +84,10 @@ Ground rules that apply to every provider:
 - **Shows:** Session/Weekly, Spark windows, credit balance, redeemable
   reset credits; local spend from `~\.codex\sessions\` logs — sessions
   Codex runs inside [Orca](https://github.com/stablyai/orca) count too,
-  folding into the card their login matches. Child
+  folding into the card their login matches. Sessions from other machines
+  count too: add a synced copy of their `~/.codex` (or just its
+  `sessions/`) under Settings → Codex session folders — read-only, each
+  rollout counts once. Child
   sessions (subagent spawns and forks) replay the parent's entire token
   history at spawn — those replayed lines are skipped, so subagent-heavy
   use doesn't inflate spend. Turns that ran on the fast/priority service
