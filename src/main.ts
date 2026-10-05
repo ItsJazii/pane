@@ -5237,7 +5237,7 @@ async function addCodexDir(rawPath: string): Promise<void> {
   if (input) input.value = "";
   renderCodexDirs();
   status.textContent = t("settings.codexDirsAdded");
-  void refresh(true); // rescan spend with the new folder
+  void forceUsageRefreshAttempt(false).then(requestTraySync);
 }
 
 async function removeCodexDir(dir: string): Promise<void> {
@@ -5249,7 +5249,7 @@ async function removeCodexDir(dir: string): Promise<void> {
   }
   renderCodexDirs();
   document.querySelector("#status")!.textContent = t("settings.codexDirsRemoved");
-  void refresh(true);
+  void forceUsageRefreshAttempt(false).then(requestTraySync);
 }
 
 async function initSettings(): Promise<void> {
