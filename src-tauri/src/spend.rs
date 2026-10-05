@@ -2742,7 +2742,7 @@ fn codex_homes_plan() -> (Vec<(String, String)>, Vec<(usize, CodexSource)>) {
     }
     for dir in codex_extra_dirs() {
         let source = codex_extra_dir_source(dir);
-        let card = extra_dir_card(&source, default_id.as_deref(), &extra_ids);
+        let card = extra_dir_card(&source, default_id.as_deref(), &extra_accounts);
         homes.push((card, source));
     }
     (cards, homes)
@@ -2764,18 +2764,19 @@ fn codex_files_plan(card_count: usize, sources: Vec<(usize, CodexSource)>) -> Ve
             seen_dirs.insert(key)
         })
         .collect();
-    // name -> (rank, size, path, card)
+    // session key -> (rank, size, path, card)
     let mut winners: HashMap<std::ffi::OsString, (usize, u64, PathBuf, usize)> = HashMap::new();
     for (rank, (card, src)) in sources.iter().enumerate() {
         for file in src.files() {
             let Some(name) = file.file_name().map(|n| n.to_os_string()) else {
                 continue;
             };
+            let key = session_dedup_key(&name);
             let size = fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
-            match winners.get(&name) {
+            match winners.get(&key) {
                 Some((_, have, _, _)) if *have >= size => {}
                 _ => {
-                    winners.insert(name, (rank, size, file, *card));
+                    winners.insert(key, (rank, size, file, *card));
                 }
             }
         }
@@ -2790,6 +2791,41 @@ fn codex_files_plan(card_count: usize, sources: Vec<(usize, CodexSource)>) -> Ve
         files.sort();
     }
     per_card
+}
+
+/// The identity one session is deduped on across homes: the 8-4-4-12
+/// uuid in its file name. Synced copies keep the uuid but pick up
+/// conflict suffixes — Syncthing's `.sync-conflict-20261005-123456-ABCDEFG`,
+/// OneDrive's `-DESKTOP-X`, `… (1)` — so the name alone can't identify
+/// them. The last uuid-shaped window wins (conflict tails come after the
+/// real uuid); names without one fall back to themselves.
+fn session_dedup_key(name: &std::ffi::OsStr) -> std::ffi::OsString {
+    let s = name.to_string_lossy();
+    uuid_in_name(&s)
+        .map(std::ffi::OsString::from)
+        .unwrap_or_else(|| name.to_os_string())
+}
+
+/// The rightmost `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` group in a file
+/// name, if any.
+fn uuid_in_name(name: &str) -> Option<&str> {
+    const DASHES: [usize; 4] = [8, 13, 18, 23];
+    let b = name.as_bytes();
+    for end in (36..=b.len()).rev() {
+        let start = end - 36;
+        if !name.is_char_boundary(start) {
+            continue;
+        }
+        let w = &b[start..end];
+        if DASHES.iter().all(|&i| w[i] == b'-')
+            && w.iter()
+                .enumerate()
+                .all(|(i, &c)| DASHES.contains(&i) || c.is_ascii_hexdigit())
+        {
+            return Some(&name[start..end]);
+        }
+    }
+    None
 }
 
 /// Codex spend: card 0 is the default account, then each discovered extra
@@ -4930,6 +4966,51 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
+    /// Synced copies keep the rollout's uuid but gain conflict suffixes
+    /// (Syncthing `.sync-conflict-…`, OneDrive `-DESKTOP-X`, `… (1)`), so
+    /// dedup keys on the uuid, not the file name: same uuid = one count,
+    /// largest copy wins.
+    #[test]
+    fn codex_dedup_keys_on_session_uuid_across_conflict_names() {
+        let base = orca_test_root("uuidconflict");
+        let default_home = base.join("default");
+        let extra = base.join("synced");
+        let uuid = "01a10d4d-8547-7dd1-b4dd-3335af230003";
+        let default_file = write_rollout(
+            &default_home,
+            &format!("rollout-2026-10-05T23-22-26-{uuid}.jsonl"),
+            1,
+        );
+        // Conflict copies with ever-larger contents (2, 3, 4 turns) —
+        // all bigger than the default home's single turn.
+        let mut conflict_files = Vec::new();
+        for (i, name) in [
+            format!("rollout-2026-10-05T23-22-26-{uuid}.sync-conflict-20261005-123456-ABCDEFG.jsonl"),
+            format!("rollout-2026-10-05T23-22-26-{uuid}-DESKTOP-X.jsonl"),
+            format!("rollout-2026-10-05T23-22-26-{uuid} (1).jsonl"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            conflict_files.push(write_rollout(&extra, name, 2 + i));
+        }
+        let biggest = conflict_files.last().unwrap().clone();
+
+        let plan = codex_files_plan(
+            1,
+            vec![
+                (0, CodexSource::Home(default_home.clone())),
+                (0, CodexSource::SessionsTree(extra.clone())),
+            ],
+        );
+        // One session across four names → one winner: the largest copy.
+        assert_eq!(plan[0], vec![biggest.clone()]);
+        assert!(!plan[0].contains(&default_file));
+        let expected = tokens_sum(&codex_scan_files(std::slice::from_ref(&biggest)));
+        assert_eq!(tokens_sum(&codex_scan_files(&plan[0])), expected);
+        let _ = fs::remove_dir_all(&base);
+    }
+
     /// Config hygiene: relative paths, missing dirs, non-strings and
     /// duplicates are dropped; the list caps at 10.
     #[test]
@@ -4978,7 +5059,7 @@ mod tests {
         write_codex_auth(&as_extra, "acct-work");
         write_codex_auth(&unknown, "acct-stranger");
 
-        let extras = vec![providers::codex::card_id_of("acct-work")];
+        let extras = vec!["acct-work".to_string()];
         let home = |d: &PathBuf| CodexSource::Home(d.clone());
         assert_eq!(extra_dir_card(&home(&as_default), Some("acct-default"), &extras), 0);
         assert_eq!(extra_dir_card(&home(&as_extra), Some("acct-default"), &extras), 1);

@@ -5190,6 +5190,7 @@ function applyLocale(): void {
   }
   if (lastSnapshots.length) renderIfVisible();
   populatePinnedOptions();
+  renderCodexDirs(); // × buttons re-translate with the rest of the list
   renderBuildInfo();
 }
 
@@ -5207,49 +5208,66 @@ function renderCodexDirs(): void {
     .join("");
 }
 
-async function addCodexDir(rawPath: string): Promise<void> {
-  const status = document.querySelector("#status")!;
-  // Trailing separators are spelling, not a different folder.
-  let path = rawPath.trim().replace(/[\\/]+$/, "");
-  if (/^[A-Za-z]:$/.test(path)) path += "\\"; // C: -> C:\
-  if (!path) return;
-  const dirs = config.codexExtraDirs ?? [];
-  if (dirs.some((d) => d.trim().replace(/[\\/]+$/, "").toLowerCase() === path.toLowerCase())) {
-    status.textContent = t("settings.codexDirsDup");
-    return;
-  }
-  if (dirs.length >= 10) {
-    status.textContent = t("settings.codexDirsMax");
-    return;
-  }
-  try {
-    await invoke("check_dir", { path });
-  } catch (err) {
-    status.textContent = `${err}`;
-    return;
-  }
-  try {
-    await patchConfig({ codexExtraDirs: [...dirs, path] });
-  } catch {
-    return;
-  }
-  const input = document.querySelector<HTMLInputElement>("#codex-dirs-input");
-  if (input) input.value = "";
-  renderCodexDirs();
-  status.textContent = t("settings.codexDirsAdded");
-  void forceUsageRefreshAttempt(false).then(requestTraySync);
+// Folder edits serialize through one chain so a rapid add+remove can't
+// interleave awaits and drop each other's write; each op reads the list
+// fresh from `config` when it actually runs.
+let codexDirsQueue: Promise<void> = Promise.resolve();
+
+function queueCodexDirsEdit(op: () => Promise<void>): void {
+  codexDirsQueue = codexDirsQueue.then(op).catch(() => {});
 }
 
-async function removeCodexDir(dir: string): Promise<void> {
-  const dirs = (config.codexExtraDirs ?? []).filter((d) => d !== dir);
-  try {
-    await patchConfig({ codexExtraDirs: dirs });
-  } catch {
-    return;
-  }
-  renderCodexDirs();
-  document.querySelector("#status")!.textContent = t("settings.codexDirsRemoved");
-  void forceUsageRefreshAttempt(false).then(requestTraySync);
+function addCodexDir(rawPath: string): void {
+  queueCodexDirsEdit(async () => {
+    const status = document.querySelector("#status")!;
+    // Trailing separators are spelling, not a different folder.
+    let path = rawPath.trim().replace(/[\\/]+$/, "");
+    if (/^[A-Za-z]:$/.test(path)) path += "\\"; // C: -> C:\
+    if (!path) return;
+    try {
+      await invoke("check_dir", { path });
+    } catch (err) {
+      status.textContent = `${err}`;
+      return;
+    }
+    const dirs = config.codexExtraDirs ?? [];
+    if (
+      dirs.some(
+        (d) => d.trim().replace(/[\\/]+$/, "").toLowerCase() === path.toLowerCase(),
+      )
+    ) {
+      status.textContent = t("settings.codexDirsDup");
+      return;
+    }
+    if (dirs.length >= 10) {
+      status.textContent = t("settings.codexDirsMax");
+      return;
+    }
+    try {
+      await patchConfig({ codexExtraDirs: [...dirs, path] });
+    } catch {
+      return;
+    }
+    const input = document.querySelector<HTMLInputElement>("#codex-dirs-input");
+    if (input) input.value = "";
+    renderCodexDirs();
+    status.textContent = t("settings.codexDirsAdded");
+    void forceUsageRefreshAttempt(false).then(requestTraySync);
+  });
+}
+
+function removeCodexDir(dir: string): void {
+  queueCodexDirsEdit(async () => {
+    const dirs = (config.codexExtraDirs ?? []).filter((d) => d !== dir);
+    try {
+      await patchConfig({ codexExtraDirs: dirs });
+    } catch {
+      return;
+    }
+    renderCodexDirs();
+    document.querySelector("#status")!.textContent = t("settings.codexDirsRemoved");
+    void forceUsageRefreshAttempt(false).then(requestTraySync);
+  });
 }
 
 async function initSettings(): Promise<void> {
