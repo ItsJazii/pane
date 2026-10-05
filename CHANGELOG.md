@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.57 — 2026-10-06
+
+### Added
+- **Codex: sessions run inside Orca count (#257, reported by
+  @wngur008-beep in #255).** Orca launches Codex with its own Codex
+  home, so its sessions were missing from Codex spend. Pane now reads
+  Orca's runtime home and its per-account homes, puts each on the card
+  of the matching account, and counts sessions Orca mirrors from
+  `~/.codex` only once. Orca's logins are never used.
+- **Codex session folders (#258, requested in #256).** Settings →
+  Codex session folders adds folders holding Codex sessions from other
+  machines (synced or copied with OneDrive, Syncthing, scp). Pane only
+  reads them, and a session that shows up in several places, including
+  sync-conflict copies, counts once.
+
 ## 0.4.56 — 2026-10-01
 
 ### Added
