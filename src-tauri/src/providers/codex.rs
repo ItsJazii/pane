@@ -22,6 +22,9 @@ pub(crate) fn default_home() -> PathBuf {
 /// bare "codex" id; extras mint "codex@<hash8>" from the account id.
 pub struct CodexAccount {
     pub id: String,
+    /// The full account id from auth.json — attribution compares this,
+    /// never the truncated card id (hash8 prefixes can collide).
+    pub account_id: String,
     pub name: String,
     pub dir: PathBuf,
 }
@@ -118,7 +121,12 @@ pub fn discover_extra_accounts() -> Vec<CodexAccount> {
             Some(e) => format!("Codex — {e}"),
             None => format!("Codex @{hash8}"),
         };
-        out.push(CodexAccount { id: card_id_of(&account_id), name, dir });
+        out.push(CodexAccount {
+            id: card_id_of(&account_id),
+            account_id,
+            name,
+            dir,
+        });
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
     out
