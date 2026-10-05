@@ -2570,13 +2570,33 @@ fn codex_scan_files(files: &[PathBuf]) -> FileData {
 /// otherwise, and no card at all for an identity Pane can't name — those
 /// sessions stay unread rather than guessed at. Identity is read from the
 /// home's auth.json only; the credential never enters a token path.
-fn orca_account_card(dir: &Path, default_id: Option<&str>, extra_ids: &[String]) -> Option<usize> {
+/// `extra_accounts` carries FULL account ids — matching on the truncated
+/// codex@<hash8> card ids would let two logins sharing a prefix collide.
+fn orca_account_card(
+    dir: &Path,
+    default_id: Option<&str>,
+    extra_accounts: &[String],
+) -> Option<usize> {
     let id = providers::codex::home_account_id(dir)?;
     if Some(id.as_str()) == default_id {
         return Some(0);
     }
-    let card = providers::codex::card_id_of(&id);
-    extra_ids.iter().position(|e| *e == card).map(|i| i + 1)
+    extra_accounts.iter().position(|e| *e == id).map(|i| i + 1)
+}
+
+/// The runtime home mirrors the *system* login (`~/.codex`), so it gets
+/// the same identity routing as account homes. Only when its auth.json
+/// can't be read or names no known login may it fall back to the default
+/// card — and only when CODEX_HOME is unset, i.e. card 0 really IS
+/// `~/.codex`. With CODEX_HOME set, an unidentifiable runtime home is
+/// skipped rather than credited to a different account's card.
+fn orca_runtime_card(
+    dir: &Path,
+    default_id: Option<&str>,
+    extra_accounts: &[String],
+    default_is_system: bool,
+) -> Option<usize> {
+    orca_account_card(dir, default_id, extra_accounts).or(default_is_system.then_some(0))
 }
 
 /// One scan root feeding the Codex spend plan.
@@ -2682,12 +2702,31 @@ fn codex_homes_plan() -> (Vec<(String, String)>, Vec<(usize, CodexSource)>) {
             .map(|(i, a)| (i + 1, CodexSource::Home(a.dir.clone()))),
     );
     let default_id = providers::codex::default_identity();
-    let extra_ids: Vec<String> = cards.iter().skip(1).map(|(id, _)| id.clone()).collect();
+    let extra_accounts: Vec<String> =
+        extras.iter().map(|a| a.account_id.clone()).collect();
+    // The runtime home mirrors the system login; when CODEX_HOME points
+    // elsewhere, card 0 is not ~/.codex and can't be its fallback.
+    let default_is_system = std::env::var_os("CODEX_HOME").is_none();
     for orca in providers::codex::orca_codex_homes() {
         let card = match orca.kind {
-            providers::codex::OrcaKind::Runtime => Some(0),
+            providers::codex::OrcaKind::Runtime => {
+                let card = orca_runtime_card(
+                    &orca.dir,
+                    default_id.as_deref(),
+                    &extra_accounts,
+                    default_is_system,
+                );
+                if card.is_none() {
+                    eprintln!(
+                        "[pane] spend: Orca runtime home {} has an identity no card matches — skipped",
+                        orca.dir.display()
+                    );
+                }
+                card
+            }
             providers::codex::OrcaKind::Account => {
-                let card = orca_account_card(&orca.dir, default_id.as_deref(), &extra_ids);
+                let card =
+                    orca_account_card(&orca.dir, default_id.as_deref(), &extra_accounts);
                 if card.is_none() {
                     eprintln!(
                         "[pane] spend: Orca Codex home {} has an identity no card matches — skipped",
@@ -4705,11 +4744,72 @@ mod tests {
         write_codex_auth(&unknown, "acct-stranger");
         // anonymous has no auth.json at all.
 
-        let extras = vec![providers::codex::card_id_of("acct-work")];
+        let extras = vec!["acct-work".to_string()];
         assert_eq!(orca_account_card(&as_default, Some("acct-default"), &extras), Some(0));
         assert_eq!(orca_account_card(&as_extra, Some("acct-default"), &extras), Some(1));
         assert_eq!(orca_account_card(&unknown, Some("acct-default"), &extras), None);
         assert_eq!(orca_account_card(&anonymous, Some("acct-default"), &extras), None);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// The runtime home gets the same identity routing as account homes:
+    /// a login matching an extra card lands there. An unreadable or
+    /// unknown identity falls back to the default card only when
+    /// CODEX_HOME is unset (card 0 is really `~/.codex` then) — with it
+    /// set, the home is skipped instead of credited to a foreign card.
+    #[test]
+    fn codex_orca_runtime_follows_its_own_identity() {
+        let base = orca_test_root("runtimeid");
+        let as_extra = base.join("runtime-extra");
+        let unknown = base.join("runtime-unknown");
+        let anonymous = base.join("runtime-anon");
+        for d in [&as_extra, &unknown, &anonymous] {
+            fs::create_dir_all(d).unwrap();
+        }
+        write_codex_auth(&as_extra, "acct-work");
+        write_codex_auth(&unknown, "acct-stranger");
+        // anonymous has no auth.json at all.
+
+        let extras = vec!["acct-work".to_string()];
+        assert_eq!(
+            orca_runtime_card(&as_extra, Some("acct-default"), &extras, false),
+            Some(1)
+        );
+        assert_eq!(
+            orca_runtime_card(&unknown, Some("acct-default"), &extras, false),
+            None
+        );
+        assert_eq!(
+            orca_runtime_card(&unknown, Some("acct-default"), &extras, true),
+            Some(0)
+        );
+        assert_eq!(
+            orca_runtime_card(&anonymous, Some("acct-default"), &extras, true),
+            Some(0)
+        );
+        assert_eq!(
+            orca_runtime_card(&anonymous, Some("acct-default"), &extras, false),
+            None
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Attribution compares full account ids: two ids sharing the hash8
+    /// the card id is minted from must not cross-match.
+    #[test]
+    fn codex_orca_full_ids_never_collide_on_hash8() {
+        let base = orca_test_root("collide");
+        let home = base.join("home");
+        fs::create_dir_all(&home).unwrap();
+        write_codex_auth(&home, "abcdefgh-2222");
+
+        // Sanity: the card ids really do collide on hash8.
+        assert_eq!(
+            providers::codex::card_id_of("abcdefgh-1111"),
+            providers::codex::card_id_of("abcdefgh-2222")
+        );
+        let extras = vec!["abcdefgh-1111".to_string()];
+        assert_eq!(orca_account_card(&home, Some("acct-default"), &extras), None);
         let _ = fs::remove_dir_all(&base);
     }
 
