@@ -97,7 +97,7 @@ Pane 是一款轻量的 Tauri v2 应用：Rust 核心负责数据处理，原生
 | 服务商 | Pane 的连接方式 |
 |---|---|
 | Claude（Claude Code） | `%USERPROFILE%\.claude\.credentials.json` + Anthropic 用量 API；支持多账户，每个发现的配置目录登录账户对应一张卡片；附 Cloud 云端会话额度条（按到期日倒数）以及可一键领取的已存速率限制重置额度 |
-| Codex（Codex CLI） | `%USERPROFILE%\.codex\auth.json` + ChatGPT 用量 API，包括重置额度兑换；与 Claude 一样支持多账户 |
+| Codex（Codex CLI） | `%USERPROFILE%\.codex\auth.json` + ChatGPT 用量 API，包括重置额度兑换；与 Claude 一样支持多账户；在 Orca 中运行的会话也计入花费 |
 | Cursor | Cursor 本地状态数据库 + 新版用量 RPC；RPC 主机无法访问时，`cursor.com/api/usage-summary` 仍可更新套餐进度条 |
 | OpenCode（Go 套餐） | 官方账户级用量 API（从 `auth.json` 获取 Go Key）；本地 `opencode.db` 用于统计花费* |
 | GitHub Copilot | Copilot 编辑器登录凭据或 GitHub CLI（凭据管理器）+ GitHub API |
