@@ -2542,60 +2542,181 @@ fn codex_session_files(home: &Path) -> Vec<PathBuf> {
     files
 }
 
-fn codex_scan(home: &Path) -> FileData {
+fn codex_scan_files(files: &[PathBuf]) -> FileData {
     let mut all = FileData::default();
-    for file in codex_session_files(home) {
-        if cache_unchanged(&file) {
-            merge_data(&mut all, file_days(&file, &mut |_, _| {}));
+    for file in files {
+        if cache_unchanged(file) {
+            merge_data(&mut all, file_days(file, &mut |_, _| {}));
             continue;
         }
-        let tail = will_resume_tail(&file);
-        let ckpt = if tail { load_codex_ckpt(&file) } else { None };
+        let tail = will_resume_tail(file);
+        let ckpt = if tail { load_codex_ckpt(file) } else { None };
         let mut state = ckpt.clone().unwrap_or_default();
         let data = if tail && ckpt.is_some() {
-            file_days(&file, &mut |line, data| codex_line(&mut state, line, data))
+            file_days(file, &mut |line, data| codex_line(&mut state, line, data))
         } else if tail {
-            file_days_stateful(&file, &mut |line, data| codex_line(&mut state, line, data))
+            file_days_stateful(file, &mut |line, data| codex_line(&mut state, line, data))
         } else {
-            file_days(&file, &mut |line, data| codex_line(&mut state, line, data))
+            file_days(file, &mut |line, data| codex_line(&mut state, line, data))
         };
-        store_codex_ckpt(&file, state);
+        store_codex_ckpt(file, state);
         merge_data(&mut all, data);
     }
     all
 }
 
-fn codex(extra: FileData) -> (ProviderSpend, FileData, FileData) {
-    let home = std::env::var("CODEX_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| dirs::home_dir().unwrap_or_default().join(".codex"));
-    let mut all = codex_scan(&home);
-    // Pi sessions that drove a Codex account (passed in from the pi scan).
-    merge_data(&mut all, extra);
-    // Kimi OAuth / Moonshot turns routed through Codex (codex-router logs
-    // them as "kimi-oauth/k3" etc.) bill the Kimi plan, not the ChatGPT
-    // subscription — hand them to the Kimi card.
-    let kimi_routed = split_kimi_routed(&mut all);
-    // step-* slugs mean the session ran against StepFun's Step Plan
-    // endpoint — those dollars belong on the StepFun card.
-    let stepfun_routed = split_models_by(&mut all, is_stepfun_model);
-    (build_spend("codex", "Codex", all), kimi_routed, stepfun_routed)
+/// Which card an Orca account home's sessions belong to: the default card
+/// when its login is the default account, the matching extra card
+/// otherwise, and no card at all for an identity Pane can't name — those
+/// sessions stay unread rather than guessed at. Identity is read from the
+/// home's auth.json only; the credential never enters a token path.
+/// `extra_accounts` carries FULL account ids — matching on the truncated
+/// codex@<hash8> card ids would let two logins sharing a prefix collide.
+fn orca_account_card(
+    dir: &Path,
+    default_id: Option<&str>,
+    extra_accounts: &[String],
+) -> Option<usize> {
+    let id = providers::codex::home_account_id(dir)?;
+    if Some(id.as_str()) == default_id {
+        return Some(0);
+    }
+    extra_accounts.iter().position(|e| *e == id).map(|i| i + 1)
 }
 
-/// Spend for each discovered extra Codex account, scanned from that
-/// account's own home (each keeps its own sessions/ logs). Kimi- and
-/// StepFun-routed rows split out the same way the default account's do.
-fn codex_extra_accounts() -> (Vec<ProviderSpend>, FileData, FileData) {
-    let mut spends = Vec::new();
-    let mut kimi_extra = FileData::default();
-    let mut stepfun_extra = FileData::default();
-    for acct in providers::codex::discover_extra_accounts() {
-        let mut data = codex_scan(&acct.dir);
-        merge_data(&mut kimi_extra, split_kimi_routed(&mut data));
-        merge_data(&mut stepfun_extra, split_models_by(&mut data, is_stepfun_model));
-        spends.push(build_spend(acct.id, acct.name, data));
+/// The runtime home mirrors the *system* login (`~/.codex`), so it gets
+/// the same identity routing as account homes. Only when its auth.json
+/// can't be read or names no known login may it fall back to the default
+/// card — and only when CODEX_HOME is unset, i.e. card 0 really IS
+/// `~/.codex`. With CODEX_HOME set, an unidentifiable runtime home is
+/// skipped rather than credited to a different account's card.
+fn orca_runtime_card(
+    dir: &Path,
+    default_id: Option<&str>,
+    extra_accounts: &[String],
+    default_is_system: bool,
+) -> Option<usize> {
+    orca_account_card(dir, default_id, extra_accounts).or(default_is_system.then_some(0))
+}
+
+/// Every (card index, home) pair in global dedup-priority order: the
+/// default home, each discovered extra account in discovery order, then
+/// Orca's runtime home and its account homes. Card 0 is the default.
+fn codex_homes_plan() -> (Vec<(String, String)>, Vec<(usize, PathBuf)>) {
+    let default = providers::codex::default_home();
+    let extras = providers::codex::discover_extra_accounts();
+    let mut cards: Vec<(String, String)> = vec![("codex".into(), "Codex".into())];
+    cards.extend(extras.iter().map(|a| (a.id.clone(), a.name.clone())));
+    let mut homes: Vec<(usize, PathBuf)> = vec![(0, default)];
+    homes.extend(extras.iter().enumerate().map(|(i, a)| (i + 1, a.dir.clone())));
+    let default_id = providers::codex::default_identity();
+    let extra_accounts: Vec<String> =
+        extras.iter().map(|a| a.account_id.clone()).collect();
+    // The runtime home mirrors the system login; when CODEX_HOME points
+    // elsewhere, card 0 is not ~/.codex and can't be its fallback.
+    let default_is_system = std::env::var_os("CODEX_HOME").is_none();
+    for orca in providers::codex::orca_codex_homes() {
+        let card = match orca.kind {
+            providers::codex::OrcaKind::Runtime => {
+                let card = orca_runtime_card(
+                    &orca.dir,
+                    default_id.as_deref(),
+                    &extra_accounts,
+                    default_is_system,
+                );
+                if card.is_none() {
+                    eprintln!(
+                        "[pane] spend: Orca runtime home {} has an identity no card matches — skipped",
+                        orca.dir.display()
+                    );
+                }
+                card
+            }
+            providers::codex::OrcaKind::Account => {
+                let card =
+                    orca_account_card(&orca.dir, default_id.as_deref(), &extra_accounts);
+                if card.is_none() {
+                    eprintln!(
+                        "[pane] spend: Orca Codex home {} has an identity no card matches — skipped",
+                        orca.dir.display()
+                    );
+                }
+                card
+            }
+        };
+        if let Some(c) = card {
+            homes.push((c, orca.dir));
+        }
     }
-    (spends, kimi_extra, stepfun_extra)
+    (cards, homes)
+}
+
+/// The files each card scans. Two dedups apply globally across every
+/// home: canonical home paths (CODEX_HOME may itself point at one of the
+/// other scanned dirs, e.g. Orca's runtime home), then session file names
+/// — Orca mirrors rollouts between homes, so `rollout-<ts>-<uuid>.jsonl`
+/// can exist in several; the largest copy wins (an Orca copy may have
+/// been resumed further) with earlier homes winning ties.
+fn codex_files_plan(card_count: usize, homes: Vec<(usize, PathBuf)>) -> Vec<Vec<PathBuf>> {
+    let mut seen_homes: HashSet<PathBuf> = HashSet::new();
+    let homes: Vec<(usize, PathBuf)> = homes
+        .into_iter()
+        .filter(|(_, dir)| {
+            let key = fs::canonicalize(dir).unwrap_or_else(|_| dir.clone());
+            seen_homes.insert(key)
+        })
+        .collect();
+    // name -> (rank, size, path, card)
+    let mut winners: HashMap<std::ffi::OsString, (usize, u64, PathBuf, usize)> = HashMap::new();
+    for (rank, (card, dir)) in homes.iter().enumerate() {
+        for file in codex_session_files(dir) {
+            let Some(name) = file.file_name().map(|n| n.to_os_string()) else {
+                continue;
+            };
+            let size = fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+            match winners.get(&name) {
+                Some((_, have, _, _)) if *have >= size => {}
+                _ => {
+                    winners.insert(name, (rank, size, file, *card));
+                }
+            }
+        }
+    }
+    let mut per_card: Vec<Vec<PathBuf>> = (0..card_count).map(|_| Vec::new()).collect();
+    for (_, _, file, card) in winners.into_values() {
+        if card < card_count {
+            per_card[card].push(file);
+        }
+    }
+    for files in &mut per_card {
+        files.sort();
+    }
+    per_card
+}
+
+/// Codex spend: card 0 is the default account, then each discovered extra
+/// account (each keeps its own sessions/ logs). Orca-managed homes fold
+/// into the card their login matches. Kimi OAuth / Moonshot turns routed
+/// through Codex bill the Kimi plan, not the ChatGPT subscription, and
+/// step-* slugs bill StepFun — both split off every card the same way.
+fn codex(mut extra: FileData) -> (ProviderSpend, Vec<ProviderSpend>, FileData, FileData) {
+    let (cards, homes) = codex_homes_plan();
+    let per_card = codex_files_plan(cards.len(), homes);
+    let mut kimi_routed = FileData::default();
+    let mut stepfun_routed = FileData::default();
+    let mut spends = Vec::with_capacity(cards.len());
+    for (i, (id, name)) in cards.iter().enumerate() {
+        let mut data = codex_scan_files(&per_card[i]);
+        if i == 0 {
+            // Pi sessions that drove a Codex account (from the pi scan).
+            merge_data(&mut data, std::mem::take(&mut extra));
+        }
+        merge_data(&mut kimi_routed, split_kimi_routed(&mut data));
+        merge_data(&mut stepfun_routed, split_models_by(&mut data, is_stepfun_model));
+        spends.push(build_spend(id.clone(), name.clone(), data));
+    }
+    let default = spends.remove(0);
+    (default, spends, kimi_routed, stepfun_routed)
 }
 
 // ---------------------------------------------------------------------------
@@ -3409,10 +3530,7 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
         });
         let codex_t = s.spawn(|| {
             spend_step("codex", || {
-                let (sp, mut km, mut sf) = codex(pi_codex);
-                let (extras, km2, sf2) = codex_extra_accounts();
-                merge_data(&mut km, km2);
-                merge_data(&mut sf, sf2);
+                let (sp, extras, km, sf) = codex(pi_codex);
                 (sp, extras, km, sf)
             })
         });
@@ -4398,6 +4516,232 @@ mod tests {
         ];
         // 1100 from the first cumulative snapshot, 2200 recovered as a delta.
         assert_eq!(tokens_sum(&codex_run(&lines)), 3_300.0);
+    }
+
+    // ---- Codex: Orca-managed homes ---------------------------------------
+
+    fn orca_test_root(tag: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!("pane-orca-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        base
+    }
+
+    /// A rollout file under home/sessions/<date>/, `turns` cumulative
+    /// token_count snapshots. More turns = a bigger file, which is also
+    /// how the real mirror's "resumed further" copies look.
+    fn write_rollout(home: &Path, name: &str, turns: usize) -> PathBuf {
+        let dir = home.join("sessions/2026/08/18");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(name);
+        let mut lines = vec![json!({"timestamp": "2026-08-18T10:00:00Z", "type": "turn_context",
+                                    "payload": {"model": "gpt-5.6-sol"}})
+        .to_string()];
+        for t in 1..=turns {
+            let last = 1_000.0 * t as f64;
+            lines.push(token_count_line(
+                &format!("2026-08-18T10:00:{t:02}Z"),
+                Some((last, last / 10.0)),
+                (last, last / 10.0),
+            ));
+        }
+        fs::write(&file, lines.join("\n")).unwrap();
+        file
+    }
+
+    /// auth.json naming `account_id`, with the id_token's ChatGPT claim
+    /// matching like a real Codex login's.
+    fn write_codex_auth(home: &Path, account_id: &str) {
+        use base64::Engine;
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&json!({
+                "https://api.openai.com/auth": {"chatgpt_account_id": account_id},
+                "email": "e@corp.com"}))
+            .unwrap(),
+        );
+        let doc = json!({"tokens": {"account_id": account_id,
+            "id_token": format!("x.{payload}.y"),
+            "access_token": "a", "refresh_token": "r"}});
+        fs::write(home.join("auth.json"), doc.to_string()).unwrap();
+    }
+
+    /// A session that only exists in Orca's runtime home lands on the
+    /// default Codex card.
+    #[test]
+    fn codex_orca_runtime_sessions_count_on_the_default_card() {
+        let base = orca_test_root("runtime");
+        let default_home = base.join("default");
+        let runtime = base.join("orca/codex-runtime-home/home");
+        let orca_file = write_rollout(&runtime, "rollout-2026-08-18T10-00-00-aaaa.jsonl", 1);
+
+        let plan = codex_files_plan(1, vec![(0, default_home), (0, runtime)]);
+        assert_eq!(plan[0], vec![orca_file]);
+        assert_eq!(tokens_sum(&codex_scan_files(&plan[0])), 1_100.0);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// The same rollout mirrored into the default home and Orca's runtime
+    /// home is counted once; the larger (resumed further) copy wins.
+    #[test]
+    fn codex_orca_mirror_dedupes_by_name_largest_wins() {
+        let base = orca_test_root("dedup");
+        let default_home = base.join("default");
+        let runtime = base.join("orca/codex-runtime-home/home");
+        let name = "rollout-2026-08-18T10-00-00-bbbb.jsonl";
+        let default_file = write_rollout(&default_home, name, 1);
+        let orca_file = write_rollout(&runtime, name, 3);
+
+        let plan = codex_files_plan(
+            1,
+            vec![(0, default_home.clone()), (0, runtime.clone())],
+        );
+        // One winner, the larger Orca copy — its three turns scan to 6600;
+        // 1100 would mean the default copy won, 7700 both counted.
+        assert_eq!(plan[0], vec![orca_file.clone()]);
+        assert_eq!(tokens_sum(&codex_scan_files(&plan[0])), 6_600.0);
+
+        // Equal-size copies: the earlier (default) home wins the tie.
+        let orca_file2 = write_rollout(&runtime, "rollout-2026-08-18T11-00-00-cccc.jsonl", 2);
+        let default_file2 =
+            write_rollout(&default_home, "rollout-2026-08-18T11-00-00-cccc.jsonl", 2);
+        assert_eq!(
+            fs::metadata(&orca_file2).unwrap().len(),
+            fs::metadata(&default_file2).unwrap().len()
+        );
+        let plan = codex_files_plan(
+            1,
+            vec![(0, default_home.clone()), (0, runtime.clone())],
+        );
+        // And the round-one larger copy still wins over the smaller one.
+        assert!(plan[0].contains(&orca_file));
+        assert!(plan[0].contains(&default_file2));
+        assert!(!plan[0].contains(&orca_file2));
+        assert!(!plan[0].contains(&default_file));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Orca account homes route by auth.json identity: default's account →
+    /// the default card, a discovered extra's → that card, anything else →
+    /// skipped (never becomes a card of its own).
+    #[test]
+    fn codex_orca_account_attribution() {
+        let base = orca_test_root("attr");
+        let as_default = base.join("as-default");
+        let as_extra = base.join("as-extra");
+        let unknown = base.join("unknown");
+        let anonymous = base.join("anonymous");
+        for d in [&as_default, &as_extra, &unknown, &anonymous] {
+            fs::create_dir_all(d).unwrap();
+        }
+        write_codex_auth(&as_default, "acct-default");
+        write_codex_auth(&as_extra, "acct-work");
+        write_codex_auth(&unknown, "acct-stranger");
+        // anonymous has no auth.json at all.
+
+        let extras = vec!["acct-work".to_string()];
+        assert_eq!(orca_account_card(&as_default, Some("acct-default"), &extras), Some(0));
+        assert_eq!(orca_account_card(&as_extra, Some("acct-default"), &extras), Some(1));
+        assert_eq!(orca_account_card(&unknown, Some("acct-default"), &extras), None);
+        assert_eq!(orca_account_card(&anonymous, Some("acct-default"), &extras), None);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// The runtime home gets the same identity routing as account homes:
+    /// a login matching an extra card lands there. An unreadable or
+    /// unknown identity falls back to the default card only when
+    /// CODEX_HOME is unset (card 0 is really `~/.codex` then) — with it
+    /// set, the home is skipped instead of credited to a foreign card.
+    #[test]
+    fn codex_orca_runtime_follows_its_own_identity() {
+        let base = orca_test_root("runtimeid");
+        let as_extra = base.join("runtime-extra");
+        let unknown = base.join("runtime-unknown");
+        let anonymous = base.join("runtime-anon");
+        for d in [&as_extra, &unknown, &anonymous] {
+            fs::create_dir_all(d).unwrap();
+        }
+        write_codex_auth(&as_extra, "acct-work");
+        write_codex_auth(&unknown, "acct-stranger");
+        // anonymous has no auth.json at all.
+
+        let extras = vec!["acct-work".to_string()];
+        assert_eq!(
+            orca_runtime_card(&as_extra, Some("acct-default"), &extras, false),
+            Some(1)
+        );
+        assert_eq!(
+            orca_runtime_card(&unknown, Some("acct-default"), &extras, false),
+            None
+        );
+        assert_eq!(
+            orca_runtime_card(&unknown, Some("acct-default"), &extras, true),
+            Some(0)
+        );
+        assert_eq!(
+            orca_runtime_card(&anonymous, Some("acct-default"), &extras, true),
+            Some(0)
+        );
+        assert_eq!(
+            orca_runtime_card(&anonymous, Some("acct-default"), &extras, false),
+            None
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Attribution compares full account ids: two ids sharing the hash8
+    /// the card id is minted from must not cross-match.
+    #[test]
+    fn codex_orca_full_ids_never_collide_on_hash8() {
+        let base = orca_test_root("collide");
+        let home = base.join("home");
+        fs::create_dir_all(&home).unwrap();
+        write_codex_auth(&home, "abcdefgh-2222");
+
+        // Sanity: the card ids really do collide on hash8.
+        assert_eq!(
+            providers::codex::card_id_of("abcdefgh-1111"),
+            providers::codex::card_id_of("abcdefgh-2222")
+        );
+        let extras = vec!["abcdefgh-1111".to_string()];
+        assert_eq!(orca_account_card(&home, Some("acct-default"), &extras), None);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// With no Orca dir present the file plan is exactly the old single-home
+    /// listing.
+    #[test]
+    fn codex_files_plan_without_orca_is_unchanged() {
+        let base = orca_test_root("plain");
+        let default_home = base.join("default");
+        let f1 = write_rollout(&default_home, "rollout-2026-08-18T10-00-00-dddd.jsonl", 1);
+        let f2 = write_rollout(&default_home, "rollout-2026-08-18T10-30-00-eeee.jsonl", 1);
+
+        let plan = codex_files_plan(1, vec![(0, default_home.clone())]);
+        let mut expected = codex_session_files(&default_home);
+        expected.sort();
+        assert_eq!(plan[0], expected);
+        assert_eq!(plan[0], {
+            let mut v = vec![f1, f2];
+            v.sort();
+            v
+        });
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// CODEX_HOME pointing at Orca's runtime home (same dir spelled
+    /// differently) must not scan the tree twice.
+    #[test]
+    fn codex_home_equal_to_orca_runtime_scans_once() {
+        let base = orca_test_root("samehome");
+        let runtime = base.join("orca/codex-runtime-home/home");
+        let file = write_rollout(&runtime, "rollout-2026-08-18T10-00-00-ffff.jsonl", 1);
+
+        let plan = codex_files_plan(
+            1,
+            vec![(0, runtime.clone()), (0, runtime.join("."))],
+        );
+        assert_eq!(plan[0], vec![file]);
+        assert_eq!(tokens_sum(&codex_scan_files(&plan[0])), 1_100.0);
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

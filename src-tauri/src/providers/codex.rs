@@ -3,7 +3,7 @@ use base64::Engine;
 use chrono::Utc;
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // Codex CLI's public OAuth client id.
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -11,7 +11,7 @@ const ID: &str = "codex";
 const NAME: &str = "Codex";
 const MAX_CRED_BYTES: u64 = 64 * 1024;
 
-fn default_home() -> PathBuf {
+pub(crate) fn default_home() -> PathBuf {
     std::env::var("CODEX_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| dirs::home_dir().unwrap_or_default().join(".codex"))
@@ -22,6 +22,9 @@ fn default_home() -> PathBuf {
 /// bare "codex" id; extras mint "codex@<hash8>" from the account id.
 pub struct CodexAccount {
     pub id: String,
+    /// The full account id from auth.json — attribution compares this,
+    /// never the truncated card id (hash8 prefixes can collide).
+    pub account_id: String,
     pub name: String,
     pub dir: PathBuf,
 }
@@ -118,15 +121,98 @@ pub fn discover_extra_accounts() -> Vec<CodexAccount> {
             Some(e) => format!("Codex — {e}"),
             None => format!("Codex @{hash8}"),
         };
-        out.push(CodexAccount { id: format!("codex@{hash8}"), name, dir });
+        out.push(CodexAccount {
+            id: card_id_of(&account_id),
+            account_id,
+            name,
+            dir,
+        });
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
     out
 }
 
+/// The card id an account id maps to — "codex@<hash8>". Shared by
+/// discovery and Orca-home attribution so both derive it the same way.
+pub(crate) fn card_id_of(account_id: &str) -> String {
+    let hash8: String = account_id.chars().filter(|c| *c != '-').take(8).collect();
+    format!("codex@{hash8}")
+}
+
 /// The default login's account identity, for the snapshot-cache stamp.
 pub fn default_identity() -> Option<String> {
     dir_identity(&default_home()).map(|(a, _)| a)
+}
+
+/// Just the account id in a home's auth.json — a read-only attribution
+/// lookup for the spend scan; the credential never enters a token path.
+pub(crate) fn home_account_id(dir: &Path) -> Option<String> {
+    dir_identity(dir).map(|(a, _)| a)
+}
+
+/// A Codex home managed by Orca (stablyai/orca): Orca launches Codex with
+/// its own CODEX_HOME, so these sessions never land in `~/.codex`.
+pub struct OrcaHome {
+    pub dir: PathBuf,
+    pub kind: OrcaKind,
+}
+
+pub enum OrcaKind {
+    /// Mirror of the system-default account.
+    Runtime,
+    /// One Orca-managed extra login at codex-accounts/<id>/home.
+    Account,
+}
+
+/// Orca's config roots: `<config_dir>/orca` (`%APPDATA%\orca` on Windows,
+/// `~/.config/orca` on Linux, `~/Library/Application Support/orca` on
+/// macOS — where a capitalized `Orca` also shows up).
+fn orca_config_roots() -> Vec<PathBuf> {
+    let Some(cfg) = dirs::config_dir() else {
+        return Vec::new();
+    };
+    #[cfg(windows)]
+    let roots = vec![cfg.join("orca")];
+    #[cfg(not(windows))]
+    let roots = vec![cfg.join("orca"), cfg.join("Orca")];
+    roots
+}
+
+/// Every Codex home Orca manages: the system-default runtime home first,
+/// then each extra account's home (sorted for stable scan priority).
+/// Session logs only are read from these — the runtimes own the
+/// credentials inside, so they never become cards or token sources.
+pub fn orca_codex_homes() -> Vec<OrcaHome> {
+    let mut out = Vec::new();
+    for root in orca_config_roots() {
+        out.extend(orca_codex_homes_in(&root));
+    }
+    out
+}
+
+fn orca_codex_homes_in(root: &Path) -> Vec<OrcaHome> {
+    let mut out = Vec::new();
+    let runtime = root.join("codex-runtime-home").join("home");
+    if runtime.is_dir() {
+        out.push(OrcaHome {
+            dir: runtime,
+            kind: OrcaKind::Runtime,
+        });
+    }
+    let mut account_homes: Vec<PathBuf> = std::fs::read_dir(root.join("codex-accounts"))
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path().join("home"))
+                .filter(|p| p.is_dir())
+                .collect()
+        })
+        .unwrap_or_default();
+    account_homes.sort();
+    out.extend(account_homes.into_iter().map(|dir| OrcaHome {
+        dir,
+        kind: OrcaKind::Account,
+    }));
+    out
 }
 
 /// Access tokens are JWTs: three base64 chunks separated by dots. The middle
@@ -688,7 +774,8 @@ fn backup_credentials(path: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::{
-        credits_balance, identity_from, openai_provenance, redeem_outcome, scoped_id_charset,
+        credits_balance, identity_from, openai_provenance, orca_codex_homes_in, redeem_outcome,
+        scoped_id_charset, OrcaKind,
     };
     use base64::Engine;
     use serde_json::json;
@@ -733,6 +820,36 @@ mod tests {
         let anonymous = json!({"tokens": {"access_token": "k"}});
         assert_eq!(identity_from(&anonymous), None);
         assert_eq!(identity_from(&json!({})), None);
+    }
+
+    #[test]
+    fn orca_homes_discovery_finds_runtime_and_accounts() {
+        let root = std::env::temp_dir().join(format!("pane-orca-disc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("codex-runtime-home/home")).unwrap();
+        std::fs::create_dir_all(root.join("codex-accounts/work/home")).unwrap();
+        std::fs::create_dir_all(root.join("codex-accounts/personal/home")).unwrap();
+        // An account dir without a home/ inside is skipped.
+        std::fs::create_dir_all(root.join("codex-accounts/empty")).unwrap();
+
+        let homes = orca_codex_homes_in(&root);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(homes.len(), 3);
+        assert!(matches!(homes[0].kind, OrcaKind::Runtime));
+        assert!(homes[0].dir.ends_with(std::path::Path::new("codex-runtime-home").join("home")));
+        // Account homes come sorted for stable scan priority.
+        assert!(matches!(homes[1].kind, OrcaKind::Account));
+        assert!(homes[1].dir.ends_with(std::path::Path::new("personal").join("home")));
+        assert!(matches!(homes[2].kind, OrcaKind::Account));
+        assert!(homes[2].dir.ends_with(std::path::Path::new("work").join("home")));
+    }
+
+    #[test]
+    fn orca_homes_discovery_empty_when_no_orca_dir() {
+        let root = std::env::temp_dir().join(format!("pane-orca-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(orca_codex_homes_in(&root).is_empty());
     }
 
     #[test]

@@ -82,7 +82,9 @@ Ground rules that apply to every provider:
   credits); `.../wham/rate-limit-reset-credits` (reset credits, and
   `/consume` only when you click Use on a credit); OpenAI token refresh.
 - **Shows:** Session/Weekly, Spark windows, credit balance, redeemable
-  reset credits; local spend from `~\.codex\sessions\` logs. Child
+  reset credits; local spend from `~\.codex\sessions\` logs — sessions
+  Codex runs inside [Orca](https://github.com/stablyai/orca) count too,
+  folding into the card their login matches. Child
   sessions (subagent spawns and forks) replay the parent's entire token
   history at spawn — those replayed lines are skipped, so subagent-heavy
   use doesn't inflate spend. Turns that ran on the fast/priority service
