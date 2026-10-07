@@ -587,8 +587,10 @@ fn merge_data(target: &mut FileData, source: FileData) {
 }
 
 /// Ranked model list for one window: top models by cost, anything past the
-/// fifth name or under a 5% share folds into "Other".
+/// fifth name or under a 5% share folds into "Other" — a $0 model instead
+/// survives on a 5% token share.
 fn finalize_models(raw: HashMap<String, (f64, f64)>, window_cost: f64) -> Vec<ModelSpend> {
+    let window_tokens: f64 = raw.values().map(|(_, t)| *t).sum();
     let mut list: Vec<ModelSpend> = raw
         .into_iter()
         .map(|(model, (cost, tokens))| ModelSpend { model, cost, tokens })
@@ -599,7 +601,10 @@ fn finalize_models(raw: HashMap<String, (f64, f64)>, window_cost: f64) -> Vec<Mo
     let mut other = ModelSpend { model: "Other".into(), cost: 0.0, tokens: 0.0 };
     for (i, m) in list.into_iter().enumerate() {
         let share = if window_cost > 0.0 { m.cost / window_cost } else { 0.0 };
-        if i < 5 && (share >= 0.05 || i == 0) {
+        let token_share = if window_tokens > 0.0 { m.tokens / window_tokens } else { 0.0 };
+        if named.len() < 5
+            && (i == 0 || share >= 0.05 || (m.cost <= 0.0 && token_share >= 0.05))
+        {
             named.push(m);
         } else {
             other.cost += m.cost;
@@ -2238,6 +2243,12 @@ struct CodexFileState {
     gate: Option<CodexReplayGate>,
     fast_tier: bool,
     prev_totals: Option<CodexRaw>,
+    /// The session recorded its ChatGPT login (Codex ≥0.158 writes
+    /// `creator_account_id` into session_meta) — its post-cutoff
+    /// auto-review is free no matter which folder the file was read
+    /// from. Absent on older rollouts; those settle by folder login.
+    #[serde(default)]
+    chatgpt_session: bool,
 }
 
 /// Date-stamped snapshots ("gpt-5.6-sol-2026-06-01" / "-20260601") map to
@@ -2316,6 +2327,12 @@ fn codex_line(st: &mut CodexFileState, line: &str, data: &mut FileData) {
         if !st.saw_meta {
             st.saw_meta = true;
             if let Some(p) = v.get("payload") {
+                if p.get("creator_account_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.is_empty())
+                {
+                    st.chatgpt_session = true;
+                }
                 if codex_child_meta(p) {
                     st.gate = Some(match parse_ts(v.get("timestamp")) {
                         Some(ts) => CodexReplayGate::UntilStartedAt(ts.timestamp() as f64),
@@ -2480,15 +2497,20 @@ fn codex_line(st: &mut CodexFileState, line: &str, data: &mut FileData) {
         cache_write_1h: 0.0,
     };
     let cost = cost_for(&model, &p, &u, threshold, ts) * mult;
-    // Free for ChatGPT sign-ins from 2026-10-06 07:13 UTC: priced as
-    // usual but kept under a tagged key so the card's login decides the
-    // cost at settle time — the per-file cache stays auth-independent.
-    let key = if model.eq_ignore_ascii_case("codex-auto-review")
+    // Free for ChatGPT sign-ins from 2026-10-06 07:13 UTC: a session that
+    // recorded its ChatGPT login is $0 outright; one without the marker
+    // keeps its price under a tagged key until the folder's login settles
+    // it — the per-file cache stays auth-independent.
+    let (key, cost) = if model.eq_ignore_ascii_case("codex-auto-review")
         && ts.timestamp() >= CODEX_AUTO_REVIEW_FREE_UNIX
     {
-        format!("codex-auto-review{AUTO_REVIEW_FREE_TAG}")
+        if st.chatgpt_session {
+            (model, 0.0)
+        } else {
+            (format!("codex-auto-review{AUTO_REVIEW_FREE_TAG}"), cost)
+        }
     } else {
-        model
+        (model, cost)
     };
     add_event(data, ts, &key, cost, tokens);
 }
@@ -2497,13 +2519,13 @@ fn codex_line(st: &mut CodexFileState, line: &str, data: &mut FileData) {
 /// 07:13 UTC ("does not draw usage from your plan"); API-key logins
 /// still pay, and events before the cutoff keep their price. The tag
 /// marks post-cutoff events inside a file's FileData until
-/// settle_auto_review applies the card's login type.
+/// settle_auto_review applies the source folder's login type.
 const CODEX_AUTO_REVIEW_FREE_UNIX: i64 = 1_791_270_780;
 const AUTO_REVIEW_FREE_TAG: &str = "\u{1}chatgpt-free";
 
 /// Fold tagged post-cutoff auto-review entries back into the plain
-/// `codex-auto-review` key, zeroing their cost on ChatGPT-login cards
-/// and keeping it on API-key ones. Tokens are kept either way.
+/// `codex-auto-review` key, zeroing their cost for ChatGPT-login
+/// sources and keeping it for API-key ones. Tokens are kept either way.
 fn settle_auto_review(data: &mut FileData, chatgpt: bool) {
     let tagged = format!("codex-auto-review{AUTO_REVIEW_FREE_TAG}");
     let plain = "codex-auto-review";
@@ -2603,24 +2625,33 @@ fn codex_session_files(home: &Path) -> Vec<PathBuf> {
     files
 }
 
-fn codex_scan_files(files: &[PathBuf]) -> FileData {
+/// `api_key_roots` are the source dirs signed in with a raw API key:
+/// auto-review events that carry no ChatGPT-login evidence settle by the
+/// folder they were read from — priced there, free elsewhere.
+fn codex_scan_files(files: &[PathBuf], api_key_roots: &[PathBuf]) -> FileData {
     let mut all = FileData::default();
     for file in files {
-        if cache_unchanged(file) {
-            merge_data(&mut all, file_days(file, &mut |_, _| {}));
-            continue;
-        }
-        let tail = will_resume_tail(file);
-        let ckpt = if tail { load_codex_ckpt(file) } else { None };
-        let mut state = ckpt.clone().unwrap_or_default();
-        let data = if tail && ckpt.is_some() {
-            file_days(file, &mut |line, data| codex_line(&mut state, line, data))
-        } else if tail {
-            file_days_stateful(file, &mut |line, data| codex_line(&mut state, line, data))
+        let chatgpt = !api_key_roots.iter().any(|r| file.starts_with(r));
+        let data = if cache_unchanged(file) {
+            file_days(file, &mut |_, _| {})
         } else {
-            file_days(file, &mut |line, data| codex_line(&mut state, line, data))
+            let tail = will_resume_tail(file);
+            let ckpt = if tail { load_codex_ckpt(file) } else { None };
+            let mut state = ckpt.clone().unwrap_or_default();
+            let data = if tail && ckpt.is_some() {
+                file_days(file, &mut |line, data| codex_line(&mut state, line, data))
+            } else if tail {
+                file_days_stateful(file, &mut |line, data| {
+                    codex_line(&mut state, line, data)
+                })
+            } else {
+                file_days(file, &mut |line, data| codex_line(&mut state, line, data))
+            };
+            store_codex_ckpt(file, state);
+            data
         };
-        store_codex_ckpt(file, state);
+        let mut data = data;
+        settle_auto_review(&mut data, chatgpt);
         merge_data(&mut all, data);
     }
     all
@@ -2896,17 +2927,29 @@ fn uuid_in_name(name: &str) -> Option<&str> {
 /// step-* slugs bill StepFun — both split off every card the same way.
 fn codex(mut extra: FileData) -> (ProviderSpend, Vec<ProviderSpend>, FileData, FileData) {
     let (cards, homes) = codex_homes_plan();
-    let per_card = codex_files_plan(cards.len(), homes);
     let mut kimi_routed = FileData::default();
     let mut stepfun_routed = FileData::default();
     let mut spends = Vec::with_capacity(cards.len());
-    // Extra cards are ChatGPT OAuth logins by construction; card 0 is
-    // ChatGPT unless the default home is a raw API key.
-    let card0_chatgpt =
-        !providers::codex::home_uses_api_key(&providers::codex::default_home());
+    // Sources signed in with a raw API key don't get ChatGPT offers.
+    // A bare synced tree has no login of its own — it always joins card
+    // 0, so it follows the default home's auth mode.
+    let default_api_key =
+        providers::codex::home_uses_api_key(&providers::codex::default_home());
+    let mut api_key_roots: Vec<PathBuf> = Vec::new();
+    for (_, src) in &homes {
+        match src {
+            CodexSource::Home(dir) if providers::codex::home_uses_api_key(dir) => {
+                api_key_roots.push(dir.clone());
+            }
+            CodexSource::SessionsTree(dir) if default_api_key => {
+                api_key_roots.push(dir.clone());
+            }
+            _ => {}
+        }
+    }
+    let per_card = codex_files_plan(cards.len(), homes);
     for (i, (id, name)) in cards.iter().enumerate() {
-        let mut data = codex_scan_files(&per_card[i]);
-        settle_auto_review(&mut data, i > 0 || card0_chatgpt);
+        let mut data = codex_scan_files(&per_card[i], &api_key_roots);
         if i == 0 {
             // Pi sessions that drove a Codex account (from the pi scan).
             merge_data(&mut data, std::mem::take(&mut extra));
@@ -4774,6 +4817,126 @@ mod tests {
         assert!(!d.days.keys().any(|(_, m)| m.contains(AUTO_REVIEW_FREE_TAG)));
     }
 
+    /// A session that records its ChatGPT login (`creator_account_id` in
+    /// its own session_meta) is free outright from the cutoff — no tagged
+    /// key needed. Without the marker it still tags for the folder's login
+    /// to settle; pre-cutoff history keeps its price either way.
+    #[test]
+    fn codex_auto_review_free_when_session_records_chatgpt_login() {
+        let tagged = format!("codex-auto-review{AUTO_REVIEW_FREE_TAG}");
+        let meta = |id: &str| {
+            json!({"timestamp": "2026-10-07T10:00:00Z", "type": "session_meta",
+                   "payload": {"creator_account_id": id}})
+            .to_string()
+        };
+        let turn = json!({"timestamp": "2026-10-07T10:00:00Z", "type": "turn_context",
+                          "payload": {"model": "codex-auto-review"}})
+        .to_string();
+        let tc = |ts: &str| {
+            token_count_line(ts, Some((1_000.0, 100.0)), (1_000.0, 100.0))
+        };
+
+        let proven = codex_run(&[meta("acct-1"), turn.clone(), tc("2026-10-07T10:00:01Z")]);
+        assert!(proven.days.keys().all(|(_, m)| m == "codex-auto-review"));
+        assert_eq!(cost_sum(&proven), 0.0);
+        assert_eq!(tokens_sum(&proven), 1_100.0);
+
+        let unknown = codex_run(&[meta(""), turn.clone(), tc("2026-10-07T10:00:01Z")]);
+        assert!(unknown.days.keys().all(|(_, m)| *m == tagged));
+        assert!(cost_sum(&unknown) > 0.0);
+
+        let pre = codex_run(&[meta("acct-1"), turn, tc("2026-10-06T07:12:59Z")]);
+        assert!(pre.days.keys().all(|(_, m)| m == "codex-auto-review"));
+        assert!(cost_sum(&pre) > 0.0);
+    }
+
+    /// codex_scan_files settles each file's unproven auto-review by the
+    /// folder it was read from: a file under an API-key root keeps its
+    /// cost, one anywhere else drops to $0. Tokens survive either way.
+    #[test]
+    fn codex_scan_files_settles_by_each_files_source_root() {
+        let root_a = orca_test_root("settle-a");
+        let root_b = orca_test_root("settle-b");
+        let write_ar = |root: &Path, name: &str, last: f64| -> PathBuf {
+            fs::create_dir_all(root).unwrap();
+            let file = root.join(name);
+            fs::write(
+                &file,
+                [
+                    json!({"timestamp": "2026-10-07T10:00:00Z", "type": "session_meta",
+                           "payload": {"id": "t-1"}})
+                    .to_string(),
+                    json!({"timestamp": "2026-10-07T10:00:00Z", "type": "turn_context",
+                           "payload": {"model": "codex-auto-review"}})
+                    .to_string(),
+                    token_count_line(
+                        "2026-10-07T10:00:01Z",
+                        Some((last, last / 10.0)),
+                        (last, last / 10.0),
+                    ),
+                ]
+                .join("\n"),
+            )
+            .unwrap();
+            file
+        };
+        let a_file = write_ar(&root_a, "rollout-a.jsonl", 10_000.0);
+        let b_file = write_ar(&root_b, "rollout-b.jsonl", 20_000.0);
+
+        // Only root A is an API-key login.
+        let a_only = codex_scan_files(std::slice::from_ref(&a_file), &[root_a.clone()]);
+        let priced = cost_sum(&a_only);
+        assert!(priced > 0.0);
+
+        let both = codex_scan_files(&[a_file, b_file], &[root_a.clone()]);
+        assert_eq!(cost_sum(&both), priced);
+        assert_eq!(tokens_sum(&both), 33_000.0);
+        assert!(both
+            .days
+            .keys()
+            .all(|(_, m)| m == "codex-auto-review"));
+
+        let _ = fs::remove_dir_all(&root_a);
+        let _ = fs::remove_dir_all(&root_b);
+    }
+
+    /// A $0 model survives the model breakdown on token share instead of
+    /// cost share — but the five-name cap still folds it into "Other".
+    #[test]
+    fn finalize_models_keeps_zero_cost_model_on_token_share() {
+        let named = finalize_models(
+            HashMap::from([
+                ("gpt-5.5".to_string(), (1.0, 1_000.0)),
+                ("codex-auto-review".to_string(), (0.0, 10_000.0)),
+            ]),
+            1.0,
+        );
+        assert_eq!(named.len(), 2);
+        assert!(named.iter().all(|m| m.model != "Other"));
+
+        // Under 5% of window tokens still folds into Other.
+        let named = finalize_models(
+            HashMap::from([
+                ("gpt-5.5".to_string(), (1.0, 1_000_000.0)),
+                ("codex-auto-review".to_string(), (0.0, 1_000.0)),
+            ]),
+            1.0,
+        );
+        assert_eq!(named.len(), 2);
+        assert_eq!(named[1].model, "Other");
+        assert_eq!(named[1].tokens, 1_000.0);
+
+        // Five paid names already fill the list — the cap wins.
+        let mut raw: HashMap<String, (f64, f64)> = (0..5)
+            .map(|i| (format!("paid-{i}"), (0.2, 100.0)))
+            .collect();
+        raw.insert("codex-auto-review".to_string(), (0.0, 50_000.0));
+        let named = finalize_models(raw, 1.0);
+        assert_eq!(named.len(), 6);
+        assert_eq!(named[5].model, "Other");
+        assert_eq!(named[5].tokens, 50_000.0);
+    }
+
     #[test]
     fn codex_stale_snapshot_reemission_skipped() {
         let lines = vec![
@@ -4861,7 +5024,7 @@ mod tests {
             vec![(0, CodexSource::Home(default_home)), (0, CodexSource::Home(runtime))],
         );
         assert_eq!(plan[0], vec![orca_file]);
-        assert_eq!(tokens_sum(&codex_scan_files(&plan[0])), 1_100.0);
+        assert_eq!(tokens_sum(&codex_scan_files(&plan[0], &[])), 1_100.0);
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -4886,7 +5049,7 @@ mod tests {
         // One winner, the larger Orca copy — its three turns scan to 6600;
         // 1100 would mean the default copy won, 7700 both counted.
         assert_eq!(plan[0], vec![orca_file.clone()]);
-        assert_eq!(tokens_sum(&codex_scan_files(&plan[0])), 6_600.0);
+        assert_eq!(tokens_sum(&codex_scan_files(&plan[0], &[])), 6_600.0);
 
         // Equal-size copies: the earlier (default) home wins the tie.
         let orca_file2 = write_rollout(&runtime, "rollout-2026-08-18T11-00-00-cccc.jsonl", 2);
@@ -5032,7 +5195,7 @@ mod tests {
             vec![(0, CodexSource::Home(runtime.clone())), (0, CodexSource::Home(runtime.join(".")))],
         );
         assert_eq!(plan[0], vec![file]);
-        assert_eq!(tokens_sum(&codex_scan_files(&plan[0])), 1_100.0);
+        assert_eq!(tokens_sum(&codex_scan_files(&plan[0], &[])), 1_100.0);
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -5053,7 +5216,7 @@ mod tests {
             vec![(0, CodexSource::Home(default_home)), (0, CodexSource::Home(extra))],
         );
         assert_eq!(plan[0], vec![file]);
-        assert_eq!(tokens_sum(&codex_scan_files(&plan[0])), 1_100.0);
+        assert_eq!(tokens_sum(&codex_scan_files(&plan[0], &[])), 1_100.0);
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -5085,7 +5248,7 @@ mod tests {
         ));
         let plan = codex_files_plan(1, vec![(0, CodexSource::SessionsTree(tree))]);
         assert_eq!(plan[0], vec![keep]);
-        assert_eq!(tokens_sum(&codex_scan_files(&plan[0])), 1_100.0);
+        assert_eq!(tokens_sum(&codex_scan_files(&plan[0], &[])), 1_100.0);
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -5110,7 +5273,7 @@ mod tests {
         );
         // Larger synced copy wins once — 3300 tokens, never 1100 + 3300.
         assert_eq!(plan[0], vec![extra_file]);
-        assert_eq!(tokens_sum(&codex_scan_files(&plan[0])), 3_300.0);
+        assert_eq!(tokens_sum(&codex_scan_files(&plan[0], &[])), 3_300.0);
         assert!(!plan[0].contains(&default_file));
         let _ = fs::remove_dir_all(&base);
     }
@@ -5155,8 +5318,8 @@ mod tests {
         // One session across four names → one winner: the largest copy.
         assert_eq!(plan[0], vec![biggest.clone()]);
         assert!(!plan[0].contains(&default_file));
-        let expected = tokens_sum(&codex_scan_files(std::slice::from_ref(&biggest)));
-        assert_eq!(tokens_sum(&codex_scan_files(&plan[0])), expected);
+        let expected = tokens_sum(&codex_scan_files(std::slice::from_ref(&biggest), &[]));
+        assert_eq!(tokens_sum(&codex_scan_files(&plan[0], &[])), expected);
         let _ = fs::remove_dir_all(&base);
     }
 
