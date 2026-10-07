@@ -150,6 +150,25 @@ pub(crate) fn home_account_id(dir: &Path) -> Option<String> {
     dir_identity(dir).map(|(a, _)| a)
 }
 
+/// True when a Codex home is signed in with a raw API key rather than a
+/// ChatGPT login — ChatGPT-only offers (e.g. free Auto-review) don't
+/// apply to it. `auth_mode == "apikey"` is explicit; without it, a key
+/// with no ChatGPT `tokens` means the same. A missing/unreadable
+/// auth.json counts as ChatGPT. Read-only; the key is never logged.
+pub(crate) fn home_uses_api_key(dir: &Path) -> bool {
+    let Some(doc) = read_auth(dir) else { return false };
+    match doc.get("auth_mode").and_then(Value::as_str) {
+        Some(mode) => mode.eq_ignore_ascii_case("apikey"),
+        None => {
+            doc.get("tokens").map_or(true, |t| t.is_null())
+                && doc
+                    .get("OPENAI_API_KEY")
+                    .and_then(Value::as_str)
+                    .is_some_and(|k| !k.is_empty())
+        }
+    }
+}
+
 /// A Codex home managed by Orca (stablyai/orca): Orca launches Codex with
 /// its own CODEX_HOME, so these sessions never land in `~/.codex`.
 pub struct OrcaHome {
@@ -803,6 +822,47 @@ mod tests {
                 "https://api.openai.com/auth": {"chatgpt_account_id": "acct"}}))}});
         assert!(openai_provenance(&real));
         assert!(!openai_provenance(&json!({})));
+    }
+
+    /// auth_mode decides; without it, a bare OPENAI_API_KEY with no
+    /// ChatGPT tokens means API-key login. Unreadable/missing files
+    /// count as ChatGPT.
+    #[test]
+    fn home_uses_api_key_reads_auth_mode_then_key_shape() {
+        use super::home_uses_api_key;
+        let root = std::env::temp_dir().join(format!("pane-apikey-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut n = 0;
+        let mut with = |doc: serde_json::Value| {
+            n += 1;
+            let d = root.join(format!("h{n}"));
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("auth.json"), doc.to_string()).unwrap();
+            d
+        };
+        assert!(home_uses_api_key(&with(
+            json!({"auth_mode": "apikey", "OPENAI_API_KEY": "sk-x"})
+        )));
+        // Case-insensitive.
+        assert!(home_uses_api_key(&with(json!({"auth_mode": "APIKEY"}))));
+        assert!(!home_uses_api_key(&with(
+            json!({"auth_mode": "chatgpt", "tokens": {"account_id": "a"}})
+        )));
+        // auth_mode absent: key + null tokens → API key…
+        assert!(home_uses_api_key(&with(
+            json!({"OPENAI_API_KEY": "sk-x", "tokens": null})
+        )));
+        // …key + no tokens field → same…
+        assert!(home_uses_api_key(&with(json!({"OPENAI_API_KEY": "sk-x"}))));
+        // …but ChatGPT tokens present → ChatGPT.
+        assert!(!home_uses_api_key(&with(json!({"tokens": {"account_id": "a"}}))));
+        // …and an empty key string doesn't count.
+        assert!(!home_uses_api_key(&with(json!({"OPENAI_API_KEY": ""}))));
+        // Missing / unreadable file → ChatGPT.
+        assert!(!home_uses_api_key(&root.join("missing")));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

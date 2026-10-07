@@ -316,7 +316,7 @@ fn cache() -> &'static Mutex<HashMap<PathBuf, FileEntry>> {
 // "Scanning session logs…" every day.
 // ---------------------------------------------------------------------------
 
-const PERSIST_VERSION: u32 = 4; // bump on cache format *or* parser-logic changes
+const PERSIST_VERSION: u32 = 5; // bump on cache format *or* parser-logic changes
 
 /// Set when any file was (re)parsed this run — nothing changed, nothing saved.
 static CACHE_DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -2479,7 +2479,68 @@ fn codex_line(st: &mut CodexFileState, line: &str, data: &mut FileData) {
         cache_write_5m: 0.0,
         cache_write_1h: 0.0,
     };
-    add_event(data, ts, &model, cost_for(&model, &p, &u, threshold, ts) * mult, tokens);
+    let cost = cost_for(&model, &p, &u, threshold, ts) * mult;
+    // Free for ChatGPT sign-ins from 2026-10-06 07:13 UTC: priced as
+    // usual but kept under a tagged key so the card's login decides the
+    // cost at settle time — the per-file cache stays auth-independent.
+    let key = if model.eq_ignore_ascii_case("codex-auto-review")
+        && ts.timestamp() >= CODEX_AUTO_REVIEW_FREE_UNIX
+    {
+        format!("codex-auto-review{AUTO_REVIEW_FREE_TAG}")
+    } else {
+        model
+    };
+    add_event(data, ts, &key, cost, tokens);
+}
+
+/// OpenAI made Auto-review free for ChatGPT sign-ins at 2026-10-06
+/// 07:13 UTC ("does not draw usage from your plan"); API-key logins
+/// still pay, and events before the cutoff keep their price. The tag
+/// marks post-cutoff events inside a file's FileData until
+/// settle_auto_review applies the card's login type.
+const CODEX_AUTO_REVIEW_FREE_UNIX: i64 = 1_791_270_780;
+const AUTO_REVIEW_FREE_TAG: &str = "\u{1}chatgpt-free";
+
+/// Fold tagged post-cutoff auto-review entries back into the plain
+/// `codex-auto-review` key, zeroing their cost on ChatGPT-login cards
+/// and keeping it on API-key ones. Tokens are kept either way.
+fn settle_auto_review(data: &mut FileData, chatgpt: bool) {
+    let tagged = format!("codex-auto-review{AUTO_REVIEW_FREE_TAG}");
+    let plain = "codex-auto-review";
+    let has = |k: &String| k == &tagged;
+    if !data.days.keys().any(|(_, m)| has(m)) && !data.hours.keys().any(|(_, m)| has(m)) {
+        return;
+    }
+    let cost_of = |(cost, tokens): (f64, f64)| (if chatgpt { 0.0 } else { cost }, tokens);
+    let tagged_days: Vec<i32> = data
+        .days
+        .keys()
+        .filter(|(_, m)| has(m))
+        .map(|(d, _)| *d)
+        .collect();
+    for day in tagged_days {
+        let Some(v) = data.days.remove(&(day, tagged.clone())) else { continue };
+        let e = data.days.entry((day, plain.to_string())).or_insert((0.0, 0.0));
+        let (c, t) = cost_of(v);
+        e.0 += c;
+        e.1 += t;
+    }
+    let tagged_hours: Vec<i64> = data
+        .hours
+        .keys()
+        .filter(|(_, m)| has(m))
+        .map(|(h, _)| *h)
+        .collect();
+    for hour in tagged_hours {
+        let Some(v) = data.hours.remove(&(hour, tagged.clone())) else { continue };
+        let e = data.hours.entry((hour, plain.to_string())).or_insert((0.0, 0.0));
+        let (c, t) = cost_of(v);
+        e.0 += c;
+        e.1 += t;
+    }
+    if data.models.remove(&tagged) {
+        data.models.insert(plain.to_string());
+    }
 }
 
 /// `codex-auto-review` release timeline (newest first), from ccusage's
@@ -2839,8 +2900,13 @@ fn codex(mut extra: FileData) -> (ProviderSpend, Vec<ProviderSpend>, FileData, F
     let mut kimi_routed = FileData::default();
     let mut stepfun_routed = FileData::default();
     let mut spends = Vec::with_capacity(cards.len());
+    // Extra cards are ChatGPT OAuth logins by construction; card 0 is
+    // ChatGPT unless the default home is a raw API key.
+    let card0_chatgpt =
+        !providers::codex::home_uses_api_key(&providers::codex::default_home());
     for (i, (id, name)) in cards.iter().enumerate() {
         let mut data = codex_scan_files(&per_card[i]);
+        settle_auto_review(&mut data, i > 0 || card0_chatgpt);
         if i == 0 {
             // Pi sessions that drove a Codex account (from the pi scan).
             merge_data(&mut data, std::mem::take(&mut extra));
@@ -4623,6 +4689,89 @@ mod tests {
         assert_eq!(models, vec!["codex-auto-review"]);
         assert!(cost_sum(&data) > 0.0);
         assert!(data.unpriced.is_empty());
+    }
+
+    /// From the free cutoff, post-cutoff auto-review events land under a
+    /// tagged key (priced identically — the card's login zeroes it at
+    /// settle); pre-cutoff events keep the plain key.
+    #[test]
+    fn codex_auto_review_tags_only_after_the_free_cutoff() {
+        let tagged = format!("codex-auto-review{AUTO_REVIEW_FREE_TAG}");
+        let turn = json!({"timestamp": "2026-10-06T07:00:00Z", "type": "turn_context",
+                          "payload": {"model": "codex-auto-review"}})
+        .to_string();
+
+        let pre = codex_run(&[
+            turn.clone(),
+            token_count_line("2026-10-06T07:12:59Z", Some((1_000.0, 100.0)), (1_000.0, 100.0)),
+        ]);
+        assert!(pre.days.keys().all(|(_, m)| m == "codex-auto-review"));
+        assert!(cost_sum(&pre) > 0.0);
+
+        let post = codex_run(&[
+            turn,
+            token_count_line("2026-10-06T07:13:00Z", Some((1_000.0, 100.0)), (1_000.0, 100.0)),
+        ]);
+        assert!(post.days.keys().all(|(_, m)| *m == tagged));
+        // Same pricing — the tag only marks who may zero it.
+        assert_eq!(cost_sum(&pre), cost_sum(&post));
+    }
+
+    /// A normal model after the cutoff is never tagged.
+    #[test]
+    fn codex_non_auto_review_never_gets_the_free_tag() {
+        let data = codex_run(&[
+            json!({"timestamp": "2026-10-07T10:00:00Z", "type": "turn_context",
+                   "payload": {"model": "gpt-5.5"}})
+            .to_string(),
+            token_count_line("2026-10-07T10:00:01Z", Some((1_000.0, 100.0)), (1_000.0, 100.0)),
+        ]);
+        assert!(data.days.keys().all(|(_, m)| m == "gpt-5.5"));
+        assert!(cost_sum(&data) > 0.0);
+    }
+
+    /// ChatGPT card: a same-day plain pre-cutoff entry and a tagged
+    /// post-cutoff entry merge into one row — cost keeps only the
+    /// pre-cutoff part, tokens sum, hours settle the same way.
+    #[test]
+    fn settle_auto_review_chatgpt_keeps_tokens_drops_cost() {
+        let tagged = format!("codex-auto-review{AUTO_REVIEW_FREE_TAG}");
+        let now = Utc::now();
+        let mut d = FileData::default();
+        add_event(&mut d, now, "codex-auto-review", 2.0, 1_000.0);
+        add_event(&mut d, now, &tagged, 3.0, 2_000.0);
+
+        settle_auto_review(&mut d, true);
+        let day = day_of_utc(now);
+        let hour = now.timestamp().div_euclid(3600);
+        assert_eq!(
+            d.days.get(&(day, "codex-auto-review".to_string())),
+            Some(&(2.0, 3_000.0))
+        );
+        assert_eq!(
+            d.hours.get(&(hour, "codex-auto-review".to_string())),
+            Some(&(2.0, 3_000.0))
+        );
+        assert!(!d.days.keys().any(|(_, m)| m.contains(AUTO_REVIEW_FREE_TAG)));
+        assert!(!d.hours.keys().any(|(_, m)| m.contains(AUTO_REVIEW_FREE_TAG)));
+    }
+
+    /// API-key card: same merge, but the post-cutoff cost stays.
+    #[test]
+    fn settle_auto_review_apikey_keeps_cost() {
+        let tagged = format!("codex-auto-review{AUTO_REVIEW_FREE_TAG}");
+        let now = Utc::now();
+        let mut d = FileData::default();
+        add_event(&mut d, now, "codex-auto-review", 2.0, 1_000.0);
+        add_event(&mut d, now, &tagged, 3.0, 2_000.0);
+
+        settle_auto_review(&mut d, false);
+        let day = day_of_utc(now);
+        assert_eq!(
+            d.days.get(&(day, "codex-auto-review".to_string())),
+            Some(&(5.0, 3_000.0))
+        );
+        assert!(!d.days.keys().any(|(_, m)| m.contains(AUTO_REVIEW_FREE_TAG)));
     }
 
     #[test]
