@@ -97,6 +97,10 @@ Ground rules that apply to every provider:
   OpenAI's long-context rates for the whole request. Auto-review usage
   keeps the name `codex-auto-review` in the model breakdown; dollars use
   the dated GPT fallback for that day (gpt-5.5 from April 2026 onward).
+  Auto-review is counted at $0 from 2026-10-06 for ChatGPT sign-ins
+  (OpenAI made it free): a session that records its ChatGPT account is
+  free; for older sessions the login of the folder it was read from
+  decides, and API-key logins still price it.
   Daybreak Blue (`gpt-daybreak-blue-latest`) prices as GPT-5.6 Sol.
   Pi coding agent sessions that drove this Codex account (provider
   `openai-codex`) fold into this card's spend the same way they do for
