@@ -1,11 +1,12 @@
 # Roadmap — full Mac parity (and beyond)
 
-**Status (v0.4.56, 2026-10-01): every wave below is shipped, and the
+**Status (v0.4.58, 2026-10-07): every wave below is shipped, and the
 post-launch releases keep going.** Pane has full feature parity with the
 macOS original plus 24 providers (StepFun and Sub2API multi-site key
 tracking landed), multi-site One/New API key management,
 widget mode (pinned, draggable, collapsible to a cycling see-through
 glass bar), in-card metric-row reordering, Claude Cloud session credits,
+Codex spend from Orca and synced session folders (free Auto-review at $0),
 Kimi Code plan keys without a CLI login, resilient modern Cursor plan
 fallbacks, English/Chinese/Russian UI, signed CI updates, live model
 pricing (now with time-of-day peak windows), and a Mac-parity design

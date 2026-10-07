@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.58 — 2026-10-07
+
+### Fixed
+- **Codex: Auto-review counts as $0 (#260).** OpenAI made Codex
+  Auto-review free for ChatGPT sign-ins on 2026-10-06, but Pane still
+  priced `codex-auto-review` at GPT rates in Today / Yesterday / 30 Days
+  and the weekly capacity estimate. Reviews from then on count as $0,
+  and their tokens are still shown. Older reviews keep their price, and
+  Codex logins that use an API key still pay. A session that records its
+  ChatGPT account is free wherever it was read from; older sessions
+  follow the login of the folder they came from.
+- **Model breakdown keeps $0 models.** A free model that uses at least
+  5% of a window's tokens now keeps its own row in the spend tooltip
+  instead of folding into "Other".
+
 ## 0.4.57 — 2026-10-06
 
 ### Added
