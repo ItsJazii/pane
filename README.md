@@ -157,7 +157,7 @@ error text) — see [Privacy](#privacy--security) for the full contract.
 | Provider | How Pane connects |
 |---|---|
 | Claude (Claude Code) | `%USERPROFILE%\.claude\.credentials.json` + Anthropic usage API; multi-account — every discovered config-dir login gets its own card; Cloud session credits bar counting down to its expiry; banked Rate Limit Resets claimable like Codex's |
-| Codex (Codex CLI) | `%USERPROFILE%\.codex\auth.json` + ChatGPT usage API, incl. reset-credit redemption; multi-account like Claude; sessions run inside Orca count toward spend |
+| Codex (Codex CLI) | `%USERPROFILE%\.codex\auth.json` + ChatGPT usage API, incl. reset-credit redemption; multi-account like Claude; sessions run inside Orca and session folders synced from other machines count toward spend; Auto-review counts as $0 since OpenAI made it free for ChatGPT sign-ins (2026-10-06) |
 | Cursor | Cursor's local state database + modern usage RPC; `cursor.com/api/usage-summary` keeps plan bars live when the RPC host is unreachable |
 | OpenCode (Go plan) | Official account-wide usage API (Go key from `auth.json`); local `opencode.db` for spend* |
 | GitHub Copilot | Copilot editor login or GitHub CLI (Credential Manager) + GitHub API |
