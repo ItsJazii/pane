@@ -316,7 +316,7 @@ fn cache() -> &'static Mutex<HashMap<PathBuf, FileEntry>> {
 // "Scanning session logs…" every day.
 // ---------------------------------------------------------------------------
 
-const PERSIST_VERSION: u32 = 5; // bump on cache format *or* parser-logic changes
+const PERSIST_VERSION: u32 = 6; // bump on cache format *or* parser-logic changes
 
 /// Set when any file was (re)parsed this run — nothing changed, nothing saved.
 static CACHE_DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
