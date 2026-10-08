@@ -825,14 +825,14 @@ fn decode_event(data: &[u8], step: Option<&[u8]>) -> Decoded {
 
 // --- per-store cached read ------------------------------------------------
 
-/// One store's decoded events plus the read cursor. Rows are append-only
-/// by `idx`, so a changed store resumes where it left off instead of
-/// re-decoding every blob.
 /// Undated generations held for retry. Past the cap the oldest idx is
 /// dropped so a store full of never-dated rows cannot force every scan
 /// to re-read the whole table.
 const MAX_PENDING_IDXS: usize = 512;
 
+/// One store's decoded events plus the read cursor. Rows are append-only
+/// by `idx`, so a changed store resumes where it left off instead of
+/// re-decoding every blob.
 struct AgyDbCache {
     db: FileStamp,
     wal: FileStamp,
@@ -940,6 +940,7 @@ fn read_db(path: &Path, entry: &mut AgyDbCache) -> Result<(), String> {
         }
         entry.last_idx = entry.last_idx.max(idx);
         let Some(blob) = blob else {
+            entry.pending.remove(&idx);
             continue;
         };
         match decode_event(&blob, step.as_deref()) {
@@ -953,7 +954,9 @@ fn read_db(path: &Path, entry: &mut AgyDbCache) -> Result<(), String> {
                     entry.pending.pop_first();
                 }
             }
-            Decoded::Skip => {}
+            Decoded::Skip => {
+                entry.pending.remove(&idx);
+            }
         }
     }
     Ok(())
