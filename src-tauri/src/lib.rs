@@ -1673,6 +1673,9 @@ async fn fetch_usage(
     // auth.json while the request is in flight cannot cache the old key's
     // numbers under the new identity.
     let opencode_identity_at_start = providers::opencode::default_identity();
+    // Same guard for Droid's CLI login: a keyring re-login while the
+    // request is in flight must not cache the old account's numbers.
+    let droid_identity_at_start = providers::droid::default_identity();
 
     // Same guard for the capacity families: a default Claude/Codex
     // sign-in swap while the requests are in flight must not write
@@ -2067,6 +2070,22 @@ async fn fetch_usage(
             }
         }
     }
+    let droid_identity_now = providers::droid::default_identity();
+    let droid_swapped_mid_refresh = matches!(
+        (&droid_identity_at_start, &droid_identity_now),
+        (Some(old), Some(current)) if old != current
+    );
+    if droid_swapped_mid_refresh {
+        for s in &mut all {
+            if s.id == "droid" {
+                *s = providers::Snapshot::error(
+                    "droid",
+                    "Droid",
+                    "Droid login changed during refresh.".into(),
+                );
+            }
+        }
+    }
 
     for s in &all {
         let log_family = family_of(&s.id);
@@ -2127,8 +2146,8 @@ async fn fetch_usage(
                 // cache — that's the safety net, not a swap.
                 if !old.is_null() && !cur.is_null() && old != cur && map.remove(fam).is_some() {
                     removed = true;
-                } else if fam == "opencode"
-                    && opencode_swapped_mid_refresh
+                } else if ((fam == "opencode" && opencode_swapped_mid_refresh)
+                    || (fam == "droid" && droid_swapped_mid_refresh))
                     && map.remove(fam).is_some()
                 {
                     // Mid-refresh A→B with two known fingerprints: drop

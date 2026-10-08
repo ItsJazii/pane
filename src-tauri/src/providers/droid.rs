@@ -613,61 +613,103 @@ fn session_jsonl(settings: &Path) -> PathBuf {
     settings.with_file_name(format!("{}.jsonl", name.trim_end_matches(".settings.json")))
 }
 
+/// Parse one jsonl line as an assistant message; anything else is ignored.
+fn push_message_line(bytes: &[u8], out: &mut Vec<(i64, Option<String>)>) {
+    let mut b = bytes;
+    while matches!(b.last(), Some(b'\n') | Some(b'\r')) {
+        b = &b[..b.len() - 1];
+    }
+    let Ok(text) = std::str::from_utf8(b) else {
+        return;
+    };
+    if !text.contains("\"assistant\"") {
+        return;
+    }
+    let Ok(v) = serde_json::from_str::<Value>(text) else {
+        return;
+    };
+    if v.get("type").and_then(Value::as_str) != Some("message") {
+        return;
+    }
+    let msg = v.get("message");
+    if msg.and_then(|m| m.get("role")).and_then(Value::as_str) != Some("assistant") {
+        return;
+    }
+    let Some(ts) = v
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+    else {
+        return;
+    };
+    let model = msg
+        .and_then(|m| m.get("modelId"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    out.push((ts.timestamp_millis(), model));
+}
+
 /// (ts_ms, message modelId) pairs for assistant messages, in file order.
-fn assistant_messages(jsonl: &Path) -> Vec<(i64, Option<String>)> {
-    let Ok(file) = std::fs::File::open(jsonl) else {
-        return Vec::new();
+/// `Some(vec![])` when the jsonl does not exist; `None` when it exists
+/// but a read fails — a transient state the caller must not cache.
+/// Lines are accumulated byte-wise and capped at SESSION_LINE_CAP, so a
+/// transcript-dump line is consumed without ever being buffered whole.
+fn assistant_messages(jsonl: &Path) -> Option<Vec<(i64, Option<String>)>> {
+    let file = match std::fs::File::open(jsonl) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
+        Err(_) => return None,
     };
     let mut out = Vec::new();
-    let mut buf = String::new();
+    let mut line: Vec<u8> = Vec::new();
+    let mut oversized = false;
     let mut reader = std::io::BufReader::new(file);
     use std::io::BufRead;
     loop {
-        buf.clear();
-        let Ok(n) = reader.read_line(&mut buf) else {
-            break;
+        let (take, eol) = {
+            let buf = match reader.fill_buf() {
+                Ok(b) => b,
+                Err(_) => return None,
+            };
+            if buf.is_empty() {
+                // EOF: flush an unterminated final line, then stop.
+                if !oversized && !line.is_empty() {
+                    push_message_line(&line, &mut out);
+                }
+                break;
+            }
+            let nl = buf.iter().position(|&b| b == b'\n');
+            let take = nl.map(|i| i + 1).unwrap_or(buf.len());
+            if !oversized && line.len() + take <= SESSION_LINE_CAP {
+                line.extend_from_slice(&buf[..take]);
+            } else {
+                oversized = true;
+            }
+            (take, nl.is_some())
         };
-        if n == 0 {
-            break;
+        reader.consume(take);
+        if eol {
+            if !oversized {
+                push_message_line(&line, &mut out);
+            }
+            line.clear();
+            oversized = false;
         }
-        if buf.len() > SESSION_LINE_CAP || !buf.contains("\"assistant\"") {
-            continue;
-        }
-        let Ok(v) = serde_json::from_str::<Value>(&buf) else {
-            continue;
-        };
-        if v.get("type").and_then(Value::as_str) != Some("message") {
-            continue;
-        }
-        let msg = v.get("message");
-        if msg.and_then(|m| m.get("role")).and_then(Value::as_str) != Some("assistant") {
-            continue;
-        }
-        let Some(ts) = v
-            .get("timestamp")
-            .and_then(Value::as_str)
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        else {
-            continue;
-        };
-        let model = msg
-            .and_then(|m| m.get("modelId"))
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        out.push((ts.timestamp_millis(), model));
     }
-    out
+    Some(out)
 }
 
 /// Decode one session into dated per-message shares of its tokenUsage.
 /// A token-carrying session with no assistant messages attributes
-/// everything to the settings file's own mtime.
-fn session_events(settings: &Path, settings_mtime: SystemTime) -> Vec<DroidSessionEvent> {
+/// everything to the settings file's own mtime. `None` marks a transient
+/// read failure (a mid-write settings file, an unreadable jsonl) the
+/// caller must not cache; `Some(vec![])` is a genuine zero-token session.
+fn session_events(settings: &Path, settings_mtime: SystemTime) -> Option<Vec<DroidSessionEvent>> {
     let Ok(raw) = super::read_small_text(settings, SESSION_SETTINGS_CAP, "Droid session") else {
-        return Vec::new();
+        return None;
     };
     let Ok(doc) = serde_json::from_str::<Value>(&raw) else {
-        return Vec::new();
+        return None;
     };
     let u = doc.get("tokenUsage");
     let num = |k: &str| u.and_then(|t| t.get(k)).and_then(Value::as_f64).unwrap_or(0.0);
@@ -680,10 +722,10 @@ fn session_events(settings: &Path, settings_mtime: SystemTime) -> Vec<DroidSessi
     );
     let total = input + output + thinking + cache_write + cache_read;
     if total <= 0.0 {
-        return Vec::new();
+        return Some(Vec::new());
     }
     let settings_model = doc.get("model").and_then(Value::as_str).unwrap_or_default();
-    let msgs = assistant_messages(&session_jsonl(settings));
+    let msgs = assistant_messages(&session_jsonl(settings))?;
     let event = |ts_ms: i64, model: Option<String>, n: f64| DroidSessionEvent {
         ts_ms,
         model: model.unwrap_or_else(|| settings_model.to_string()),
@@ -697,10 +739,10 @@ fn session_events(settings: &Path, settings_mtime: SystemTime) -> Vec<DroidSessi
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        return vec![event(ts_ms, None, 1.0)];
+        return Some(vec![event(ts_ms, None, 1.0)]);
     }
     let n = msgs.len() as f64;
-    msgs.into_iter().map(|(ts, m)| event(ts, m, n)).collect()
+    Some(msgs.into_iter().map(|(ts, m)| event(ts, m, n)).collect())
 }
 
 type SessionCache = HashMap<PathBuf, (FileStamp, FileStamp, Vec<DroidSessionEvent>)>;
@@ -746,9 +788,13 @@ fn collect_from(home: &Path, cutoff: SystemTime, cache: &mut SessionCache) -> Ve
             .entry(settings.clone())
             .or_insert_with(|| ((SystemTime::UNIX_EPOCH, 0), (SystemTime::UNIX_EPOCH, 0), Vec::new()));
         if entry.0 != s || entry.1 != j {
-            entry.2 = session_events(&settings, s.0);
-            entry.0 = s;
-            entry.1 = j;
+            if let Some(events) = session_events(&settings, s.0) {
+                entry.2 = events;
+                entry.0 = s;
+                entry.1 = j;
+            }
+            // None is a transient read failure: keep the previous events
+            // AND stamps so the next scan retries instead of caching it.
         }
         out.extend(entry.2.iter().filter(|e| e.ts_ms >= cutoff_ms).cloned());
     }
@@ -1091,6 +1137,102 @@ mod tests {
         // A cutoff past every file's mtime reads nothing.
         let events = collect_from(&home, SystemTime::now(), &mut cache);
         assert!(events.is_empty());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn oversized_jsonl_line_is_skipped_and_the_rest_survives() {
+        let home = session_dir("bigline");
+        let _ = std::fs::remove_dir_all(&home);
+        let dir = home.join("sessions").join("proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("big.settings.json"),
+            serde_json::to_string(
+                &json!({"model": "gpt-6-sol", "tokenUsage": usage(10.0, 5.0, 0.0, 0.0, 0.0)}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        // A transcript-dump line past the cap that would parse as an
+        // assistant message if it were ever buffered whole, then a real one.
+        let mut jsonl =
+            b"{\"type\":\"message\",\"timestamp\":\"2026-10-01T09:00:00Z\",\"message\":{\"role\":\"assistant\",\"modelId\":\"gpt-6-sol\"},\"pad\":\"".to_vec();
+        jsonl.extend(std::iter::repeat_n(b'x', SESSION_LINE_CAP));
+        jsonl.extend_from_slice(b"\"}\n{\"type\":\"message\",\"timestamp\":\"2026-10-01T10:00:00Z\",\"message\":{\"role\":\"assistant\",\"modelId\":\"gpt-6-astra\"}}");
+        std::fs::write(dir.join("big.jsonl"), &jsonl).unwrap();
+        let mut cache = SessionCache::new();
+        let events = collect_from(&home, SystemTime::UNIX_EPOCH, &mut cache);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].model, "gpt-6-astra");
+        assert_eq!(events[0].input, 10.0);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn transient_read_failure_keeps_cached_events() {
+        let home = session_dir("transient");
+        let _ = std::fs::remove_dir_all(&home);
+        write_session(
+            &home,
+            "proj",
+            "t1",
+            &json!({"model": "gpt-6-sol", "tokenUsage": usage(100.0, 50.0, 0.0, 0.0, 0.0)}),
+            &["{\"type\":\"message\",\"timestamp\":\"2026-10-01T10:00:00Z\",\"message\":{\"role\":\"assistant\",\"modelId\":\"gpt-6-sol\"}}"],
+        );
+        let mut cache = SessionCache::new();
+        let first = collect_from(&home, SystemTime::UNIX_EPOCH, &mut cache);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].input, 100.0);
+
+        // Mid-write settings: unparsable JSON with a changed stamp. The
+        // last-good events are served while the failure stays uncached.
+        let settings_path = home.join("sessions/proj/t1.settings.json");
+        std::fs::write(&settings_path, "{not valid json at all").unwrap();
+        let second = collect_from(&home, SystemTime::UNIX_EPOCH, &mut cache);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].input, 100.0);
+
+        // Once the file parses again the new contents are picked up.
+        write_session(
+            &home,
+            "proj",
+            "t1",
+            &json!({"model": "gpt-6-astra", "tokenUsage": usage(40.0, 10.0, 0.0, 0.0, 0.0)}),
+            &["{\"type\":\"message\",\"timestamp\":\"2026-10-02T10:00:00Z\",\"message\":{\"role\":\"assistant\",\"modelId\":\"gpt-6-astra\"}}"],
+        );
+        let third = collect_from(&home, SystemTime::UNIX_EPOCH, &mut cache);
+        assert_eq!(third.len(), 1);
+        assert_eq!(third[0].input, 40.0);
+        assert_eq!(third[0].model, "gpt-6-astra");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn missing_jsonl_falls_back_to_settings_mtime() {
+        let home = session_dir("nojsonl");
+        let _ = std::fs::remove_dir_all(&home);
+        let dir = home.join("sessions").join("proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("solo.settings.json"),
+            serde_json::to_string(
+                &json!({"model": "claude-fable-5.1", "tokenUsage": usage(20.0, 5.0, 0.0, 0.0, 0.0)}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        // No .jsonl sibling at all.
+        let mut cache = SessionCache::new();
+        let events = collect_from(&home, SystemTime::UNIX_EPOCH, &mut cache);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].model, "claude-fable-5.1");
+        let st_mtime = file_stamp(&dir.join("solo.settings.json"))
+            .0
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        assert_eq!(events[0].ts_ms, st_mtime);
         let _ = std::fs::remove_dir_all(&home);
     }
 
