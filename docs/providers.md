@@ -284,6 +284,10 @@ Ground rules that apply to every provider:
   Google's Cloud Code quota API (`cloudcode-pa.googleapis.com`) with
   Google's own token refresh.
 - **Shows:** Gemini + Claude pool windows, plan.
+- **Spend:** reads per-generation token counts from the conversation
+  databases under `~/.gemini/antigravity*/conversations/*.db` — strictly
+  read-only (the .pb transcripts carry no token data). Dollars are a
+  catalog-rate estimate, not a charge.
 
 ## DeepSeek / Kimi API / ElevenLabs / Venice-class key providers
 
