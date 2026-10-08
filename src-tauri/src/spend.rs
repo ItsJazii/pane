@@ -3389,6 +3389,42 @@ fn devin() -> ProviderSpend {
     build_spend("devin", "Devin", data)
 }
 
+/// Droid's local session files hold cumulative per-session tokenUsage;
+/// providers::droid splits it evenly across the session's assistant
+/// messages so a turn lands on its own day/model. Windsurf-style slugs
+/// normalize through devin_model before pricing.
+fn droid() -> ProviderSpend {
+    let mut data = FileData::default();
+    for ev in providers::droid::collect_usage_events(scan_cutoff(Local::now())) {
+        let Some(ts) = DateTime::from_timestamp_millis(ev.ts_ms) else {
+            continue;
+        };
+        let tokens = ev.input + ev.output + ev.cache_read + ev.cache_write;
+        if tokens <= 0.0 {
+            continue;
+        }
+        let model = devin_model(if ev.model.is_empty() {
+            "unknown"
+        } else {
+            &ev.model
+        });
+        match pricing::lookup(&model) {
+            Some(p) => {
+                let u = pricing::Usage {
+                    input: ev.input,
+                    output: ev.output,
+                    cache_read: ev.cache_read,
+                    cache_write_5m: ev.cache_write,
+                    cache_write_1h: 0.0,
+                };
+                add_event(&mut data, ts, &model, cost_for(&model, &p, &u, 200_000.0, ts), tokens);
+            }
+            None => note_unpriced(&mut data, ts, &model, tokens),
+        }
+    }
+    build_spend("droid", "Droid", data)
+}
+
 /// Windsurf-style slugs append a reasoning effort ("claude-opus-4-8-medium")
 /// that no catalog knows; price and display the base model. Some slugs also
 /// spell the model differently than the catalogs: version dots become
@@ -3781,6 +3817,7 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
         let hermes_t = s.spawn(|| spend_step("hermes", hermes));
         let grok_t = s.spawn(|| spend_step("grok", grok));
         let devin_t = s.spawn(|| spend_step("devin", devin));
+        let droid_t = s.spawn(|| spend_step("droid", droid));
         let qwen_t = s.spawn(|| spend_step("qwen", qwen));
 
         let (claude_sp, extra_claude_spends, mut minimax_extra, qwen_via_claude, mut kimi_routed, mut stepfun_data) =
@@ -3833,6 +3870,11 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
             opencode_sp,
             build_spend("aihubmix", "AihubMix", aihubmix_data),
             take_join(devin_t, "devin", build_spend("devin", "Devin", FileData::default())),
+            take_join(
+                droid_t,
+                "droid",
+                build_spend("droid", "Droid", FileData::default()),
+            ),
             minimax(minimax_extra),
             stepfun(stepfun_data),
             kimi(kimi_routed),

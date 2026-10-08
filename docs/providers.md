@@ -208,6 +208,11 @@ Ground rules that apply to every provider:
   token rate limits).
 - **Shows:** Session/Weekly/Monthly windows (Core pool rows only when
   they carry usage), extra-usage balance, plan tier.
+- **Spend:** reads per-session token totals from
+  `~/.factory/sessions/<cwd>/<session>.settings.json` — read-only —
+  split evenly across the session's replies by time. Dollars are an
+  API-equivalent estimate, not a Factory charge (factoryCredits are
+  not converted).
 
 ## MiniMax
 

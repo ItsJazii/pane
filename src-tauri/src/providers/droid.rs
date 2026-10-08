@@ -569,6 +569,205 @@ async fn fetch() -> Result<Snapshot, String> {
     Ok(Snapshot::ok(ID, NAME, plan, metrics))
 }
 
+// ---------------------------------------------------------------------------
+// Local spend events — ~/.factory/sessions/<cwd-slug>/<uuid>.{settings.json,jsonl}
+// ---------------------------------------------------------------------------
+//
+// Each session's settings.json carries `tokenUsage` — cumulative counts
+// for THIS session only (`inclusiveTokenUsage` also counts child
+// sessions, which have their own files — using it would double count).
+// The jsonl has no per-message tokens, so the session total is split
+// evenly across its assistant messages, each share dated at that
+// message's timestamp. All strictly read-only.
+
+use super::minimax::{file_stamp, FileStamp};
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use std::sync::Mutex;
+use std::time::SystemTime;
+
+/// One assistant turn's even share of its session's tokenUsage.
+/// `output` already folds thinking tokens; `cache_write` is
+/// cacheCreationTokens.
+#[derive(Clone)]
+pub struct DroidSessionEvent {
+    pub ts_ms: i64,
+    pub model: String,
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+}
+
+/// settings.json is a small session metadata file — bound the read.
+const SESSION_SETTINGS_CAP: u64 = 256 * 1024;
+/// A single jsonl line this long is a transcript dump, not a message
+/// line — skip it rather than feed serde megabytes.
+const SESSION_LINE_CAP: usize = 4 * 1024 * 1024;
+
+fn session_jsonl(settings: &Path) -> PathBuf {
+    let name = settings
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    settings.with_file_name(format!("{}.jsonl", name.trim_end_matches(".settings.json")))
+}
+
+/// (ts_ms, message modelId) pairs for assistant messages, in file order.
+fn assistant_messages(jsonl: &Path) -> Vec<(i64, Option<String>)> {
+    let Ok(file) = std::fs::File::open(jsonl) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut buf = String::new();
+    let mut reader = std::io::BufReader::new(file);
+    use std::io::BufRead;
+    loop {
+        buf.clear();
+        let Ok(n) = reader.read_line(&mut buf) else {
+            break;
+        };
+        if n == 0 {
+            break;
+        }
+        if buf.len() > SESSION_LINE_CAP || !buf.contains("\"assistant\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&buf) else {
+            continue;
+        };
+        if v.get("type").and_then(Value::as_str) != Some("message") {
+            continue;
+        }
+        let msg = v.get("message");
+        if msg.and_then(|m| m.get("role")).and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(ts) = v
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        else {
+            continue;
+        };
+        let model = msg
+            .and_then(|m| m.get("modelId"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        out.push((ts.timestamp_millis(), model));
+    }
+    out
+}
+
+/// Decode one session into dated per-message shares of its tokenUsage.
+/// A token-carrying session with no assistant messages attributes
+/// everything to the settings file's own mtime.
+fn session_events(settings: &Path, settings_mtime: SystemTime) -> Vec<DroidSessionEvent> {
+    let Ok(raw) = super::read_small_text(settings, SESSION_SETTINGS_CAP, "Droid session") else {
+        return Vec::new();
+    };
+    let Ok(doc) = serde_json::from_str::<Value>(&raw) else {
+        return Vec::new();
+    };
+    let u = doc.get("tokenUsage");
+    let num = |k: &str| u.and_then(|t| t.get(k)).and_then(Value::as_f64).unwrap_or(0.0);
+    let (input, output, thinking, cache_write, cache_read) = (
+        num("inputTokens"),
+        num("outputTokens"),
+        num("thinkingTokens"),
+        num("cacheCreationTokens"),
+        num("cacheReadTokens"),
+    );
+    let total = input + output + thinking + cache_write + cache_read;
+    if total <= 0.0 {
+        return Vec::new();
+    }
+    let settings_model = doc.get("model").and_then(Value::as_str).unwrap_or_default();
+    let msgs = assistant_messages(&session_jsonl(settings));
+    let event = |ts_ms: i64, model: Option<String>, n: f64| DroidSessionEvent {
+        ts_ms,
+        model: model.unwrap_or_else(|| settings_model.to_string()),
+        input: input / n,
+        output: (output + thinking) / n,
+        cache_read: cache_read / n,
+        cache_write: cache_write / n,
+    };
+    if msgs.is_empty() {
+        let ts_ms = settings_mtime
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        return vec![event(ts_ms, None, 1.0)];
+    }
+    let n = msgs.len() as f64;
+    msgs.into_iter().map(|(ts, m)| event(ts, m, n)).collect()
+}
+
+type SessionCache = HashMap<PathBuf, (FileStamp, FileStamp, Vec<DroidSessionEvent>)>;
+
+/// Token events across every session under `home`/sessions. Each session
+/// is cached on its (settings, jsonl) stamps; a session untouched since
+/// `cutoff` is skipped without opening it.
+fn collect_from(home: &Path, cutoff: SystemTime, cache: &mut SessionCache) -> Vec<DroidSessionEvent> {
+    let root = home.join("sessions");
+    let Ok(slugs) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut sessions: Vec<PathBuf> = Vec::new();
+    for slug in slugs.flatten() {
+        let Ok(files) = std::fs::read_dir(slug.path()) else {
+            continue;
+        };
+        for f in files.flatten() {
+            let p = f.path();
+            if p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".settings.json"))
+            {
+                sessions.push(p);
+            }
+        }
+    }
+    sessions.sort();
+    let live: HashSet<&PathBuf> = sessions.iter().collect();
+    cache.retain(|k, _| live.contains(k));
+    let cutoff_ms = cutoff
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let mut out = Vec::new();
+    for settings in sessions {
+        let s = file_stamp(&settings);
+        let j = file_stamp(&session_jsonl(&settings));
+        if s.0.max(j.0) < cutoff {
+            continue;
+        }
+        let entry = cache
+            .entry(settings.clone())
+            .or_insert_with(|| ((SystemTime::UNIX_EPOCH, 0), (SystemTime::UNIX_EPOCH, 0), Vec::new()));
+        if entry.0 != s || entry.1 != j {
+            entry.2 = session_events(&settings, s.0);
+            entry.0 = s;
+            entry.1 = j;
+        }
+        out.extend(entry.2.iter().filter(|e| e.ts_ms >= cutoff_ms).cloned());
+    }
+    out
+}
+
+/// Dated token events from the Droid CLI's local session files, newest
+/// store state each call. See `collect_from`.
+pub fn collect_usage_events(cutoff: SystemTime) -> Vec<DroidSessionEvent> {
+    static CACHE: Mutex<Option<SessionCache>> = Mutex::new(None);
+    let Some(home) = factory_home() else {
+        return Vec::new();
+    };
+    match CACHE.lock() {
+        Ok(mut guard) => collect_from(&home, cutoff, guard.get_or_insert_with(HashMap::new)),
+        Err(_) => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -772,5 +971,157 @@ mod tests {
         let no_exp = unsigned_jwt(json!({"sub": "acct-2"}));
         assert!(!token_expired(&no_exp, 4_000_000_000));
         assert_eq!(jwt_account_id(&no_exp).as_deref(), Some("acct-2"));
+    }
+
+    // --- session spend fixtures -------------------------------------------
+
+    fn session_dir(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("pane-droid-spend-{tag}-{}", std::process::id()))
+    }
+
+    fn write_session(home: &Path, slug: &str, sid: &str, settings: &Value, jsonl: &[&str]) {
+        let dir = home.join("sessions").join(slug);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{sid}.settings.json")),
+            serde_json::to_string(settings).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(dir.join(format!("{sid}.jsonl")), jsonl.join("\n")).unwrap();
+    }
+
+    fn usage(i: f64, o: f64, t: f64, cw: f64, cr: f64) -> Value {
+        json!({"inputTokens": i, "outputTokens": o, "thinkingTokens": t,
+               "cacheCreationTokens": cw, "cacheReadTokens": cr})
+    }
+
+    #[test]
+    fn session_tokens_split_evenly_across_dated_messages() {
+        let home = session_dir("split");
+        let _ = std::fs::remove_dir_all(&home);
+        let settings = json!({
+            "model": "claude-opus-5-5",
+            "tokenUsage": usage(300.0, 60.0, 30.0, 90.0, 120.0),
+            // Child sessions' own files carry their share — never count it twice.
+            "inclusiveTokenUsage": usage(900_000.0, 900_000.0, 0.0, 0.0, 0.0),
+        });
+        write_session(
+            &home,
+            "proj",
+            "s1",
+            &settings,
+            &[
+                // Noise: a non-message line, a user turn, garbage, a missing ts.
+                "{\"type\":\"other\",\"timestamp\":\"2026-10-01T09:00:00Z\"}",
+                "{\"type\":\"message\",\"timestamp\":\"2026-10-01T09:30:00Z\",\"message\":{\"role\":\"user\",\"modelId\":\"x\"}}",
+                "not json at all \"assistant\"",
+                "{\"type\":\"message\",\"message\":{\"role\":\"assistant\"}}",
+                "{\"type\":\"message\",\"timestamp\":\"2026-10-01T10:00:00Z\",\"message\":{\"role\":\"assistant\",\"modelId\":\"gpt-6-sol\"}}",
+                "{\"type\":\"message\",\"timestamp\":\"2026-10-02T10:00:00Z\",\"message\":{\"role\":\"assistant\",\"modelId\":\"claude-opus-5-5\"}}",
+                "{\"type\":\"message\",\"timestamp\":\"2026-10-02T12:00:00Z\",\"message\":{\"role\":\"assistant\"}}",
+            ],
+        );
+        // Total = 300+60+30+90+120 = 600 → 200 per message.
+        let mut cache = SessionCache::new();
+        let events = collect_from(&home, SystemTime::UNIX_EPOCH, &mut cache);
+        assert_eq!(events.len(), 3);
+        let mut total = 0.0;
+        for e in &events {
+            assert_eq!(e.input, 100.0);
+            assert_eq!(e.output, 30.0); // output + thinking
+            assert_eq!(e.cache_write, 30.0);
+            assert_eq!(e.cache_read, 40.0);
+            total += e.input + e.output + e.cache_read + e.cache_write;
+        }
+        assert_eq!(total, 600.0);
+        assert_eq!(events[0].model, "gpt-6-sol");
+        assert_eq!(events[1].model, "claude-opus-5-5");
+        assert_eq!(events[2].model, "claude-opus-5-5"); // no modelId → settings model
+        let day = |ms: i64| {
+            chrono::DateTime::from_timestamp_millis(ms)
+                .unwrap()
+                .date_naive()
+        };
+        assert_eq!(day(events[0].ts_ms).to_string(), "2026-10-01");
+        assert_eq!(day(events[1].ts_ms).to_string(), "2026-10-02");
+        assert_eq!(day(events[2].ts_ms).to_string(), "2026-10-02");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn session_without_assistant_messages_uses_settings_mtime() {
+        let home = session_dir("nomsg");
+        let _ = std::fs::remove_dir_all(&home);
+        write_session(
+            &home,
+            "proj",
+            "s2",
+            &json!({"model": "gpt-6-astra", "tokenUsage": usage(50.0, 20.0, 0.0, 0.0, 0.0)}),
+            &["{\"type\":\"message\",\"timestamp\":\"2026-10-01T10:00:00Z\",\"message\":{\"role\":\"user\"}}"],
+        );
+        let mut cache = SessionCache::new();
+        let events = collect_from(&home, SystemTime::UNIX_EPOCH, &mut cache);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].model, "gpt-6-astra");
+        assert_eq!(events[0].input, 50.0);
+        // Timestamp is the settings file's mtime — always present.
+        let st_mtime = file_stamp(&home.join("sessions/proj/s2.settings.json"))
+            .0
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        assert_eq!(events[0].ts_ms, st_mtime);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn zero_token_and_stale_sessions_are_ignored() {
+        let home = session_dir("empty");
+        let _ = std::fs::remove_dir_all(&home);
+        write_session(
+            &home,
+            "proj",
+            "z1",
+            &json!({"model": "auto", "tokenUsage": usage(0.0, 0.0, 0.0, 0.0, 0.0)}),
+            &["{\"type\":\"message\",\"timestamp\":\"2026-10-01T10:00:00Z\",\"message\":{\"role\":\"assistant\"}}"],
+        );
+        let mut cache = SessionCache::new();
+        let events = collect_from(&home, SystemTime::UNIX_EPOCH, &mut cache);
+        assert!(events.is_empty());
+        // A cutoff past every file's mtime reads nothing.
+        let events = collect_from(&home, SystemTime::now(), &mut cache);
+        assert!(events.is_empty());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Decode the machine's real `~/.factory/sessions` with no cutoff and
+    /// bucket by UTC day — compare with `python %TEMP%\droid-spend-ref.py`.
+    /// Prints counts and model names only, never session content.
+    /// `cargo test --lib droid_real -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn droid_real_sessions_match_probe_totals() {
+        let events = collect_usage_events(SystemTime::UNIX_EPOCH);
+        let mut days: std::collections::BTreeMap<String, (f64, HashMap<String, f64>)> =
+            std::collections::BTreeMap::new();
+        for e in &events {
+            let day = chrono::DateTime::from_timestamp_millis(e.ts_ms)
+                .unwrap()
+                .date_naive()
+                .to_string();
+            let tokens = e.input + e.output + e.cache_read + e.cache_write;
+            let ent = days.entry(day).or_default();
+            ent.0 += tokens;
+            *ent.1.entry(e.model.clone()).or_default() += tokens;
+        }
+        eprintln!("events: {}", events.len());
+        for (d, (t, models)) in &days {
+            let mut ms: Vec<_> = models.iter().collect();
+            ms.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+            eprintln!("  {d} {}", t.round() as i64);
+            for (m, v) in ms {
+                eprintln!("      {m} {}", v.round() as i64);
+            }
+        }
     }
 }
