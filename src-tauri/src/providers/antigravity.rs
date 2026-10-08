@@ -901,13 +901,27 @@ fn read_db(path: &Path, entry: &mut AgyDbCache) -> Result<(), String> {
         "NULL".to_string()
     };
     // Only fixed literals are interpolated. The CASE arms keep oversized
-    // blobs out of memory — they arrive as NULL and are skipped.
+    // blobs out of memory — they arrive as NULL and are skipped. Pending
+    // rows sit at/below the cursor: name them explicitly rather than
+    // lowering the range, so already-counted rows between the oldest
+    // pending idx and the cursor don't consume the row LIMIT.
+    let pending_clause = if entry.pending.is_empty() {
+        String::new()
+    } else {
+        let ids = entry
+            .pending
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(" OR g.idx IN ({ids})")
+    };
     let sql = format!(
         "SELECT g.idx,
                 CASE WHEN length(g.data) <= {MAX_AGY_BLOB_BYTES} THEN g.data END,
                 {step_expr}
          FROM gen_metadata g
-         WHERE g.data IS NOT NULL AND g.idx > ?1
+         WHERE g.data IS NOT NULL AND (g.idx > ?1{pending_clause})
          ORDER BY g.idx
          LIMIT {}",
         super::MAX_LEDGER_ROWS
@@ -915,15 +929,8 @@ fn read_db(path: &Path, entry: &mut AgyDbCache) -> Result<(), String> {
     let mut stmt = conn
         .prepare(&sql)
         .map_err(|e| format!("query gen_metadata: {e}"))?;
-    // Pending rows sit at/below the cursor — reach back to the oldest
-    // one so a step timestamp that landed since gets a second pass.
-    let lower = entry
-        .pending
-        .first()
-        .map(|min| min - 1)
-        .unwrap_or(entry.last_idx);
     let rows = stmt
-        .query_map([lower], |row| {
+        .query_map([entry.last_idx], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, Option<Vec<u8>>>(1)?,
@@ -1329,7 +1336,7 @@ mod tests {
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO gen_metadata (idx, data) VALUES (1, ?1), (2, ?2), (3, ?3)",
+                "INSERT INTO gen_metadata (idx, data) VALUES (1, ?1), (2, ?2), (3, ?3), (4, ?4), (5, ?5)",
                 rusqlite::params![
                     // Dated generation.
                     data_blob(
@@ -1341,23 +1348,37 @@ mod tests {
                     // Real generation, no timing field — its steps row has
                     // NULL metadata, so it lands in pending.
                     data_blob(Some("gemini-3.6-flash"), None, &usage_msg(0, 20, 7, 0), None),
+                    // Already-counted dated row BETWEEN the pending idx
+                    // values — must not be re-read or double-counted.
+                    data_blob(
+                        Some("gemini-3.7-flash"),
+                        None,
+                        &usage_msg(0, 15, 6, 0),
+                        Some(1_700_000_100),
+                    ),
+                    // Second undated generation.
+                    data_blob(Some("gemini-3.5-flash"), None, &usage_msg(0, 40, 4, 0), None),
                     // Prompt-context bookkeeping: never pending, never counted.
                     data_blob(None, None, &usage_msg(500, 0, 0, 0), Some(1_700_000_000)),
                 ],
             )
             .unwrap();
-            conn.execute("INSERT INTO steps (idx, metadata) VALUES (2, NULL)", [])
-                .unwrap();
+            conn.execute(
+                "INSERT INTO steps (idx, metadata) VALUES (2, NULL), (4, NULL)",
+                [],
+            )
+            .unwrap();
         }
         let mut entry = AgyDbCache::default();
         read_db(&db, &mut entry).unwrap();
-        assert_eq!(entry.events.len(), 1);
-        assert_eq!(entry.last_idx, 3);
-        assert!(entry.pending.contains(&2));
-        assert!(!entry.pending.contains(&3));
+        assert_eq!(entry.events.len(), 2);
+        assert_eq!(entry.last_idx, 5);
+        assert!(entry.pending.contains(&2) && entry.pending.contains(&4));
+        assert!(!entry.pending.contains(&3) && !entry.pending.contains(&5));
 
-        // The step's metadata lands and a new generation arrives; the
-        // pending idx is retried and the scan still covers the new row.
+        // The steps' metadata lands and a new generation arrives; pending
+        // idx values are retried while the counted rows in between are not
+        // re-read, and the scan still covers the new row.
         {
             let conn = rusqlite::Connection::open(&db).unwrap();
             conn.execute(
@@ -1366,7 +1387,12 @@ mod tests {
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO gen_metadata (idx, data) VALUES (4, ?1)",
+                "UPDATE steps SET metadata = ?1 WHERE idx = 4",
+                rusqlite::params![step_meta(1_700_000_600)],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO gen_metadata (idx, data) VALUES (6, ?1)",
                 rusqlite::params![data_blob(
                     Some("gemini-3.9-flash"),
                     None,
@@ -1378,8 +1404,8 @@ mod tests {
         }
         read_db(&db, &mut entry).unwrap();
         assert!(entry.pending.is_empty());
-        assert_eq!(entry.last_idx, 4);
-        assert_eq!(entry.events.len(), 3);
+        assert_eq!(entry.last_idx, 6);
+        assert_eq!(entry.events.len(), 5);
         let mut ids: Vec<_> = entry
             .events
             .iter()
@@ -1388,14 +1414,37 @@ mod tests {
         ids.sort_unstable();
         assert_eq!(
             ids,
-            ["gemini-3.6-flash", "gemini-3.8-flash", "gemini-3.9-flash"]
+            [
+                "gemini-3.5-flash",
+                "gemini-3.6-flash",
+                "gemini-3.7-flash",
+                "gemini-3.8-flash",
+                "gemini-3.9-flash"
+            ]
         );
-        // The retried row carries its step timestamp, exactly once.
+        // Each retried row carries its step timestamp, exactly once, and
+        // the in-between counted row still appears exactly once.
         assert_eq!(
             entry
                 .events
                 .iter()
                 .filter(|e| e.ts_ms == 1_700_000_500_000)
+                .count(),
+            1
+        );
+        assert_eq!(
+            entry
+                .events
+                .iter()
+                .filter(|e| e.ts_ms == 1_700_000_600_000)
+                .count(),
+            1
+        );
+        assert_eq!(
+            entry
+                .events
+                .iter()
+                .filter(|e| e.model_id.as_deref() == Some("gemini-3.7-flash"))
                 .count(),
             1
         );
