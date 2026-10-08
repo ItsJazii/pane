@@ -5859,9 +5859,9 @@ mod tests {
     }
 
     /// Decode the machine's real `~/.gemini/antigravity*` stores with no
-    /// cutoff and bucket tokens by local day — the numbers must match the
-    /// validated probe table (lead verified against the same blobs).
-    /// Prints counts and model names only; never conversation content.
+    /// cutoff and bucket tokens by local day — a print-only probe; the
+    /// store's contents drift as the agent is used. Prints counts and
+    /// model names only; never conversation content.
     /// `cargo test --lib agy_real -- --ignored --nocapture`
     #[test]
     #[ignore]
@@ -5871,6 +5871,8 @@ mod tests {
         let mut models: HashMap<String, u64> = HashMap::new();
         let mut unpriced: HashMap<String, u64> = HashMap::new();
         for ev in &events {
+            // Every surviving event must carry a real timestamp.
+            assert!(ev.ts_ms > 0);
             let tokens = ev.input + ev.output + ev.cache_read;
             let ts = DateTime::from_timestamp_millis(ev.ts_ms).unwrap();
             *days.entry(day_of_utc(ts)).or_default() += tokens;
@@ -5902,17 +5904,6 @@ mod tests {
         for (m, t) in &unpriced {
             eprintln!("  {m}: {t}");
         }
-        // Lead's validated probe numbers for this machine (2026-10-08).
-        assert_eq!(events.len(), 472);
-        let day = |y, m, d| {
-            chrono::NaiveDate::from_ymd_opt(y, m, d)
-                .unwrap()
-                .num_days_from_ce()
-        };
-        assert_eq!(days.get(&day(2026, 5, 20)), Some(&5_658_305));
-        assert_eq!(days.get(&day(2026, 7, 21)), Some(&11_747_098));
-        assert_eq!(days.get(&day(2026, 8, 13)), Some(&12_049_570));
-        assert_eq!(days.get(&day(2026, 9, 2)), Some(&11_487_247));
     }
 
     #[test]

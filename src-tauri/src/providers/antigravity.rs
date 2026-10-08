@@ -567,7 +567,7 @@ fn extract_plan(doc: &Value) -> Option<String> {
 
 use super::minimax::{file_stamp, FileStamp};
 use rusqlite::OptionalExtension;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -759,38 +759,62 @@ fn trimmed_string(b: &[u8], n: u32) -> Option<String> {
     }
 }
 
+/// What one `gen_metadata` row decodes to.
+enum Decoded {
+    /// A generation with a usable timestamp.
+    Dated(AgyEvent),
+    /// A real generation with no timestamp yet — worth retrying once its
+    /// `steps.metadata` lands.
+    Undated,
+    /// Bookkeeping or noise — never produces an event.
+    Skip,
+}
+
 /// `gen_metadata.data` wraps its event in field 1: model id 19, display
 /// label 21, usage 4 (1=system-prompt, 2=input, 3=output, 5=cache-read),
 /// timing 9 (whose field 4 is a Timestamp). Rows with neither name that
 /// carry only a system-prompt count are prompt-context bookkeeping, not
 /// generations. `steps.metadata` field 1 is the timestamp fallback —
-/// file mtimes move on every write, so undated rows are dropped instead.
-fn decode_event(data: &[u8], step: Option<&[u8]>) -> Option<AgyEvent> {
-    let w = bytes_field(data, 1)?;
+/// file mtimes move on every write, so undated rows are kept pending
+/// for a later scan instead of being dated by a file time.
+fn decode_event(data: &[u8], step: Option<&[u8]>) -> Decoded {
+    let Some(w) = bytes_field(data, 1) else {
+        return Decoded::Skip;
+    };
     let model_id = trimmed_string(w, 19);
     let label = trimmed_string(w, 21);
-    let usage = bytes_field(w, 4)?;
+    let Some(usage) = bytes_field(w, 4) else {
+        return Decoded::Skip;
+    };
     let sys = varint_field(usage, 1).unwrap_or(0);
     let input = varint_field(usage, 2).unwrap_or(0);
     let output = varint_field(usage, 3).unwrap_or(0);
     let cache_read = varint_field(usage, 5).unwrap_or(0);
-    let billed = sys.checked_add(input)?;
+    let Some(billed) = sys.checked_add(input) else {
+        return Decoded::Skip;
+    };
     let generated = input != 0 || output != 0 || cache_read != 0;
     if !(model_id.is_some() || label.is_some() || generated) {
-        return None;
+        return Decoded::Skip;
     }
     if !(generated || billed != 0) {
-        return None;
+        return Decoded::Skip;
     }
-    let ts = bytes_field(w, 9)
+    let Some(ts) = bytes_field(w, 9)
         .and_then(|t| bytes_field(t, 4))
         .and_then(timestamp_seconds)
         .or_else(|| {
             step.and_then(|s| bytes_field(s, 1))
                 .and_then(timestamp_seconds)
-        })?;
-    Some(AgyEvent {
-        ts_ms: ts.checked_mul(1000)?,
+        })
+    else {
+        return Decoded::Undated;
+    };
+    let Some(ts_ms) = ts.checked_mul(1000) else {
+        return Decoded::Skip;
+    };
+    Decoded::Dated(AgyEvent {
+        ts_ms,
         model_id,
         label,
         input: billed,
@@ -804,11 +828,19 @@ fn decode_event(data: &[u8], step: Option<&[u8]>) -> Option<AgyEvent> {
 /// One store's decoded events plus the read cursor. Rows are append-only
 /// by `idx`, so a changed store resumes where it left off instead of
 /// re-decoding every blob.
+/// Undated generations held for retry. Past the cap the oldest idx is
+/// dropped so a store full of never-dated rows cannot force every scan
+/// to re-read the whole table.
+const MAX_PENDING_IDXS: usize = 512;
+
 struct AgyDbCache {
     db: FileStamp,
     wal: FileStamp,
     identity: Option<SystemTime>,
     last_idx: i64,
+    /// Generation idx values that decoded real but undated — retried on
+    /// the next store change, when a steps row may have gained metadata.
+    pending: BTreeSet<i64>,
     events: Vec<AgyEvent>,
     /// Whether `steps.metadata` exists; None until first probed, and
     /// re-probed while false so a store that gains it later is re-read.
@@ -822,6 +854,7 @@ impl Default for AgyDbCache {
             wal: (SystemTime::UNIX_EPOCH, 0),
             identity: None,
             last_idx: -1,
+            pending: BTreeSet::new(),
             events: Vec::new(),
             has_step_meta: None,
         }
@@ -856,6 +889,7 @@ fn read_db(path: &Path, entry: &mut AgyDbCache) -> Result<(), String> {
             // datable — restart the cursor so they are re-read.
             entry.last_idx = -1;
             entry.events.clear();
+            entry.pending.clear();
         }
         entry.has_step_meta = Some(has);
     }
@@ -881,8 +915,15 @@ fn read_db(path: &Path, entry: &mut AgyDbCache) -> Result<(), String> {
     let mut stmt = conn
         .prepare(&sql)
         .map_err(|e| format!("query gen_metadata: {e}"))?;
+    // Pending rows sit at/below the cursor — reach back to the oldest
+    // one so a step timestamp that landed since gets a second pass.
+    let lower = entry
+        .pending
+        .first()
+        .map(|min| min - 1)
+        .unwrap_or(entry.last_idx);
     let rows = stmt
-        .query_map([entry.last_idx], |row| {
+        .query_map([lower], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, Option<Vec<u8>>>(1)?,
@@ -891,11 +932,28 @@ fn read_db(path: &Path, entry: &mut AgyDbCache) -> Result<(), String> {
         })
         .map_err(|e| format!("read gen_metadata: {e}"))?;
     for row in rows.flatten() {
-        entry.last_idx = row.0;
-        if let Some(blob) = row.1 {
-            if let Some(ev) = decode_event(&blob, row.2.as_deref()) {
+        let (idx, blob, step) = row;
+        // Rows at/below the cursor are already counted — only pending
+        // ones are decoded again.
+        if idx <= entry.last_idx && !entry.pending.contains(&idx) {
+            continue;
+        }
+        entry.last_idx = entry.last_idx.max(idx);
+        let Some(blob) = blob else {
+            continue;
+        };
+        match decode_event(&blob, step.as_deref()) {
+            Decoded::Dated(ev) => {
                 entry.events.push(ev);
+                entry.pending.remove(&idx);
             }
+            Decoded::Undated => {
+                entry.pending.insert(idx);
+                while entry.pending.len() > MAX_PENDING_IDXS {
+                    entry.pending.pop_first();
+                }
+            }
+            Decoded::Skip => {}
         }
     }
     Ok(())
@@ -936,6 +994,7 @@ pub fn collect_usage_events(cutoff: SystemTime) -> Vec<AgyEvent> {
             if (entry.identity.is_some() && entry.identity != identity) || entry.db.1 > db.1 {
                 entry.last_idx = -1;
                 entry.events.clear();
+                entry.pending.clear();
             }
             entry.identity = identity;
             if read_db(&path, entry).is_ok() {
@@ -1039,6 +1098,14 @@ mod tests {
         m
     }
 
+    /// Test view of the tri-state decoder: just the dated event.
+    fn decoded(data: &[u8], step: Option<&[u8]>) -> Option<AgyEvent> {
+        match decode_event(data, step) {
+            Decoded::Dated(e) => Some(e),
+            _ => None,
+        }
+    }
+
     #[test]
     fn full_event_decodes_with_embedded_timestamp() {
         let blob = data_blob(
@@ -1047,7 +1114,7 @@ mod tests {
             &usage_msg(100, 200, 50, 30),
             Some(1_700_000_000),
         );
-        let ev = decode_event(&blob, None).unwrap();
+        let ev = decoded(&blob, None).unwrap();
         assert_eq!(ev.model_id.as_deref(), Some("gemini-3.7-flash"));
         assert_eq!(ev.label.as_deref(), Some("Gemini 3.7 Flash (High)"));
         assert_eq!(ev.input, 300); // system-prompt + input billed together
@@ -1064,36 +1131,40 @@ mod tests {
             &usage_msg(0, 10, 5, 0),
             None,
         );
-        assert!(decode_event(&blob, None).is_none());
-        let ev = decode_event(&blob, Some(&step_meta(1_700_000_100))).unwrap();
+        assert!(matches!(decode_event(&blob, None), Decoded::Undated));
+        let ev = decoded(&blob, Some(&step_meta(1_700_000_100))).unwrap();
         assert_eq!(ev.ts_ms, 1_700_000_100_000);
         assert_eq!(ev.model_id.as_deref(), Some("gemini-3.8-flash"));
     }
 
     #[test]
-    fn no_timestamp_anywhere_drops_the_row() {
+    fn no_timestamp_anywhere_marks_the_row_pending() {
         let blob = data_blob(
             Some("gemini-3.8-flash"),
             None,
             &usage_msg(0, 10, 5, 0),
             None,
         );
-        assert!(decode_event(&blob, None).is_none());
-        let mut empty = Vec::new();
-        pvar_field(9, 0, &mut empty); // wrong wire type for 9 → unusable
+        assert!(matches!(decode_event(&blob, None), Decoded::Undated));
+        // A generation whose timing field has the wrong wire type is
+        // still real — unusable timestamp, pending not skipped.
+        let mut w = Vec::new();
+        pstr(19, "gemini-3.8-flash", &mut w);
+        pbytes(4, &usage_msg(0, 10, 5, 0), &mut w);
+        pvar_field(9, 0, &mut w);
         let mut blob2 = Vec::new();
-        pbytes(1, &empty, &mut blob2);
-        assert!(decode_event(&blob2, None).is_none());
+        pbytes(1, &w, &mut blob2);
+        assert!(matches!(decode_event(&blob2, None), Decoded::Undated));
     }
 
     #[test]
     fn prompt_context_only_rows_drop() {
         // No id, no label, only a system-prompt count = bookkeeping.
         let blob = data_blob(None, None, &usage_msg(500, 0, 0, 0), Some(1_700_000_000));
-        assert!(decode_event(&blob, None).is_none());
+        assert!(matches!(decode_event(&blob, None), Decoded::Skip));
         // No id/label and nothing at all → dropped too.
         let blob = data_blob(None, None, &usage_msg(0, 0, 0, 0), Some(1_700_000_000));
-        assert!(decode_event(&blob, None).is_none());
+        assert!(matches!(decode_event(&blob, None), Decoded::Skip));
         // A labelled row with only prompt tokens is a real (if empty)
         // generation and survives with its billed input.
         let blob = data_blob(
@@ -1102,27 +1173,27 @@ mod tests {
             &usage_msg(500, 0, 0, 0),
             Some(1_700_000_000),
         );
-        let ev = decode_event(&blob, None).unwrap();
+        let ev = decoded(&blob, None).unwrap();
         assert_eq!(ev.input, 500);
         assert_eq!(ev.output, 0);
     }
 
     #[test]
     fn malformed_blobs_fail_cleanly() {
-        assert!(decode_event(&[], None).is_none());
-        assert!(decode_event(&[0xff; 32], None).is_none());
+        assert!(matches!(decode_event(&[], None), Decoded::Skip));
+        assert!(matches!(decode_event(&[0xff; 32], None), Decoded::Skip));
         // Truncated length-delimited payload.
         let mut bad = Vec::new();
         ptag(1, 2, &mut bad);
         pvarint(500, &mut bad);
         bad.extend_from_slice(&[1, 2, 3]);
-        assert!(decode_event(&bad, None).is_none());
+        assert!(matches!(decode_event(&bad, None), Decoded::Skip));
         // Wrapper present but no usage message.
         let mut w = Vec::new();
         pstr(19, "gemini-3.8-flash", &mut w);
         let mut blob = Vec::new();
         pbytes(1, &w, &mut blob);
-        assert!(decode_event(&blob, None).is_none());
+        assert!(matches!(decode_event(&blob, None), Decoded::Skip));
     }
 
     #[test]
@@ -1238,6 +1309,93 @@ mod tests {
         let mut entry2 = AgyDbCache::default();
         read_db(&empty_db, &mut entry2).unwrap();
         assert!(entry2.events.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undated_generation_retries_until_its_step_lands() {
+        let dir = std::env::temp_dir().join(format!("pane-agy-pending-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("conv.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB);
+                 CREATE TABLE steps (idx INTEGER PRIMARY KEY, metadata BLOB);",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO gen_metadata (idx, data) VALUES (1, ?1), (2, ?2), (3, ?3)",
+                rusqlite::params![
+                    // Dated generation.
+                    data_blob(
+                        Some("gemini-3.8-flash"),
+                        None,
+                        &usage_msg(0, 10, 5, 0),
+                        Some(1_700_000_000),
+                    ),
+                    // Real generation, no timing field — its steps row has
+                    // NULL metadata, so it lands in pending.
+                    data_blob(Some("gemini-3.6-flash"), None, &usage_msg(0, 20, 7, 0), None),
+                    // Prompt-context bookkeeping: never pending, never counted.
+                    data_blob(None, None, &usage_msg(500, 0, 0, 0), Some(1_700_000_000)),
+                ],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO steps (idx, metadata) VALUES (2, NULL)", [])
+                .unwrap();
+        }
+        let mut entry = AgyDbCache::default();
+        read_db(&db, &mut entry).unwrap();
+        assert_eq!(entry.events.len(), 1);
+        assert_eq!(entry.last_idx, 3);
+        assert!(entry.pending.contains(&2));
+        assert!(!entry.pending.contains(&3));
+
+        // The step's metadata lands and a new generation arrives; the
+        // pending idx is retried and the scan still covers the new row.
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute(
+                "UPDATE steps SET metadata = ?1 WHERE idx = 2",
+                rusqlite::params![step_meta(1_700_000_500)],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO gen_metadata (idx, data) VALUES (4, ?1)",
+                rusqlite::params![data_blob(
+                    Some("gemini-3.9-flash"),
+                    None,
+                    &usage_msg(0, 30, 9, 0),
+                    Some(1_700_001_000),
+                )],
+            )
+            .unwrap();
+        }
+        read_db(&db, &mut entry).unwrap();
+        assert!(entry.pending.is_empty());
+        assert_eq!(entry.last_idx, 4);
+        assert_eq!(entry.events.len(), 3);
+        let mut ids: Vec<_> = entry
+            .events
+            .iter()
+            .map(|e| e.model_id.as_deref().unwrap())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            ["gemini-3.6-flash", "gemini-3.8-flash", "gemini-3.9-flash"]
+        );
+        // The retried row carries its step timestamp, exactly once.
+        assert_eq!(
+            entry
+                .events
+                .iter()
+                .filter(|e| e.ts_ms == 1_700_000_500_000)
+                .count(),
+            1
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
