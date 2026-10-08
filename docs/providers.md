@@ -192,6 +192,23 @@ Ground rules that apply to every provider:
   Devin CLI sessions (cloud Devin sessions bill ACUs and keep no local
   logs, so they can't be priced).
 
+## Droid (Factory)
+
+- **Reads:** `%USERPROFILE%\.factory\auth.v2.keyring` (or
+  `auth.v2.file` + `auth.v2.key` when the keyring is off) — strictly
+  read-only, never written and never refreshed; CLI login only, no
+  API-key option. The file is one line of `iv:tag:ciphertext`
+  AES-256-GCM; the key lives in the Windows Credential Manager entry
+  `Factory CLI/auth-encryption-key`. Decrypted in memory only; the
+  refresh token is never used. The access token lasts ~24 h — Droid
+  renews it when you run `droid`; until then the card goes stale.
+- **Calls:** `api.factory.ai` `/api/billing/limits` (and
+  `/api/app/auth/me` for the plan name; the legacy
+  `/api/organization/subscription/usage` when the account isn't on
+  token rate limits).
+- **Shows:** Session/Weekly/Monthly windows (Core pool rows only when
+  they carry usage), extra-usage balance, plan tier.
+
 ## MiniMax
 
 - **Reads:** the MiniMax Code (mcode) CLI's OAuth sign-in at

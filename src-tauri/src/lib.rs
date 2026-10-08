@@ -638,7 +638,7 @@ struct StripEntry {
 /// strip ids are validated against this before becoming tray icon ids,
 /// including `family@account` cards. Stale family-level strip icons are
 /// removed for exactly this set.
-const STRIP_PROVIDER_IDS: [&str; 24] = [
+const STRIP_PROVIDER_IDS: [&str; 25] = [
     "claude",
     "codex",
     "cursor",
@@ -646,6 +646,7 @@ const STRIP_PROVIDER_IDS: [&str; 24] = [
     "copilot",
     "grok",
     "devin",
+    "droid",
     "minimax",
     "openrouter",
     "zai",
@@ -1749,6 +1750,14 @@ async fn fetch_usage(
             )),
         ),
         (
+            "droid",
+            Box::pin(guarded(
+                "droid".into(),
+                "Droid".into(),
+                providers::droid::snapshot(),
+            )),
+        ),
+        (
             "minimax",
             Box::pin(guarded(
                 "minimax".into(),
@@ -2097,6 +2106,7 @@ async fn fetch_usage(
             let current = json!({
                 "claude": providers::claude::default_identity(),
                 "codex": providers::codex::default_identity(),
+                "droid": providers::droid::default_identity(),
                 "opencode": providers::opencode::default_identity(),
                 "stepfun": providers::stepfun::default_identity(),
             });
@@ -2107,7 +2117,7 @@ async fn fetch_usage(
             let mut map = cache.lock().unwrap();
             let mut removed = false;
             let mut to_store = serde_json::Map::new();
-            for fam in ["claude", "codex", "opencode", "stepfun"] {
+            for fam in ["claude", "codex", "droid", "opencode", "stepfun"] {
                 let cur = current.get(fam).cloned().unwrap_or(Value::Null);
                 let old = stored.get(fam).cloned().unwrap_or(Value::Null);
                 // Only a KNOWN stored identity differing from a KNOWN
@@ -2499,6 +2509,7 @@ fn cached_usage() -> Vec<providers::Snapshot> {
     let swapped: Vec<&str> = [
         ("claude", providers::claude::default_identity()),
         ("codex", providers::codex::default_identity()),
+        ("droid", providers::droid::default_identity()),
         ("opencode", providers::opencode::default_identity()),
         ("stepfun", providers::stepfun::default_identity()),
     ]
