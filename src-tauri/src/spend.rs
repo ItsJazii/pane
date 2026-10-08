@@ -3425,6 +3425,134 @@ fn droid() -> ProviderSpend {
     build_spend("droid", "Droid", data)
 }
 
+/// Antigravity keeps per-generation token counts in protobuf blobs inside
+/// the `~/.gemini/antigravity*/conversations/*.db` stores (decoded and
+/// cached read-only by providers::antigravity). Naming: the internal id
+/// (`gemini-3.7-flash-high`, or a `*-default` picker placeholder) versus
+/// the product label ("Gemini 3.7 Flash (High)") — placeholders prefer
+/// the label since it names the model that actually served the turn.
+fn antigravity() -> ProviderSpend {
+    let mut data = FileData::default();
+    for ev in providers::antigravity::collect_usage_events(scan_cutoff(Local::now())) {
+        let Some(ts) = DateTime::from_timestamp_millis(ev.ts_ms) else {
+            continue;
+        };
+        let tokens = (ev.input + ev.output + ev.cache_read) as f64;
+        if tokens <= 0.0 {
+            continue;
+        }
+        let candidates = agy_candidates(ev.model_id.as_deref(), ev.label.as_deref());
+        let mut hit = None;
+        for cand in &candidates {
+            if let Some(h) = agy_priced(cand) {
+                hit = Some(h);
+                break;
+            }
+        }
+        match hit {
+            Some((price, display)) => {
+                let u = pricing::Usage {
+                    input: ev.input as f64,
+                    output: ev.output as f64,
+                    cache_read: ev.cache_read as f64,
+                    cache_write_5m: 0.0,
+                    cache_write_1h: 0.0,
+                };
+                add_event(
+                    &mut data,
+                    ts,
+                    &display,
+                    cost_for(&display, &price, &u, 200_000.0, ts),
+                    tokens,
+                );
+            }
+            None => {
+                let model = candidates
+                    .first()
+                    .map(|c| agy_base(c).to_string())
+                    .unwrap_or_else(|| "Unknown Antigravity Model".into());
+                note_unpriced(&mut data, ts, &model, tokens);
+            }
+        }
+    }
+    build_spend("antigravity", "Antigravity", data)
+}
+
+/// "Gemini 3.6 Flash (High)" → "gemini-3.6-flash": lowercase, drop any
+/// parenthetical, whitespace becomes dashes.
+fn agy_label_slug(label: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut depth = 0usize;
+    for c in label.to_lowercase().chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    let slug = out.split_whitespace().collect::<Vec<_>>().join("-");
+    if slug.is_empty() {
+        None
+    } else {
+        Some(slug)
+    }
+}
+
+/// Candidate catalog spellings, best first. `-tiered` ids are the same
+/// model at the same rate (a server-chosen subagent tier), so the suffix
+/// drops. A `*-default` id is the picker's placeholder, not a model —
+/// the label names what served, so it leads.
+fn agy_candidates(model_id: Option<&str>, label: Option<&str>) -> Vec<String> {
+    let id = model_id.map(|i| i.strip_suffix("-tiered").unwrap_or(i).to_string());
+    let label = label.and_then(agy_label_slug);
+    let placeholder = id.as_deref().is_some_and(|i| i.ends_with("-default"));
+    let ordered: [Option<String>; 2] = if placeholder {
+        [label, id]
+    } else {
+        [id, label]
+    };
+    let mut out: Vec<String> = Vec::new();
+    for c in ordered.into_iter().flatten() {
+        if !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The base slug with one trailing effort tier removed — the display key
+/// too, so `gemini-3.7-flash-high` and "Gemini 3.7 Flash (High)" group
+/// under `gemini-3.7-flash`.
+fn agy_base(slug: &str) -> &str {
+    for suffix in ["-minimal", "-low", "-medium", "-high"] {
+        if let Some(base) = slug.strip_suffix(suffix) {
+            return base;
+        }
+    }
+    slug
+}
+
+/// Price one spelling; on a miss retry the effort-less base. The
+/// picker-default `gemini-pro-*` ids name no model — the catalog aliases
+/// them to the 3.1 Pro card, so probe and display that name.
+fn agy_priced(candidate: &str) -> Option<(pricing::Price, String)> {
+    let probe = match candidate {
+        "gemini-pro-default" | "gemini-pro-agent" => "gemini-3.1-pro",
+        _ => candidate,
+    };
+    if let Some(p) = pricing::lookup(probe) {
+        return Some((p, agy_base(probe).to_string()));
+    }
+    let base = agy_base(candidate);
+    if base != candidate {
+        if let Some(p) = pricing::lookup(base) {
+            return Some((p, base.to_string()));
+        }
+    }
+    None
+}
+
 /// Windsurf-style slugs append a reasoning effort ("claude-opus-4-8-medium")
 /// that no catalog knows; price and display the base model. Some slugs also
 /// spell the model differently than the catalogs: version dots become
@@ -3818,6 +3946,7 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
         let grok_t = s.spawn(|| spend_step("grok", grok));
         let devin_t = s.spawn(|| spend_step("devin", devin));
         let droid_t = s.spawn(|| spend_step("droid", droid));
+        let agy_t = s.spawn(|| spend_step("antigravity", antigravity));
         let qwen_t = s.spawn(|| spend_step("qwen", qwen));
 
         let (claude_sp, extra_claude_spends, mut minimax_extra, qwen_via_claude, mut kimi_routed, mut stepfun_data) =
@@ -3874,6 +4003,11 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
                 droid_t,
                 "droid",
                 build_spend("droid", "Droid", FileData::default()),
+            ),
+            take_join(
+                agy_t,
+                "antigravity",
+                build_spend("antigravity", "Antigravity", FileData::default()),
             ),
             minimax(minimax_extra),
             stepfun(stepfun_data),
@@ -5675,6 +5809,101 @@ mod tests {
             fast.input > base.input && fast.output > base.output,
             "fast tier must bill a premium over {base:?}, got {fast:?}"
         );
+    }
+
+    #[test]
+    fn agy_label_slug_normalizes_display_names() {
+        assert_eq!(
+            agy_label_slug("Gemini 3.6 Flash (High)").as_deref(),
+            Some("gemini-3.6-flash")
+        );
+        assert_eq!(
+            agy_label_slug("Gemini 3.7 Flash").as_deref(),
+            Some("gemini-3.7-flash")
+        );
+        assert_eq!(agy_label_slug("  "), None);
+    }
+
+    #[test]
+    fn agy_candidates_strip_tiered_and_prefer_label_for_defaults() {
+        // `-tiered` ids resolve through a server-chosen subagent config —
+        // same model, same rate, shown under the base name.
+        assert_eq!(
+            agy_candidates(Some("gemini-3.7-flash-tiered"), None),
+            vec!["gemini-3.7-flash"]
+        );
+        // A `*-default` placeholder isn't a model; the serving label leads.
+        assert_eq!(
+            agy_candidates(Some("gemini-default"), Some("Gemini 3.6 Flash (High)")),
+            vec!["gemini-3.6-flash", "gemini-default"]
+        );
+        // Real ids lead, label is the fallback spelling.
+        assert_eq!(
+            agy_candidates(Some("gemini-3.7-flash"), Some("Gemini 3.7 Flash (High)")),
+            vec!["gemini-3.7-flash"]
+        );
+    }
+
+    #[test]
+    fn agy_pricing_retries_the_base_slug_and_groups_display() {
+        // Effort-suffixed ids price at the base card and display under it.
+        let (_p, display) = agy_priced("gemini-3.8-flash-high").expect("effort base prices");
+        assert_eq!(display, "gemini-3.8-flash");
+        // The picker default with no usable label is the Pro card.
+        let (_p, display) = agy_priced("gemini-pro-default").expect("pro default prices");
+        assert_eq!(display, "gemini-3.1-pro");
+        // Variant letters resolve through catalog aliases to the family.
+        assert!(agy_priced("gemini-3-flash-b").is_some());
+        // An unknown slug stays unpriced — never a guessed rate.
+        assert!(agy_priced("gemini-9-hyperflash").is_none());
+    }
+
+    /// Decode the machine's real `~/.gemini/antigravity*` stores with no
+    /// cutoff and bucket tokens by local day — a print-only probe; the
+    /// store's contents drift as the agent is used. Prints counts and
+    /// model names only; never conversation content.
+    /// `cargo test --lib agy_real -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn agy_real_stores_match_probe_totals() {
+        let events = providers::antigravity::collect_usage_events(std::time::UNIX_EPOCH);
+        let mut days: std::collections::BTreeMap<i32, u64> = std::collections::BTreeMap::new();
+        let mut models: HashMap<String, u64> = HashMap::new();
+        let mut unpriced: HashMap<String, u64> = HashMap::new();
+        for ev in &events {
+            // Every surviving event must carry a real timestamp.
+            assert!(ev.ts_ms > 0);
+            let tokens = ev.input + ev.output + ev.cache_read;
+            let ts = DateTime::from_timestamp_millis(ev.ts_ms).unwrap();
+            *days.entry(day_of_utc(ts)).or_default() += tokens;
+            let cands = agy_candidates(ev.model_id.as_deref(), ev.label.as_deref());
+            match cands.iter().find_map(|c| agy_priced(c)) {
+                Some((_, display)) => *models.entry(display).or_default() += tokens,
+                None => {
+                    *unpriced
+                        .entry(
+                            cands
+                                .first()
+                                .map(|c| agy_base(c).to_string())
+                                .unwrap_or_else(|| "Unknown Antigravity Model".into()),
+                        )
+                        .or_default() += tokens
+                }
+            }
+        }
+        eprintln!("events: {}", events.len());
+        let chrono_fmt = |d: i32| chrono::NaiveDate::from_num_days_from_ce_opt(d).unwrap();
+        for (d, t) in &days {
+            eprintln!("  {} {t}", chrono_fmt(*d));
+        }
+        eprintln!("priced models:");
+        for (m, t) in &models {
+            eprintln!("  {m}: {t}");
+        }
+        eprintln!("unpriced models:");
+        for (m, t) in &unpriced {
+            eprintln!("  {m}: {t}");
+        }
     }
 
     #[test]
