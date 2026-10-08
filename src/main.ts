@@ -29,6 +29,7 @@ import codexIcon from "./assets/providers/codex.svg?raw";
 import copilotIcon from "./assets/providers/copilot.svg?raw";
 import cursorIcon from "./assets/providers/cursor.svg?raw";
 import devinIcon from "./assets/providers/devin.svg?raw";
+import droidIcon from "./assets/providers/droid.svg?raw";
 import grokIcon from "./assets/providers/grok.svg?raw";
 import hermesIcon from "./assets/providers/hermes.svg?raw";
 import kimiIcon from "./assets/providers/kimi.svg?raw";
@@ -56,6 +57,7 @@ const PROVIDER_ICONS: Record<string, string> = {
   copilot: copilotIcon,
   cursor: cursorIcon,
   devin: devinIcon,
+  droid: droidIcon,
   grok: grokIcon,
   hermes: hermesIcon,
   kimi: kimiIcon,
@@ -136,6 +138,7 @@ const RELOGIN_KEYS: Record<string, string> = {
   copilot: "stale.relogin.copilot",
   cursor: "stale.relogin.cursor",
   devin: "stale.relogin.devin",
+  droid: "stale.relogin.droid",
   opencode: "stale.relogin.opencode",
   antigravity: "stale.relogin.antigravity",
   ollama: "stale.relogin.ollama",
@@ -309,6 +312,7 @@ const ALL_PROVIDERS: [string, string][] = [
   ["copilot", "Copilot"],
   ["grok", "Grok"],
   ["devin", "Devin"],
+  ["droid", "Droid"],
   ["minimax", "MiniMax"],
   ["openrouter", "OpenRouter"],
   ["zai", "Z.ai"],
@@ -358,6 +362,10 @@ const PROVIDER_LINKS: Record<string, { label: string; url: string }[]> = {
     { label: "Usage", url: "https://grok.com/?_s=usage" },
   ],
   devin: [{ label: "Dashboard", url: "https://app.devin.ai/settings/plans" }],
+  droid: [
+    { label: "Status", url: "https://status.factory.ai" },
+    { label: "Usage", url: "https://app.factory.ai/settings/billing" },
+  ],
   minimax: [{ label: "Platform", url: "https://platform.minimax.io/" }],
   openrouter: [
     { label: "Activity", url: "https://openrouter.ai/activity" },
@@ -409,6 +417,7 @@ const SPEND_COLORS: Record<string, string> = {
   grok: "#10a37f",
   opencode: "#b7b1b1",
   devin: "#38bdf8",
+  droid: "#ef6f2e",
   cursor: "var(--spend-cursor)", // brand black, theme-flipped in CSS
   moonshot: "#e0b354", // moon gold
   kimi: "#ff8a4c", // Kimi Code peach

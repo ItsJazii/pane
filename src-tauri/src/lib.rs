@@ -638,7 +638,7 @@ struct StripEntry {
 /// strip ids are validated against this before becoming tray icon ids,
 /// including `family@account` cards. Stale family-level strip icons are
 /// removed for exactly this set.
-const STRIP_PROVIDER_IDS: [&str; 24] = [
+const STRIP_PROVIDER_IDS: [&str; 25] = [
     "claude",
     "codex",
     "cursor",
@@ -646,6 +646,7 @@ const STRIP_PROVIDER_IDS: [&str; 24] = [
     "copilot",
     "grok",
     "devin",
+    "droid",
     "minimax",
     "openrouter",
     "zai",
@@ -1672,6 +1673,9 @@ async fn fetch_usage(
     // auth.json while the request is in flight cannot cache the old key's
     // numbers under the new identity.
     let opencode_identity_at_start = providers::opencode::default_identity();
+    // Same guard for Droid's CLI login: a keyring re-login while the
+    // request is in flight must not cache the old account's numbers.
+    let droid_identity_at_start = providers::droid::default_identity();
 
     // Same guard for the capacity families: a default Claude/Codex
     // sign-in swap while the requests are in flight must not write
@@ -1746,6 +1750,14 @@ async fn fetch_usage(
                 "devin".into(),
                 "Devin".into(),
                 providers::devin::snapshot(),
+            )),
+        ),
+        (
+            "droid",
+            Box::pin(guarded(
+                "droid".into(),
+                "Droid".into(),
+                providers::droid::snapshot(),
             )),
         ),
         (
@@ -2058,6 +2070,22 @@ async fn fetch_usage(
             }
         }
     }
+    let droid_identity_now = providers::droid::default_identity();
+    let droid_swapped_mid_refresh = matches!(
+        (&droid_identity_at_start, &droid_identity_now),
+        (Some(old), Some(current)) if old != current
+    );
+    if droid_swapped_mid_refresh {
+        for s in &mut all {
+            if s.id == "droid" {
+                *s = providers::Snapshot::error(
+                    "droid",
+                    "Droid",
+                    "Droid login changed during refresh.".into(),
+                );
+            }
+        }
+    }
 
     for s in &all {
         let log_family = family_of(&s.id);
@@ -2097,6 +2125,7 @@ async fn fetch_usage(
             let current = json!({
                 "claude": providers::claude::default_identity(),
                 "codex": providers::codex::default_identity(),
+                "droid": providers::droid::default_identity(),
                 "opencode": providers::opencode::default_identity(),
                 "stepfun": providers::stepfun::default_identity(),
             });
@@ -2107,7 +2136,7 @@ async fn fetch_usage(
             let mut map = cache.lock().unwrap();
             let mut removed = false;
             let mut to_store = serde_json::Map::new();
-            for fam in ["claude", "codex", "opencode", "stepfun"] {
+            for fam in ["claude", "codex", "droid", "opencode", "stepfun"] {
                 let cur = current.get(fam).cloned().unwrap_or(Value::Null);
                 let old = stored.get(fam).cloned().unwrap_or(Value::Null);
                 // Only a KNOWN stored identity differing from a KNOWN
@@ -2117,8 +2146,8 @@ async fn fetch_usage(
                 // cache — that's the safety net, not a swap.
                 if !old.is_null() && !cur.is_null() && old != cur && map.remove(fam).is_some() {
                     removed = true;
-                } else if fam == "opencode"
-                    && opencode_swapped_mid_refresh
+                } else if ((fam == "opencode" && opencode_swapped_mid_refresh)
+                    || (fam == "droid" && droid_swapped_mid_refresh))
                     && map.remove(fam).is_some()
                 {
                     // Mid-refresh A→B with two known fingerprints: drop
@@ -2499,6 +2528,7 @@ fn cached_usage() -> Vec<providers::Snapshot> {
     let swapped: Vec<&str> = [
         ("claude", providers::claude::default_identity()),
         ("codex", providers::codex::default_identity()),
+        ("droid", providers::droid::default_identity()),
         ("opencode", providers::opencode::default_identity()),
         ("stepfun", providers::stepfun::default_identity()),
     ]
