@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.59 — 2026-10-09
+
+### Added
+- **Droid (Factory) card (#263).** Pane reads the Droid CLI's existing
+  login (read-only — it never refreshes or rewrites it) and shows the
+  Session (5-hour), Weekly and Monthly limits with reset times, Droid
+  Core rows once that pool is used, Extra usage when above $0, and the
+  plan name. If the login has expired, the card asks you to run `droid`
+  again. Spend and the Usage Trend come from `~/.factory/sessions`: each
+  session's token total is split across its replies by time and model
+  and priced at API rates. Factory credits are not converted.
+- **Antigravity spend and Usage Trend (#264).** Pane now reads token
+  counts from Antigravity's local conversation databases
+  (`~/.gemini/antigravity*`), so the card gets Today / Yesterday /
+  30 Days spend, a per-model breakdown and the Usage Trend row. The
+  databases are only read, and nothing leaves your PC.
+
+### Maintenance
+- source-map-js 1.2.1 → 1.2.2 (#262).
+
 ## 0.4.58 — 2026-10-07
 
 ### Fixed

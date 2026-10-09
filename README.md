@@ -13,7 +13,7 @@ reset? What did today actually cost me?*
 Pane is the [OpenUsage](https://www.openusage.ai/) port for Windows: a free
 AI plan tracker for Claude, Codex, Cursor, Copilot, Kimi, Grok, and 18 more.
 
-**[trypane.xyz](https://trypane.xyz)** · [Guides](https://trypane.xyz/guides) · [Install](#install) · [How it works](#how-it-works) · [Providers](#providers-24-and-counting) · [Features](#features) · [Privacy](#privacy--security) · [Credits](#credits)
+**[trypane.xyz](https://trypane.xyz)** · [Guides](https://trypane.xyz/guides) · [Install](#install) · [How it works](#how-it-works) · [Providers](#providers-25-and-counting) · [Features](#features) · [Privacy](#privacy--security) · [Credits](#credits)
 
 <img src="docs/promo.png" width="760" alt="Pane — track all your AI subscription limits in one tray app: Total Spend donut with per-provider slices, usage cards with pace bars" />
 
@@ -130,9 +130,10 @@ reset window ("Almost out", "Will run out") or when a weekly window
 resets ("Limit reset").
 
 **4. Counting the money.** Your CLIs already log every request locally.
-Pane scans those logs (Claude, Codex, Grok, OpenCode, Devin CLI, Cursor
-CSV, MiniMax CLI, Kimi Code, Qwen Code, the pi coding agent and its
-oh-my-pi / Step Code forks, the Hermes desktop app), prices each
+Pane scans those logs (Claude, Codex, Grok, OpenCode, Devin CLI,
+Droid CLI, Antigravity, Cursor CSV, MiniMax CLI, Kimi Code, Qwen Code,
+the pi coding agent and its oh-my-pi / Step Code forks, the Hermes
+desktop app), prices each
 request with live per-model rates (LiteLLM /
 models.dev, refreshed daily — hourly while unknown models are around, so
 brand-new models price within the hour), and draws the Today /
@@ -152,7 +153,7 @@ statistic — always on, no in-app switch — (random ID, version, which
 providers are enabled, provider success/failure counts — never amounts or
 error text) — see [Privacy](#privacy--security) for the full contract.
 
-## Providers (24 and counting)
+## Providers (25 and counting)
 
 | Provider | How Pane connects |
 |---|---|
@@ -163,10 +164,11 @@ error text) — see [Privacy](#privacy--security) for the full contract.
 | GitHub Copilot | Copilot editor login or GitHub CLI (Credential Manager) + GitHub API |
 | Grok (Grok CLI) | `%USERPROFILE%\.grok\auth.json` + Grok billing/subscription APIs |
 | Devin (Devin CLI) | `%APPDATA%\devin\credentials.toml` + GetUserStatus RPC; local CLI session store for spend |
+| Droid (Factory CLI) | Droid CLI login (`~/.factory/auth.v2.keyring`, read-only) + Factory billing limits API; local `~/.factory/sessions` for spend |
 | MiniMax | API key (Settings, env var, or CLI config) + token-plan API |
 | OpenRouter | API key (Settings) or key stored by OpenCode |
 | Z.ai | API key (Settings), CLI key file, or env var |
-| Antigravity | Local language server, or Google Cloud Code API via Credential Manager |
+| Antigravity | Local language server, or Google Cloud Code API via Credential Manager; local conversation databases for spend |
 | DeepSeek | API key (Settings) → balance |
 | StepFun | API key (Settings, or Step Code's saved `platform_*` key as fallback) → balance + vouchers with credits-used meter; Step Plan tier is opt-in in Settings; `step-*` spend routed from Claude Code / Codex / OpenCode / oh-my-pi / Step Code |
 | Kimi API | Platform API key (Settings) → wallet balance and credits-used meter (global + CN endpoints) |
