@@ -11,7 +11,7 @@ asking: *How much of my Claude session is left? When does my Codex weekly
 reset? What did today actually cost me?*
 
 Pane is the [OpenUsage](https://www.openusage.ai/) port for Windows: a free
-AI plan tracker for Claude, Codex, Cursor, Copilot, Kimi, Grok, and 18 more.
+AI plan tracker for Claude, Codex, Cursor, Copilot, Kimi, Grok, and 19 more.
 
 **[trypane.xyz](https://trypane.xyz)** · [Guides](https://trypane.xyz/guides) · [Install](#install) · [How it works](#how-it-works) · [Providers](#providers-25-and-counting) · [Features](#features) · [Privacy](#privacy--security) · [Credits](#credits)
 
