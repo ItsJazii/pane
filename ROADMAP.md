@@ -1,9 +1,10 @@
 # Roadmap — full Mac parity (and beyond)
 
-**Status (v0.4.58, 2026-10-07): every wave below is shipped, and the
+**Status (v0.4.59, 2026-10-09): every wave below is shipped, and the
 post-launch releases keep going.** Pane has full feature parity with the
-macOS original plus 24 providers (StepFun and Sub2API multi-site key
-tracking landed), multi-site One/New API key management,
+macOS original plus 25 providers (Droid/Factory with local spend
+landed; Antigravity gained local spend), multi-site One/New API key
+management,
 widget mode (pinned, draggable, collapsible to a cycling see-through
 glass bar), in-card metric-row reordering, Claude Cloud session credits,
 Codex spend from Orca and synced session folders (free Auto-review at $0),

@@ -2755,7 +2755,7 @@ dependencies = [
 
 [[package]]
 name = "pane"
-version = "0.4.58"
+version = "0.4.59"
 dependencies = [
  "arboard",
  "base64 0.22.1",

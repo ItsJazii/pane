@@ -8,9 +8,9 @@
 
 点击托盘图标，就能回答每个 AI 重度用户常遇到的问题：*我的 Claude 会话额度还剩多少？Codex 每周额度何时重置？今天实际花了多少钱？*
 
-Pane 是 [OpenUsage](https://www.openusage.ai/) 的 Windows 版本：一款免费的 AI 套餐用量追踪工具，支持 Claude、Codex、Cursor、Copilot、Kimi、Grok 等 24 个服务商。
+Pane 是 [OpenUsage](https://www.openusage.ai/) 的 Windows 版本：一款免费的 AI 套餐用量追踪工具，支持 Claude、Codex、Cursor、Copilot、Kimi、Grok 等 25 个服务商。
 
-**[trypane.xyz](https://trypane.xyz)** · [指南](https://trypane.xyz/guides) · [安装](#安装) · [工作原理](#工作原理) · [服务商（24 个且持续增加）](#服务商24-个且持续增加) · [功能](#功能) · [隐私与安全](#隐私与安全) · [致谢](#致谢)
+**[trypane.xyz](https://trypane.xyz)** · [指南](https://trypane.xyz/guides) · [安装](#安装) · [工作原理](#工作原理) · [服务商（25 个且持续增加）](#服务商25-个且持续增加) · [功能](#功能) · [隐私与安全](#隐私与安全) · [致谢](#致谢)
 
 <img src="docs/promo.png" width="760" alt="Pane：在一个托盘应用中追踪所有 AI 订阅额度，包括按服务商划分的总花费圆环图，以及显示使用进度的额度卡片" />
 
@@ -88,11 +88,11 @@ Pane 是一款轻量的 Tauri v2 应用：Rust 核心负责数据处理，原生
 
 **3. 预测额度消耗。** 对于有重置周期的指标，Pane 会推算：按照当前速度使用，额度能否撑到重置？情况变差时，进度条会变为琥珀色或红色。可选的 Windows 通知会在每个重置周期提示“即将用完”“将会用完”，或在每周额度重置时提示“额度已重置”。
 
-**4. 统计花费。** 你的 CLI 已在本地记录每次请求。Pane 扫描这些日志（Claude、Codex、Grok、OpenCode、Devin CLI、Cursor CSV、MiniMax CLI、Kimi Code、Qwen Code、pi 编程代理及其 oh-my-pi / Step Code 分支、Hermes 桌面应用），按实时模型单价计费（LiteLLM / models.dev 每天更新；存在未知模型时每小时更新，让新模型的价格能在一小时内被识别），绘制今天、昨天和最近 30 天的花费圆环图，并按模型拆分。点击圆环可在金额和 Token 数之间切换。对于固定价格的套餐，这里显示的是按 API 价格计算的*等效费用*，能直观看出订阅的价值。没有公开价格的模型仍会计入实测 Token 数，但不会猜测金额；服务商花费行的 ⚠ 表示实际费用可能高于显示值。
+**4. 统计花费。** 你的 CLI 已在本地记录每次请求。Pane 扫描这些日志（Claude、Codex、Grok、OpenCode、Devin CLI、Droid CLI、Antigravity、Cursor CSV、MiniMax CLI、Kimi Code、Qwen Code、pi 编程代理及其 oh-my-pi / Step Code 分支、Hermes 桌面应用），按实时模型单价计费（LiteLLM / models.dev 每天更新；存在未知模型时每小时更新，让新模型的价格能在一小时内被识别），绘制今天、昨天和最近 30 天的花费圆环图，并按模型拆分。点击圆环可在金额和 Token 数之间切换。对于固定价格的套餐，这里显示的是按 API 价格计算的*等效费用*，能直观看出订阅的价值。没有公开价格的模型仍会计入实测 Token 数，但不会猜测金额；服务商花费行的 ⚠ 表示实际费用可能高于显示值。
 
 **5. 数据留在本机。** 上述处理都在你的电脑上完成。无需注册账户，额度、花费和服务商数据不会离开电脑。Pane 只会报告两类匿名的自身信息：更新检查（按国家或地区统计，不存储 IP），以及每日一次的匿名统计（始终开启，应用内没有关闭开关；包括随机 ID、版本、已启用的服务商及请求成功/失败次数，不包含额度数值或错误文本）。完整约定请参阅[隐私与安全](#隐私与安全)。
 
-## 服务商（24 个且持续增加）
+## 服务商（25 个且持续增加）
 
 | 服务商 | Pane 的连接方式 |
 |---|---|
@@ -103,10 +103,11 @@ Pane 是一款轻量的 Tauri v2 应用：Rust 核心负责数据处理，原生
 | GitHub Copilot | Copilot 编辑器登录凭据或 GitHub CLI（凭据管理器）+ GitHub API |
 | Grok（Grok CLI） | `%USERPROFILE%\.grok\auth.json` + Grok 账单/订阅 API |
 | Devin（Devin CLI） | `%APPDATA%\devin\credentials.toml` + GetUserStatus RPC；本地 CLI 会话记录用于统计花费 |
+| Droid（Factory CLI） | Droid CLI 登录（`~/.factory/auth.v2.keyring`，只读）+ Factory 额度 API；本地 `~/.factory/sessions` 用于统计花费 |
 | MiniMax | API Key（设置、环境变量或 CLI 配置）+ Token 套餐 API |
 | OpenRouter | API Key（设置）或 OpenCode 保存的 Key |
 | Z.ai | API Key（设置）、CLI Key 文件或环境变量 |
-| Antigravity | 本地语言服务器，或通过凭据管理器访问 Google Cloud Code API |
+| Antigravity | 本地语言服务器，或通过凭据管理器访问 Google Cloud Code API；本地对话数据库用于统计花费 |
 | DeepSeek | API Key（设置）→ 余额 |
 | StepFun | API Key（设置，未配置时回退到 Step Code 保存的 `platform_*` Key）→ 余额、抵用券和已用额度；Step Plan 套餐档位在设置中手动选用；`step-*` 花费从 Claude Code / Codex / OpenCode / oh-my-pi / Step Code 记录归集 |
 | Kimi API | 平台 API Key（设置）→ 钱包余额和已用额度（支持国际站与中国站接口） |
