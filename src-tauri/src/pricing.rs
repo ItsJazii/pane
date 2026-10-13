@@ -1020,6 +1020,13 @@ fn builtin_price(canonical: &str) -> Option<Price> {
         // (-high, -xhigh) peel in resolve(); preview is its own SKU.
         "gemini-3.8-flash" | "gemini-3-8-flash" | "gemini-3.8-flash-preview"
         | "cursor-gemini-3.8-flash" => Some(Price::flat(0.75, 3.75, 0.075, 0.75)),
+        // Gemini 4 Argon — AIHubMix billing config (aihubmix.com,
+        // model_ratio 2 / completion_ratio 5 / cache_ratio 0.05, single
+        // tier): $4.00 in / $20.00 out / $0.20 cache read, matching
+        // Google's standard post-intro list ($4/$20, cached input 95%
+        // off; the temporary intro promo is $2/$10 but AIHubMix bills
+        // $4/$20). Cache write is unpublished, so writes bill at input.
+        "gemini-4-argon" => Some(Price::flat(4.0, 20.0, 0.20, 4.0)),
         // Cognition SWE / Penguin — LiteLLM Cognition cost map
         // (docs.litellm.ai/docs/providers/cognition) and Devin's
         // in-app rate card: $0.50 / $2.50 / $0.20 cache read. Cache
@@ -1394,6 +1401,22 @@ mod tests {
                 (0.75, 3.75, 0.075, 0.75),
                 "{slug}"
             );
+        }
+
+        for slug in [
+            "gemini-4-argon",
+            "aihubmix/gemini-4-argon",
+            "google/gemini-4-argon",
+            "gemini-4-argon-high",
+        ] {
+            let p = super::resolve(&store, slug, 0)
+                .unwrap_or_else(|| panic!("{slug} did not price"));
+            assert_eq!(
+                (p.input, p.output, p.cache_read, p.cache_write),
+                (4.0, 20.0, 0.20, 4.0),
+                "{slug}"
+            );
+            assert!(p.input_200k.is_none(), "{slug}");
         }
     }
 
