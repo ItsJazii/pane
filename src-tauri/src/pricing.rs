@@ -253,7 +253,7 @@ pub fn generation() -> u64 {
 /// fingerprinted below — an app update that reprices the same files would
 /// otherwise leave history at the old dollars until upstream happens to
 /// rewrite a catalog.
-const CORRECTIONS_REV: u32 = 16; // 16: StepFun builtins (step-5-preview, audio, CN-only models)
+const CORRECTIONS_REV: u32 = 17; // 17: gemini-4-argon builtin ($4/$20, cache read $0.20)
 
 /// The corrections revision on its own — the spend cache treats a changed
 /// revision as a hard discard (the *code* that prices changed), while a
