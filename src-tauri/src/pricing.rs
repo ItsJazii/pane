@@ -207,6 +207,19 @@ pub fn argon_intro_card(model: &str, ts_ms: i64) -> Option<Price> {
     argon_intro_card_in(&store().lock().unwrap(), model, ts_ms)
 }
 
+/// Devin's own Argon card — the model picker lists $1 in / $5 out /
+/// $0.05 cached input through Nov 30, 2026 (promo ends at
+/// ARGON_INTRO_END_MS, same PT cutoff as Google's). Cache write is
+/// unpublished, so writes bill at intro input. Afterwards Devin follows
+/// Google's list price, so callers fall through to the resolved card.
+/// Only the Devin spend scanner consults this.
+pub fn devin_argon_card(model: &str, ts_ms: i64) -> Option<Price> {
+    if ts_ms >= ARGON_INTRO_END_MS || argon_segment(model).is_none() {
+        return None;
+    }
+    Some(Price::flat(1.0, 5.0, 0.05, 1.0))
+}
+
 /// Every effective-dated card: a resolved price that differs by date.
 /// cost_for and the Hermes session splitter consult this before the
 /// resolved card — a bare result is the card in force at ts_ms.
@@ -317,7 +330,7 @@ pub fn generation() -> u64 {
 /// fingerprinted below — an app update that reprices the same files would
 /// otherwise leave history at the old dollars until upstream happens to
 /// rewrite a catalog.
-const CORRECTIONS_REV: u32 = 18; // 18: Gemini 4 Argon Google intro card + AIHubMix scoping
+const CORRECTIONS_REV: u32 = 18; // 18: Gemini 4 Argon cards (Google intro, AIHubMix scope, Devin promo)
 
 /// The corrections revision on its own — the spend cache treats a changed
 /// revision as a hard discard (the *code* that prices changed), while a
@@ -1516,6 +1529,17 @@ mod tests {
         // dated_card exposes the same override to the spend paths.
         assert!(super::dated_card("gemini-4-argon", ms("2026-10-14T12:00:00Z")).is_some());
         assert!(super::dated_card("gemini-4-argon", ms("2026-12-02T00:00:00Z")).is_none());
+    }
+
+    #[test]
+    fn devin_argon_card_is_dated_and_model_scoped() {
+        let ms = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis();
+        let p = super::devin_argon_card("gemini-4-argon", ms("2026-10-14T12:00:00Z")).unwrap();
+        assert_eq!((p.input, p.output, p.cache_read, p.cache_write), (1.0, 5.0, 0.05, 1.0));
+        // Promo ends 2026-11-30 PT = 2026-12-01T08:00Z.
+        assert!(super::devin_argon_card("gemini-4-argon", ms("2026-12-01T07:59:59Z")).is_some());
+        assert!(super::devin_argon_card("gemini-4-argon", ms("2026-12-01T08:00:00Z")).is_none());
+        assert!(super::devin_argon_card("gpt-6.1-sol", ms("2026-10-14T12:00:00Z")).is_none());
     }
 
     #[test]

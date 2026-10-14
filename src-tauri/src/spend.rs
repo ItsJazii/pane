@@ -3404,12 +3404,22 @@ fn devin() -> ProviderSpend {
                     cache_write_5m: ev.cache_write,
                     cache_write_1h: 0.0,
                 };
-                add_event(&mut data, ts, &model, cost_for(&model, &p, &u, 200_000.0, ts), tokens);
+                add_event(&mut data, ts, &model, devin_cost(&model, &p, &u, ts), tokens);
             }
             None => note_unpriced(&mut data, ts, &model, tokens),
         }
     }
     build_spend("devin", "Devin", data)
+}
+
+/// Devin CLI events price on Devin's own Argon promo card while it runs —
+/// it must win over cost_for's dated overlay (Google's intro card is a
+/// different rate). Every other model resolves normally.
+fn devin_cost(model: &str, p: &pricing::Price, u: &pricing::Usage, ts: DateTime<Utc>) -> f64 {
+    if let Some(card) = pricing::devin_argon_card(model, ts.timestamp_millis()) {
+        return pricing::request_cost_at(&card, u, 200_000.0);
+    }
+    cost_for(model, p, u, 200_000.0, ts)
 }
 
 /// Droid's local session files hold cumulative per-session tokenUsage;
@@ -6231,6 +6241,54 @@ mod tests {
             4.0
         );
         assert_eq!(hermes_cost("gemini-4-argon", &card, &u, t, t), 2.0);
+    }
+
+    /// Devin bills Argon on its own in-app promo card ($1/$5/$0.05
+    /// cached) through Nov 30, 2026 — beating even Google's dated intro
+    /// card on the same event; after the cutoff it follows the list.
+    #[test]
+    fn devin_argon_uses_the_in_app_promo_card() {
+        // Devin logs the effort-suffixed slug; it normalises to the base
+        // slug, which resolves through the baked card.
+        assert_eq!(devin_model("gemini-4-argon-high"), "gemini-4-argon");
+        assert!(pricing::lookup("gemini-4-argon").is_some());
+        let card = pricing::Price::flat(4.0, 20.0, 0.20, 4.0);
+        let ts = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        let io = pricing::Usage {
+            input: 1_000_000.0,
+            output: 1_000_000.0,
+            cache_read: 0.0,
+            cache_write_5m: 0.0,
+            cache_write_1h: 0.0,
+        };
+        let cr = pricing::Usage {
+            input: 0.0,
+            output: 0.0,
+            cache_read: 1_000_000.0,
+            cache_write_5m: 0.0,
+            cache_write_1h: 0.0,
+        };
+        // Promo window: $1 in + $5 out = $6; 1M cached input = $0.05.
+        assert_eq!(
+            devin_cost("gemini-4-argon", &card, &io, ts("2026-10-14T12:00:00Z")),
+            6.0
+        );
+        assert_eq!(
+            devin_cost("gemini-4-argon", &card, &cr, ts("2026-10-14T12:00:00Z")),
+            0.05
+        );
+        // After the promo the resolved card applies ($4 + $20).
+        assert_eq!(
+            devin_cost("gemini-4-argon", &card, &io, ts("2026-12-02T12:00:00Z")),
+            24.0
+        );
+        // Non-Argon slugs fall through to cost_for untouched.
+        let opus = pricing::Price::flat(5.0, 25.0, 0.50, 6.0);
+        let t = ts("2026-10-14T12:00:00Z");
+        assert_eq!(
+            devin_cost("claude-opus-5-5", &opus, &io, t),
+            cost_for("claude-opus-5-5", &opus, &io, 200_000.0, t)
+        );
     }
 
     /// Step Code (StepFun's pi fork) writes the same v3 format under
