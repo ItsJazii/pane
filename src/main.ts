@@ -3140,17 +3140,40 @@ function showModelTip(row: HTMLElement): void {
   if (!w.models.length) {
     tip.innerHTML = `<p class="placeholder">${escapeHtml(t("spend.noModelData"))}</p>`;
   } else {
-    tip.innerHTML = w.models
-      .map((m) => {
-        const share = w.cost > 0 ? (m.cost / w.cost) * 100 : 0;
-        return `
-          <div class="tip-model">
-            <div class="tip-line"><span class="tip-name">${escapeHtml(m.model)}</span><span>${fmtMoney(m.cost)}</span></div>
-            <div class="tip-line detail"><span>${share.toFixed(0)}%</span><span>${escapeHtml(t("card.tokens", { n: fmtTokens(m.tokens) }))}</span></div>
-            <div class="tip-bar"><div style="width:${Math.max(2, share)}%"></div></div>
-          </div>`;
-      })
-      .join("");
+    // Copied so folding into "Other" never mutates the cached spend data.
+    const models = w.models.map((m) => ({ ...m }));
+    const render = (): void => {
+      tip.innerHTML = models
+        .map((m) => {
+          const share = w.cost > 0 ? (m.cost / w.cost) * 100 : 0;
+          return `
+            <div class="tip-model">
+              <div class="tip-line"><span class="tip-name">${escapeHtml(m.model)}</span><span>${fmtMoney(m.cost)}</span></div>
+              <div class="tip-line detail"><span>${share.toFixed(0)}%</span><span>${escapeHtml(t("card.tokens", { n: fmtTokens(m.tokens) }))}</span></div>
+              <div class="tip-bar"><div style="width:${Math.max(2, share)}%"></div></div>
+            </div>`;
+        })
+        .join("");
+    };
+    render();
+    tip.hidden = false;
+    // The tip can't scroll (pointer-events: none), so a list taller than
+    // the window folds its named tail into "Other" until it fits. The top
+    // model is never folded.
+    while (tip.offsetHeight > window.innerHeight - 16) {
+      const otherIdx = models.findIndex((m) => m.model === "Other");
+      const foldIdx = (otherIdx === -1 ? models.length : otherIdx) - 1;
+      if (foldIdx <= 0) break;
+      const [m] = models.splice(foldIdx, 1);
+      const other = models.find((x) => x.model === "Other");
+      if (other) {
+        other.cost += m.cost;
+        other.tokens += m.tokens;
+      } else {
+        models.push({ model: "Other", cost: m.cost, tokens: m.tokens });
+      }
+      render();
+    }
   }
 
   const rect = row.getBoundingClientRect();
