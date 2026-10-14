@@ -1384,6 +1384,8 @@ body.row-dragging #resets-pop {
   position: fixed;
   z-index: 50;
   width: 230px;
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 9px;

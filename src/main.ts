@@ -3140,40 +3140,18 @@ function showModelTip(row: HTMLElement): void {
   if (!w.models.length) {
     tip.innerHTML = `<p class="placeholder">${escapeHtml(t("spend.noModelData"))}</p>`;
   } else {
-    // Copied so folding into "Other" never mutates the cached spend data.
-    const models = w.models.map((m) => ({ ...m }));
-    const render = (): void => {
-      tip.innerHTML = models
-        .map((m) => {
-          const share = w.cost > 0 ? (m.cost / w.cost) * 100 : 0;
-          return `
-            <div class="tip-model">
-              <div class="tip-line"><span class="tip-name">${escapeHtml(m.model)}</span><span>${fmtMoney(m.cost)}</span></div>
-              <div class="tip-line detail"><span>${share.toFixed(0)}%</span><span>${escapeHtml(t("card.tokens", { n: fmtTokens(m.tokens) }))}</span></div>
-              <div class="tip-bar"><div style="width:${Math.max(2, share)}%"></div></div>
-            </div>`;
-        })
-        .join("");
-    };
-    render();
-    tip.hidden = false;
-    // The tip can't scroll (pointer-events: none), so a list taller than
-    // the window folds its named tail into "Other" until it fits. The top
-    // model is never folded.
-    while (tip.offsetHeight > window.innerHeight - 16) {
-      const otherIdx = models.findIndex((m) => m.model === "Other");
-      const foldIdx = (otherIdx === -1 ? models.length : otherIdx) - 1;
-      if (foldIdx <= 0) break;
-      const [m] = models.splice(foldIdx, 1);
-      const other = models.find((x) => x.model === "Other");
-      if (other) {
-        other.cost += m.cost;
-        other.tokens += m.tokens;
-      } else {
-        models.push({ model: "Other", cost: m.cost, tokens: m.tokens });
-      }
-      render();
-    }
+    tip.innerHTML = w.models
+      .map((m) => {
+        const share = w.cost > 0 ? (m.cost / w.cost) * 100 : 0;
+        return `
+          <div class="tip-model">
+            <div class="tip-line"><span class="tip-name">${escapeHtml(m.model)}</span><span>${fmtMoney(m.cost)}</span></div>
+            <div class="tip-line detail"><span>${share.toFixed(0)}%</span><span>${escapeHtml(t("card.tokens", { n: fmtTokens(m.tokens) }))}</span></div>
+            <div class="tip-bar"><div style="width:${Math.max(2, share)}%"></div></div>
+          </div>`;
+      })
+      .join("");
+    tip.scrollTop = 0;
   }
 
   const rect = row.getBoundingClientRect();
@@ -5926,6 +5904,20 @@ window.addEventListener("DOMContentLoaded", () => {
     const hovered = target.closest<HTMLElement>("[data-spend], [data-trend], [data-cap]");
     if (hovered && (!to || !hovered.contains(to))) tip.hidden = true;
   });
+  // A tall breakdown can't take pointer events, so wheel over the spend
+  // row scrolls the tip itself — otherwise the wheel would scroll the
+  // provider list, whose scroll handler hides the tip.
+  providersEl.addEventListener(
+    "wheel",
+    (e) => {
+      if (tip.hidden) return;
+      const row = (e.target as HTMLElement).closest<HTMLElement>("[data-spend]");
+      if (!row || tip.scrollHeight <= tip.clientHeight) return;
+      e.preventDefault();
+      tip.scrollTop += e.deltaY * (e.deltaMode === 1 ? 16 : 1);
+    },
+    { passive: false },
+  );
   let scrollRaf = 0;
   providersEl.addEventListener("scroll", () => {
     tip.hidden = true;
