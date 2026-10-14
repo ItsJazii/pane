@@ -3108,7 +3108,7 @@ function showTrendTip(el: HTMLElement): void {
   const spend = lastSpend.find((s) => s.id === id);
   const i = Number(idxStr);
   if (!spend || Number.isNaN(i)) return;
-  delete tip.dataset.spendKey;
+  modelTipRow = null;
 
   const tokens = spend.trend[i] ?? 0;
   const total = spend.trend.reduce((a, b) => a + b, 0);
@@ -3131,6 +3131,9 @@ function showTrendTip(el: HTMLElement): void {
   tip.style.left = `${Math.max(8, Math.min(rect.left - 50, window.innerWidth - tip.offsetWidth - 8))}px`;
 }
 
+/// The spend row whose breakdown #model-tip currently shows.
+let modelTipRow: HTMLElement | null = null;
+
 function showModelTip(row: HTMLElement): void {
   const tip = document.querySelector<HTMLElement>("#model-tip")!;
   const [id, key] = (row.dataset.spend ?? "").split("|");
@@ -3139,8 +3142,9 @@ function showModelTip(row: HTMLElement): void {
   if (!w) return;
   // Moving between children of the open row must not rerender or reset
   // the breakdown's scroll position.
-  if (!tip.hidden && tip.dataset.spendKey === row.dataset.spend) return;
-  tip.dataset.spendKey = row.dataset.spend ?? "";
+  // A refresh rebuilds the row element, so a new element always rerenders.
+  if (!tip.hidden && modelTipRow === row) return;
+  modelTipRow = row;
 
   if (!w.models.length) {
     tip.innerHTML = `<p class="placeholder">${escapeHtml(t("spend.noModelData"))}</p>`;
@@ -3243,7 +3247,7 @@ function showCapacityTip(el: HTMLElement): void {
   const d = metric ? parseCapacityDetail(metric.detail) : null;
   const cur = d?.current;
   if (!cur) return;
-  delete tip.dataset.spendKey;
+  modelTipRow = null;
 
   const known = cur.tokens > 0 || cur.cost > 0;
   const hasEst = cur.est_tokens !== undefined && cur.est_cost !== undefined;
