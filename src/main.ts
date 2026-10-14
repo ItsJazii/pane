@@ -3108,6 +3108,7 @@ function showTrendTip(el: HTMLElement): void {
   const spend = lastSpend.find((s) => s.id === id);
   const i = Number(idxStr);
   if (!spend || Number.isNaN(i)) return;
+  modelTipRow = null;
 
   const tokens = spend.trend[i] ?? 0;
   const total = spend.trend.reduce((a, b) => a + b, 0);
@@ -3130,12 +3131,20 @@ function showTrendTip(el: HTMLElement): void {
   tip.style.left = `${Math.max(8, Math.min(rect.left - 50, window.innerWidth - tip.offsetWidth - 8))}px`;
 }
 
+/// The spend row whose breakdown #model-tip currently shows.
+let modelTipRow: HTMLElement | null = null;
+
 function showModelTip(row: HTMLElement): void {
   const tip = document.querySelector<HTMLElement>("#model-tip")!;
   const [id, key] = (row.dataset.spend ?? "").split("|");
   const spend = lastSpend.find((s) => s.id === id);
   const w = spend?.[key as SpendTab];
   if (!w) return;
+  // Moving between children of the open row must not rerender or reset
+  // the breakdown's scroll position.
+  // A refresh rebuilds the row element, so a new element always rerenders.
+  if (!tip.hidden && modelTipRow === row) return;
+  modelTipRow = row;
 
   if (!w.models.length) {
     tip.innerHTML = `<p class="placeholder">${escapeHtml(t("spend.noModelData"))}</p>`;
@@ -3151,6 +3160,7 @@ function showModelTip(row: HTMLElement): void {
           </div>`;
       })
       .join("");
+    tip.scrollTop = 0;
   }
 
   const rect = row.getBoundingClientRect();
@@ -3237,6 +3247,7 @@ function showCapacityTip(el: HTMLElement): void {
   const d = metric ? parseCapacityDetail(metric.detail) : null;
   const cur = d?.current;
   if (!cur) return;
+  modelTipRow = null;
 
   const known = cur.tokens > 0 || cur.cost > 0;
   const hasEst = cur.est_tokens !== undefined && cur.est_cost !== undefined;
@@ -5903,6 +5914,20 @@ window.addEventListener("DOMContentLoaded", () => {
     const hovered = target.closest<HTMLElement>("[data-spend], [data-trend], [data-cap]");
     if (hovered && (!to || !hovered.contains(to))) tip.hidden = true;
   });
+  // A tall breakdown can't take pointer events, so wheel over the spend
+  // row scrolls the tip itself — otherwise the wheel would scroll the
+  // provider list, whose scroll handler hides the tip.
+  providersEl.addEventListener(
+    "wheel",
+    (e) => {
+      if (tip.hidden) return;
+      const row = (e.target as HTMLElement).closest<HTMLElement>("[data-spend]");
+      if (!row || tip.scrollHeight <= tip.clientHeight) return;
+      e.preventDefault();
+      tip.scrollTop += e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? tip.clientHeight : 1);
+    },
+    { passive: false },
+  );
   let scrollRaf = 0;
   providersEl.addEventListener("scroll", () => {
     tip.hidden = true;
