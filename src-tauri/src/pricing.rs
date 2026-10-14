@@ -158,6 +158,54 @@ pub fn v41_flash_legacy_card(model: &str, ts_ms: i64) -> Option<Price> {
     Some(Price::flat(0.142, 0.284, 0.0284, 0.142))
 }
 
+/// 2026-12-01T08:00Z — end of Nov 30 Pacific. Google dates the Gemini 4
+/// Argon intro promo in PT (ai.google.dev/gemini-api/docs/latest-model):
+/// $2 in / $10 out / $0.10 cache read through 2026-11-30, then the
+/// standard $4/$20/$0.20 card the bare arm carries.
+pub const ARGON_INTRO_END_MS: i64 = 1_796_112_000_000;
+
+/// Whether `model` is a Gemini 4 Argon slug on a non-AIHubMix route.
+/// Gateway prefixes peel to the last `/` segment; effort and dated
+/// tails (-high, -fast, -20261001) still count. The aihubmix/ spelling
+/// is excluded — that gateway bills its own flat card year-round.
+fn argon_slug(model: &str) -> bool {
+    let lower = model.to_lowercase();
+    if lower.starts_with("aihubmix/") {
+        return false;
+    }
+    let bare = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    bare == "gemini-4-argon" || bare.starts_with("gemini-4-argon-")
+}
+
+/// Google's intro card for Gemini 4 Argon on direct/bare routes before
+/// ARGON_INTRO_END_MS; cache write bills at intro input ($2) since no
+/// cache-write rate is published. None for other models, later events,
+/// or AIHubMix-scoped slugs.
+pub fn argon_intro_card(model: &str, ts_ms: i64) -> Option<Price> {
+    if ts_ms >= ARGON_INTRO_END_MS || !argon_slug(model) {
+        return None;
+    }
+    Some(Price::flat(2.0, 10.0, 0.10, 2.0))
+}
+
+/// Every effective-dated card: a resolved price that differs by date.
+/// cost_for and the Hermes session splitter consult this before the
+/// resolved card — a bare result is the card in force at ts_ms.
+pub fn dated_card(model: &str, ts_ms: i64) -> Option<Price> {
+    v41_flash_legacy_card(model, ts_ms).or_else(|| argon_intro_card(model, ts_ms))
+}
+
+/// The AIHubMix-scoped spelling of an Argon slug — routes whose Gemini
+/// traffic always crosses AIHubMix price under `aihubmix/gemini-4-argon`
+/// (its $4/$20 gateway card) instead of the dated Google intro rate.
+/// Bare slugs only: prefixed spellings already carry their route.
+pub fn aihubmix_scoped(model: &str) -> Option<String> {
+    if model.contains('/') || !argon_slug(model) {
+        return None;
+    }
+    Some(format!("aihubmix/{model}"))
+}
+
 /// Milliseconds of [start_ms, end_ms) inside V4.1 Flash peak windows —
 /// Hermes rows aggregate whole sessions, so a boundary-crossing session
 /// splits its cost by this share. The changeover clamps the interval:
@@ -253,7 +301,7 @@ pub fn generation() -> u64 {
 /// fingerprinted below — an app update that reprices the same files would
 /// otherwise leave history at the old dollars until upstream happens to
 /// rewrite a catalog.
-const CORRECTIONS_REV: u32 = 17; // 17: gemini-4-argon builtin ($4/$20, cache read $0.20)
+const CORRECTIONS_REV: u32 = 18; // 18: Gemini 4 Argon Google intro card + AIHubMix scoping
 
 /// The corrections revision on its own — the spend cache treats a changed
 /// revision as a hard discard (the *code* that prices changed), while a
@@ -1024,8 +1072,11 @@ fn builtin_price(canonical: &str) -> Option<Price> {
         // model_ratio 2 / completion_ratio 5 / cache_ratio 0.05, single
         // tier): $4.00 in / $20.00 out / $0.20 cache read, matching
         // Google's standard post-intro list ($4/$20, cached input 95%
-        // off; the temporary intro promo is $2/$10 but AIHubMix bills
-        // $4/$20). Cache write is unpublished, so writes bill at input.
+        // off). Google's direct intro promo is $2/$10/$0.10 through
+        // 2026-11-30 PT — dated_card()/argon_intro_card() overlay it for
+        // bare routes, while AIHubMix traffic is scoped to this spelling
+        // (aihubmix_scoped) so the gateway always bills $4/$20. Cache
+        // write is unpublished, so writes bill at input.
         "gemini-4-argon" => Some(Price::flat(4.0, 20.0, 0.20, 4.0)),
         // Cognition SWE / Penguin — LiteLLM Cognition cost map
         // (docs.litellm.ai/docs/providers/cognition) and Devin's
@@ -1418,6 +1469,47 @@ mod tests {
             );
             assert!(p.input_200k.is_none(), "{slug}");
         }
+    }
+
+    #[test]
+    fn argon_intro_card_is_dated_and_route_scoped() {
+        let ms = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis();
+        for slug in ["gemini-4-argon", "google/gemini-4-argon", "gemini-4-argon-high"] {
+            let p = super::argon_intro_card(slug, ms("2026-10-14T12:00:00Z"))
+                .unwrap_or_else(|| panic!("{slug} should intro-price"));
+            assert_eq!(
+                (p.input, p.output, p.cache_read, p.cache_write),
+                (2.0, 10.0, 0.10, 2.0),
+                "{slug}"
+            );
+        }
+        // AIHubMix routes keep the gateway card even during the promo.
+        assert!(super::argon_intro_card("aihubmix/gemini-4-argon", ms("2026-10-14T12:00:00Z")).is_none());
+        // The promo ends 2026-11-30 PT = 2026-12-01T08:00Z.
+        assert!(super::argon_intro_card("gemini-4-argon", ms("2026-12-01T07:59:59Z")).is_some());
+        assert!(super::argon_intro_card("gemini-4-argon", ms("2026-12-01T08:00:00Z")).is_none());
+        assert!(super::argon_intro_card("gemini-4-argon", ms("2026-12-05T00:00:00Z")).is_none());
+        // Other models never take the intro card.
+        assert!(super::argon_intro_card("gemini-4-flash", ms("2026-10-14T12:00:00Z")).is_none());
+        assert!(super::argon_intro_card("gpt-6.1-sol", ms("2026-10-14T12:00:00Z")).is_none());
+        // dated_card exposes the same override to the spend paths.
+        assert!(super::dated_card("gemini-4-argon", ms("2026-10-14T12:00:00Z")).is_some());
+        assert!(super::dated_card("gemini-4-argon", ms("2026-12-02T00:00:00Z")).is_none());
+    }
+
+    #[test]
+    fn aihubmix_scoped_only_rewrites_bare_argon() {
+        assert_eq!(
+            super::aihubmix_scoped("gemini-4-argon").as_deref(),
+            Some("aihubmix/gemini-4-argon")
+        );
+        assert_eq!(
+            super::aihubmix_scoped("gemini-4-argon-high").as_deref(),
+            Some("aihubmix/gemini-4-argon-high")
+        );
+        assert!(super::aihubmix_scoped("google/gemini-4-argon").is_none());
+        assert!(super::aihubmix_scoped("qwen3.8-max").is_none());
+        assert!(super::aihubmix_scoped("aihubmix/gemini-4-argon").is_none());
     }
 
     #[test]

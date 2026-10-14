@@ -1710,7 +1710,7 @@ fn cost_for(
     long_context_threshold: f64,
     ts: DateTime<Utc>,
 ) -> f64 {
-    let legacy = pricing::v41_flash_legacy_card(model, ts.timestamp_millis());
+    let legacy = pricing::dated_card(model, ts.timestamp_millis());
     let p = legacy.as_ref().unwrap_or(p);
     pricing::request_cost_at(p, u, long_context_threshold)
         * pricing::peak_multiplier(model, ts.timestamp_millis())
@@ -1720,7 +1720,12 @@ fn cost_for(
 /// (excluded, never a guessed $0). Fast-flagged requests scale by the
 /// supplement's multiplier.
 fn claude_cost(model: &str, t: &ClaudeTokens, ts: DateTime<Utc>) -> Option<f64> {
-    let price = probe_lookup(model).or_else(|| {
+    // Claude Code speaks the Anthropic Messages API, which Google doesn't
+    // serve Gemini over — a Gemini slug in these logs always came through
+    // a gateway (AIHubMix, like the Qwen rows), so price it on the gateway
+    // card. The rows still land on the Claude card, per user choice.
+    let price_key = pricing::aihubmix_scoped(model).unwrap_or_else(|| model.to_string());
+    let price = probe_lookup(&price_key).or_else(|| {
         claude_price(model).map(|(i, o, cr, cw)| pricing::Price::flat(i, o, cr, cw))
     })?;
     let u = pricing::Usage {
@@ -1731,7 +1736,7 @@ fn claude_cost(model: &str, t: &ClaudeTokens, ts: DateTime<Utc>) -> Option<f64> 
         cache_write_1h: t.w1h,
     };
     let mult = if t.fast { probe_fast_multiplier(model) } else { 1.0 };
-    Some(cost_for(model, &price, &u, 200_000.0, ts) * mult)
+    Some(cost_for(&price_key, &price, &u, 200_000.0, ts) * mult)
 }
 
 /// Per-file dedup state for the Claude scanner. Persisted so a tail
@@ -2139,7 +2144,7 @@ fn hermes() -> Vec<(&'static str, &'static str, FileData)> {
                     && (peak_ms > 0 || legacy_ms > 0)
                 {
                     let new_base = pricing::request_cost(&p, &u, false);
-                    let legacy_base = pricing::v41_flash_legacy_card(&ev.model, ev.start_ms)
+                    let legacy_base = pricing::dated_card(&ev.model, ev.start_ms)
                         .map(|lp| pricing::request_cost(&lp, &u, false))
                         .unwrap_or(new_base);
                     let off_ms = total_ms - legacy_ms - peak_ms;
@@ -3114,7 +3119,13 @@ fn pi_line(seen: &mut HashSet<String>, line: &str, data: &mut FileData) {
         add_event(data, ts, &tagged, c, tokens);
         return;
     }
-    match probe_lookup(model) {
+    // AIHubMix bills Gemini 4 Argon at its own $4/$20 card, never the
+    // dated Google intro rate — scope the lookup so the routes don't mix.
+    let scoped_slug = (card == "aihubmix")
+        .then(|| pricing::aihubmix_scoped(model).unwrap_or_else(|| model.to_string()));
+    let lookup_slug = scoped_slug.as_deref().unwrap_or(model);
+    let cost_model = scoped_slug.as_deref().unwrap_or(&tagged);
+    match probe_lookup(lookup_slug) {
         Some(p) => {
             let u = pricing::Usage {
                 input,
@@ -3123,7 +3134,7 @@ fn pi_line(seen: &mut HashSet<String>, line: &str, data: &mut FileData) {
                 cache_write_5m: (cache_write - cache_write_1h).max(0.0),
                 cache_write_1h,
             };
-            add_event(data, ts, &tagged, cost_for(&tagged, &p, &u, 200_000.0, ts), tokens);
+            add_event(data, ts, &tagged, cost_for(cost_model, &p, &u, 200_000.0, ts), tokens);
         }
         None => note_unpriced(data, ts, &tagged, tokens),
     }
@@ -6103,6 +6114,72 @@ mod tests {
         assert_eq!(tokens_sum(&stepfun), 26504.0 + 150.0);
         assert!(stepfun.days.keys().any(|(_, m)| m == "step-5-preview"));
         assert!(stepfun.days.keys().any(|(_, m)| m == "step-3.7-flash"));
+    }
+
+    /// Bare Argon takes Google's dated intro card; the aihubmix/ spelling
+    /// never does. Both resolve to the same resolved card — only the
+    /// effective-dated overlay differs.
+    #[test]
+    fn argon_intro_card_applies_by_route_and_date() {
+        let card = pricing::Price::flat(4.0, 20.0, 0.20, 4.0);
+        let u = pricing::Usage {
+            input: 1_000_000.0,
+            output: 1_000_000.0,
+            cache_read: 0.0,
+            cache_write_5m: 0.0,
+            cache_write_1h: 0.0,
+        };
+        let ts = |s: &str| {
+            DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+        };
+        // Intro window: $2 in + $10 out.
+        assert_eq!(
+            cost_for("gemini-4-argon", &card, &u, 200_000.0, ts("2026-10-14T12:00:00Z")),
+            12.0
+        );
+        // After the promo: the resolved $4/$20 card.
+        assert_eq!(
+            cost_for("gemini-4-argon", &card, &u, 200_000.0, ts("2026-12-02T12:00:00Z")),
+            24.0
+        );
+        // AIHubMix-scoped slugs bill the gateway card even in the window.
+        assert_eq!(
+            cost_for("aihubmix/gemini-4-argon", &card, &u, 200_000.0, ts("2026-10-14T12:00:00Z")),
+            24.0
+        );
+    }
+
+    /// An omp/pi row on the aihubmix provider prices Argon at the $4/$20
+    /// gateway card, not the $2/$10 Google intro rate — while still
+    /// landing on the aihubmix card under the bare display name.
+    #[test]
+    fn pi_aihubmix_argon_prices_the_gateway_card() {
+        let mut seen = HashSet::new();
+        let mut data = FileData::default();
+        let line = json!({"type": "message", "id": "a1", "timestamp": "2026-10-14T12:00:00Z",
+            "message": {"role": "assistant", "provider": "aihubmix", "model": "gemini-4-argon",
+                        "usage": {"input": 1000000.0, "output": 0.0, "cacheRead": 0.0,
+                                  "cacheWrite": 0.0, "totalTokens": 1000000.0}}})
+        .to_string();
+        pi_line(&mut seen, &line, &mut data);
+        let mix = take_tagged(&mut data, "aihubmix");
+        assert_eq!(mix.days.values().map(|v| v.0).sum::<f64>(), 4.0);
+        assert!(mix.days.keys().all(|(_, m)| m == "gemini-4-argon"));
+    }
+
+    /// Claude Code's Messages API can't serve Gemini, so a Gemini slug in
+    /// these logs always crossed a gateway (AIHubMix): price it on the
+    /// gateway card, leave it on the Claude card.
+    #[test]
+    fn claude_gemini_rows_price_on_the_gateway_card() {
+        let line = json!({"type": "assistant", "timestamp": "2026-10-14T12:00:00Z",
+            "requestId": "req_g1",
+            "message": {"id": "msg_g1", "model": "gemini-4-argon",
+                "usage": {"input_tokens": 1000000.0, "output_tokens": 0.0}}})
+        .to_string();
+        let data = claude_run(std::slice::from_ref(&line));
+        assert_eq!(data.days.values().map(|v| v.0).sum::<f64>(), 4.0);
+        assert!(data.days.keys().all(|(_, m)| m == "gemini-4-argon"));
     }
 
     /// Step Code (StepFun's pi fork) writes the same v3 format under
