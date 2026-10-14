@@ -408,22 +408,31 @@ const PROVIDER_LINKS: Record<string, { label: string; url: string }[]> = {
 // Brand palette for the Total Spend ring (Mac parity); unknown providers
 // get a stable hue derived from their id.
 const SPEND_COLORS: Record<string, string> = {
-  claude: "#de7356",
-  codex: "#3b82f6",
-  openrouter: "#6467f2",
-  antigravity: "#4285f4",
-  copilot: "#a855f7",
-  minimax: "#f5433c",
-  grok: "#10a37f",
-  opencode: "#b7b1b1",
-  devin: "#38bdf8",
-  droid: "#ef6f2e",
+  claude: "#de7356", // Anthropic terracotta
+  codex: "#3b82f6", // OpenAI royal blue
   cursor: "var(--spend-cursor)", // brand black, theme-flipped in CSS
-  moonshot: "#e0b354", // moon gold
-  kimi: "#ff8a4c", // Kimi Code peach
+  opencode: "#4ade80", // spring green
+  copilot: "#8b5cf6", // deep violet
+  grok: "#10a37f", // xAI emerald
+  devin: "#38bdf8", // Cognition sky cyan
+  droid: "#ec4899", // Factory hot pink
+  minimax: "#ef4444", // crimson red
+  openrouter: "#14b8a6", // turquoise teal
+  zai: "#06b6d4", // Z.ai cyan
+  antigravity: "#6366f1", // indigo
+  deepseek: "#2563eb", // cobalt blue
+  moonshot: "#eab308", // moon gold
+  elevenlabs: "#fb7185", // coral rose
+  ollama: "#cbd5e1", // cool silver
+  codebuff: "#34d399", // mint green
+  kilo: "#fbbf24", // marigold
+  aihubmix: "#a3e635", // hub lime
+  onenewapi: "#2dd4bf", // aqua
+  sub2api: "#84cc16", // olive lime
+  qwen: "#e879f9", // Qwen orchid magenta
   hermes: "#c2a878", // Nous tan
-  aihubmix: "#5eead4", // hub teal
-  qwen: "#8b5cf6", // Qwen violet
+  kimi: "#facc15", // Kimi Code sun yellow
+  stepfun: "#a855f7", // StepFun vivid purple
   __others__: "#8b8b94", // the folded small-spenders wedge
 };
 
