@@ -588,10 +588,10 @@ fn merge_data(target: &mut FileData, source: FileData) {
 
 /// Models under this per-window cost fold into "Other" unless another rule
 /// names them — big spenders are always listed by name.
-const MODEL_NAME_MIN_USD: f64 = 30.0;
+const MODEL_NAME_MIN_USD: f64 = 100.0;
 
 /// Ranked model list for one window: the top model is always named, and so
-/// is every model at $30+ or a 5% cost share — a $0 model instead survives
+/// is every model at $100+ or a 5% cost share — a $0 model instead survives
 /// on a 5% token share. Only the small tail folds into "Other".
 fn finalize_models(raw: HashMap<String, (f64, f64)>, window_cost: f64) -> Vec<ModelSpend> {
     let window_tokens: f64 = raw.values().map(|(_, t)| *t).sum();
@@ -5152,18 +5152,18 @@ mod tests {
         assert!(named.iter().all(|m| m.model != "Other"));
     }
 
-    /// Every model at $30+ is named even under a 5% share; only the
+    /// Every model at $100+ is named even under a 5% share; only the
     /// cheaper tail folds into "Other", while a $0 model can still be
     /// named on token share.
     #[test]
-    fn finalize_models_names_every_model_over_30_usd() {
+    fn finalize_models_names_every_model_over_100_usd() {
         let named = finalize_models(
             HashMap::from([
                 ("a".to_string(), (2_800.0, 1_000.0)),
                 ("b".to_string(), (174.0, 1_000.0)),
-                ("c".to_string(), (56.0, 1_000.0)),
-                ("d".to_string(), (31.0, 1_000.0)),
-                ("e".to_string(), (29.99, 1_000.0)),
+                ("c".to_string(), (101.0, 1_000.0)),
+                ("d".to_string(), (100.0, 1_000.0)),
+                ("e".to_string(), (99.99, 1_000.0)),
                 ("f".to_string(), (10.0, 1_000.0)),
                 // $0 but 750/6750 ≈ 11% of window tokens — stays named.
                 ("free-model".to_string(), (0.0, 750.0)),
@@ -5175,7 +5175,7 @@ mod tests {
             assert_eq!(named[i].model, *m);
         }
         assert_eq!(named[5].model, "Other");
-        assert!((named[5].cost - 39.99).abs() < 1e-9);
+        assert!((named[5].cost - 109.99).abs() < 1e-9);
         assert_eq!(named[5].tokens, 2_000.0);
     }
 
