@@ -586,9 +586,13 @@ fn merge_data(target: &mut FileData, source: FileData) {
     target.models.extend(source.models);
 }
 
-/// Ranked model list for one window: top models by cost, anything past the
-/// fifth name or under a 5% share folds into "Other" — a $0 model instead
-/// survives on a 5% token share.
+/// Models under this per-window cost fold into "Other" unless another rule
+/// names them — big spenders are always listed by name.
+const MODEL_NAME_MIN_USD: f64 = 30.0;
+
+/// Ranked model list for one window: the top model is always named, and so
+/// is every model at $30+ or a 5% cost share — a $0 model instead survives
+/// on a 5% token share. Only the small tail folds into "Other".
 fn finalize_models(raw: HashMap<String, (f64, f64)>, window_cost: f64) -> Vec<ModelSpend> {
     let window_tokens: f64 = raw.values().map(|(_, t)| *t).sum();
     let mut list: Vec<ModelSpend> = raw
@@ -602,8 +606,10 @@ fn finalize_models(raw: HashMap<String, (f64, f64)>, window_cost: f64) -> Vec<Mo
     for (i, m) in list.into_iter().enumerate() {
         let share = if window_cost > 0.0 { m.cost / window_cost } else { 0.0 };
         let token_share = if window_tokens > 0.0 { m.tokens / window_tokens } else { 0.0 };
-        if named.len() < 5
-            && (i == 0 || share >= 0.05 || (m.cost <= 0.0 && token_share >= 0.05))
+        if i == 0
+            || m.cost >= MODEL_NAME_MIN_USD
+            || share >= 0.05
+            || (m.cost <= 0.0 && token_share >= 0.05)
         {
             named.push(m);
         } else {
@@ -5110,7 +5116,7 @@ mod tests {
     }
 
     /// A $0 model survives the model breakdown on token share instead of
-    /// cost share — but the five-name cap still folds it into "Other".
+    /// cost share — under 5% of window tokens it folds into "Other".
     #[test]
     fn finalize_models_keeps_zero_cost_model_on_token_share() {
         let named = finalize_models(
@@ -5135,15 +5141,42 @@ mod tests {
         assert_eq!(named[1].model, "Other");
         assert_eq!(named[1].tokens, 1_000.0);
 
-        // Five paid names already fill the list — the cap wins.
+        // No name cap: five paid names plus a $0 model on a 5% token
+        // share all stay named — nothing is left for "Other".
         let mut raw: HashMap<String, (f64, f64)> = (0..5)
             .map(|i| (format!("paid-{i}"), (0.2, 100.0)))
             .collect();
         raw.insert("codex-auto-review".to_string(), (0.0, 50_000.0));
         let named = finalize_models(raw, 1.0);
         assert_eq!(named.len(), 6);
+        assert!(named.iter().all(|m| m.model != "Other"));
+    }
+
+    /// Every model at $30+ is named even under a 5% share; only the
+    /// cheaper tail folds into "Other", while a $0 model can still be
+    /// named on token share.
+    #[test]
+    fn finalize_models_names_every_model_over_30_usd() {
+        let named = finalize_models(
+            HashMap::from([
+                ("a".to_string(), (2_800.0, 1_000.0)),
+                ("b".to_string(), (174.0, 1_000.0)),
+                ("c".to_string(), (56.0, 1_000.0)),
+                ("d".to_string(), (31.0, 1_000.0)),
+                ("e".to_string(), (29.99, 1_000.0)),
+                ("f".to_string(), (10.0, 1_000.0)),
+                // $0 but 750/6750 ≈ 11% of window tokens — stays named.
+                ("free-model".to_string(), (0.0, 750.0)),
+            ]),
+            3_600.0,
+        );
+        assert_eq!(named.len(), 6);
+        for (i, m) in ["a", "b", "c", "d", "free-model"].iter().enumerate() {
+            assert_eq!(named[i].model, *m);
+        }
         assert_eq!(named[5].model, "Other");
-        assert_eq!(named[5].tokens, 50_000.0);
+        assert!((named[5].cost - 39.99).abs() < 1e-9);
+        assert_eq!(named[5].tokens, 2_000.0);
     }
 
     #[test]
