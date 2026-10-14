@@ -3108,6 +3108,7 @@ function showTrendTip(el: HTMLElement): void {
   const spend = lastSpend.find((s) => s.id === id);
   const i = Number(idxStr);
   if (!spend || Number.isNaN(i)) return;
+  delete tip.dataset.spendKey;
 
   const tokens = spend.trend[i] ?? 0;
   const total = spend.trend.reduce((a, b) => a + b, 0);
@@ -3136,6 +3137,10 @@ function showModelTip(row: HTMLElement): void {
   const spend = lastSpend.find((s) => s.id === id);
   const w = spend?.[key as SpendTab];
   if (!w) return;
+  // Moving between children of the open row must not rerender or reset
+  // the breakdown's scroll position.
+  if (!tip.hidden && tip.dataset.spendKey === row.dataset.spend) return;
+  tip.dataset.spendKey = row.dataset.spend ?? "";
 
   if (!w.models.length) {
     tip.innerHTML = `<p class="placeholder">${escapeHtml(t("spend.noModelData"))}</p>`;
@@ -3238,6 +3243,7 @@ function showCapacityTip(el: HTMLElement): void {
   const d = metric ? parseCapacityDetail(metric.detail) : null;
   const cur = d?.current;
   if (!cur) return;
+  delete tip.dataset.spendKey;
 
   const known = cur.tokens > 0 || cur.cost > 0;
   const hasEst = cur.est_tokens !== undefined && cur.est_cost !== undefined;
@@ -5914,7 +5920,7 @@ window.addEventListener("DOMContentLoaded", () => {
       const row = (e.target as HTMLElement).closest<HTMLElement>("[data-spend]");
       if (!row || tip.scrollHeight <= tip.clientHeight) return;
       e.preventDefault();
-      tip.scrollTop += e.deltaY * (e.deltaMode === 1 ? 16 : 1);
+      tip.scrollTop += e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? tip.clientHeight : 1);
     },
     { passive: false },
   );
