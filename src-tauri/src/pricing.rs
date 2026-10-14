@@ -164,28 +164,47 @@ pub fn v41_flash_legacy_card(model: &str, ts_ms: i64) -> Option<Price> {
 /// standard $4/$20/$0.20 card the bare arm carries.
 pub const ARGON_INTRO_END_MS: i64 = 1_796_112_000_000;
 
+/// The last `/` segment when it spells Gemini 4 Argon — exactly or as
+/// `gemini-4-argon-<suffix>` (effort tails, -fast, dated snapshots),
+/// case-insensitive. Route-agnostic: AIHubMix spellings still match.
+fn argon_segment(model: &str) -> Option<&str> {
+    let seg = model.rsplit('/').next().unwrap_or(model);
+    let lower = seg.to_lowercase();
+    (lower == "gemini-4-argon" || lower.starts_with("gemini-4-argon-")).then_some(seg)
+}
+
 /// Whether `model` is a Gemini 4 Argon slug on a non-AIHubMix route.
-/// Gateway prefixes peel to the last `/` segment; effort and dated
-/// tails (-high, -fast, -20261001) still count. The aihubmix/ spelling
-/// is excluded — that gateway bills its own flat card year-round.
+/// The aihubmix/ spelling is excluded — that gateway bills its own flat
+/// card year-round and must never take the dated Google intro rate.
 fn argon_slug(model: &str) -> bool {
-    let lower = model.to_lowercase();
-    if lower.starts_with("aihubmix/") {
+    if model.to_lowercase().starts_with("aihubmix/") {
         return false;
     }
-    let bare = lower.rsplit('/').next().unwrap_or(lower.as_str());
-    bare == "gemini-4-argon" || bare.starts_with("gemini-4-argon-")
+    argon_segment(model).is_some()
 }
 
 /// Google's intro card for Gemini 4 Argon on direct/bare routes before
 /// ARGON_INTRO_END_MS; cache write bills at intro input ($2) since no
 /// cache-write rate is published. None for other models, later events,
-/// or AIHubMix-scoped slugs.
-pub fn argon_intro_card(model: &str, ts_ms: i64) -> Option<Price> {
+/// or AIHubMix-scoped slugs. A `-fast` slug scales the card by the
+/// supplement's fast multiplier — same as resolve()'s tier pricing.
+fn argon_intro_card_in(s: &Store, model: &str, ts_ms: i64) -> Option<Price> {
     if ts_ms >= ARGON_INTRO_END_MS || !argon_slug(model) {
         return None;
     }
-    Some(Price::flat(2.0, 10.0, 0.10, 2.0))
+    let intro = Price::flat(2.0, 10.0, 0.10, 2.0);
+    let lower = model.to_lowercase();
+    let seg = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    if !seg.ends_with("-fast") {
+        return Some(intro);
+    }
+    // Same base resolve() uses: the full slug minus the -fast tail.
+    let base = lower.strip_suffix("-fast").unwrap_or(seg);
+    Some(scaled_price(&intro, fast_tier_mult(s, base)))
+}
+
+pub fn argon_intro_card(model: &str, ts_ms: i64) -> Option<Price> {
+    argon_intro_card_in(&store().lock().unwrap(), model, ts_ms)
 }
 
 /// Every effective-dated card: a resolved price that differs by date.
@@ -195,15 +214,12 @@ pub fn dated_card(model: &str, ts_ms: i64) -> Option<Price> {
     v41_flash_legacy_card(model, ts_ms).or_else(|| argon_intro_card(model, ts_ms))
 }
 
-/// The AIHubMix-scoped spelling of an Argon slug — routes whose Gemini
-/// traffic always crosses AIHubMix price under `aihubmix/gemini-4-argon`
-/// (its $4/$20 gateway card) instead of the dated Google intro rate.
-/// Bare slugs only: prefixed spellings already carry their route.
+/// The AIHubMix spelling of any Argon slug — callers have already
+/// established the route is AIHubMix, so `google/gemini-4-argon` or a
+/// bare slug normalise to the gateway spelling that prices the flat
+/// $4/$20 card (and skips the dated Google intro overlay).
 pub fn aihubmix_scoped(model: &str) -> Option<String> {
-    if model.contains('/') || !argon_slug(model) {
-        return None;
-    }
-    Some(format!("aihubmix/{model}"))
+    argon_segment(model).map(|seg| format!("aihubmix/{seg}"))
 }
 
 /// Milliseconds of [start_ms, end_ms) inside V4.1 Flash peak windows —
@@ -703,6 +719,26 @@ pub fn lookup(model: &str) -> Option<Price> {
     result
 }
 
+/// The supplement's fast-tier multiplier for `base` (a slug minus
+/// `-fast`), 2.0 when none is published. Multipliers are keyed by the
+/// plain model name, so effort/mode tokens peel off composed bases
+/// ("gpt-5.6-sol-max" → "gpt-5.6-sol") until a key answers.
+fn fast_tier_mult(s: &Store, base: &str) -> f64 {
+    let mut mkey = base;
+    loop {
+        if let Some(m) = s.fast_multipliers.get(mkey) {
+            return *m;
+        }
+        match ["-xhigh", "-light", "-low", "-medium", "-high", "-max", "-ultra"]
+            .iter()
+            .find_map(|suf| mkey.strip_suffix(suf))
+        {
+            Some(next) => mkey = next,
+            None => return 2.0,
+        }
+    }
+}
+
 /// Every rate in `p` multiplied by `m` — service tiers (fast, priority)
 /// bill at a multiple of the base model's whole rate card.
 fn scaled_price(p: &Price, m: f64) -> Price {
@@ -784,22 +820,7 @@ fn resolve(s: &Store, model: &str, depth: u8) -> Option<Price> {
         if matches!(stem, "swe-1.7" | "swe-1-7" | "swe-1.6" | "swe-1-6" | "penguin") {
             return resolve(s, base, depth + 1);
         }
-        // Multipliers are keyed by the plain model name; peel effort/mode
-        // tokens off composed bases ("gpt-5.6-sol-max" → "gpt-5.6-sol") so
-        // "sol-max-fast" gets sol's real multiplier, not the default.
-        let mut mkey = base;
-        let m = loop {
-            if let Some(m) = s.fast_multipliers.get(mkey) {
-                break *m;
-            }
-            match ["-xhigh", "-light", "-low", "-medium", "-high", "-max", "-ultra"]
-                .iter()
-                .find_map(|suf| mkey.strip_suffix(suf))
-            {
-                Some(next) => mkey = next,
-                None => break 2.0,
-            }
-        };
+        let m = fast_tier_mult(s, base);
         if let Some(p) = resolve(s, base, depth + 1) {
             return Some(scaled_price(&p, m));
         }
@@ -1498,7 +1519,7 @@ mod tests {
     }
 
     #[test]
-    fn aihubmix_scoped_only_rewrites_bare_argon() {
+    fn aihubmix_scoped_normalises_any_argon_spelling() {
         assert_eq!(
             super::aihubmix_scoped("gemini-4-argon").as_deref(),
             Some("aihubmix/gemini-4-argon")
@@ -1507,9 +1528,44 @@ mod tests {
             super::aihubmix_scoped("gemini-4-argon-high").as_deref(),
             Some("aihubmix/gemini-4-argon-high")
         );
-        assert!(super::aihubmix_scoped("google/gemini-4-argon").is_none());
+        // Prefixed spellings on a verified AIHubMix route still normalise
+        // to the gateway slug (segment case preserved).
+        assert_eq!(
+            super::aihubmix_scoped("google/gemini-4-argon").as_deref(),
+            Some("aihubmix/gemini-4-argon")
+        );
+        assert_eq!(
+            super::aihubmix_scoped("aihubmix/gemini-4-argon").as_deref(),
+            Some("aihubmix/gemini-4-argon")
+        );
         assert!(super::aihubmix_scoped("qwen3.8-max").is_none());
-        assert!(super::aihubmix_scoped("aihubmix/gemini-4-argon").is_none());
+        assert!(super::aihubmix_scoped("google/qwen3.8-max").is_none());
+    }
+
+    #[test]
+    fn argon_fast_intro_keeps_its_tier_multiplier() {
+        let ms = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis();
+        let mut store = super::Store::default();
+        // Default multiplier (2.0): the -fast slug's intro card scales.
+        let p = super::argon_intro_card_in(&store, "gemini-4-argon-fast", ms("2026-10-14T12:00:00Z"))
+            .expect("argon-fast should intro-price");
+        assert_eq!((p.input, p.output, p.cache_read, p.cache_write), (4.0, 20.0, 0.20, 4.0));
+        // A published 1.5 multiplier scales every rate.
+        store.fast_multipliers.insert("gemini-4-argon".into(), 1.5);
+        let p = super::argon_intro_card_in(&store, "gemini-4-argon-fast", ms("2026-10-14T12:00:00Z"))
+            .expect("argon-fast should intro-price");
+        for (got, want) in [
+            (p.input, 3.0),
+            (p.output, 15.0),
+            (p.cache_read, 0.15),
+            (p.cache_write, 3.0),
+        ] {
+            assert!((got - want).abs() < 1e-9, "{got} != {want}");
+        }
+        // Non-fast Argon is unscaled.
+        let p = super::argon_intro_card_in(&store, "gemini-4-argon", ms("2026-10-14T12:00:00Z"))
+            .expect("argon should intro-price");
+        assert_eq!((p.input, p.output, p.cache_read, p.cache_write), (2.0, 10.0, 0.10, 2.0));
     }
 
     #[test]

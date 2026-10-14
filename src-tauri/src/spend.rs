@@ -2114,11 +2114,16 @@ fn hermes() -> Vec<(&'static str, &'static str, FileData)> {
             add_event(data, ts, &ev.model, ev.cost_usd, tokens);
             continue;
         }
-        match pricing::lookup(&providers::hermes::price_lookup_slug(
+        // The route-scoped slug prices the whole row — dated cards and
+        // peak windows must see the same spelling lookup() did, or a
+        // gateway-scoped model (aihubmix/gemini-4-argon) would fall back
+        // to the bare slug's dated overlay.
+        let slug = providers::hermes::price_lookup_slug(
             &ev.model,
             &ev.billing_provider,
             &ev.billing_base_url,
-        )) {
+        );
+        match pricing::lookup(&slug) {
             Some(p) => {
                 let u = pricing::Usage {
                     input: ev.input,
@@ -2127,40 +2132,47 @@ fn hermes() -> Vec<(&'static str, &'static str, FileData)> {
                     cache_write_5m: ev.cache_write,
                     cache_write_1h: 0.0,
                 };
-                // Rows aggregate a whole session's requests — long-context
-                // stays base (same reasoning as the Cursor CSV scanner).
-                // A session can straddle the card changeover AND a peak
-                // boundary: price each duration share at its own card and
-                // window (legacy 1×, new off-peak 1×, new peak 2×). One
-                // event keeps the day attribution on last_seen.
-                let total_ms = (ev.ts_ms - ev.start_ms).max(0);
-                let peak_ms = pricing::peak_overlap_ms(ev.start_ms, ev.ts_ms);
-                let legacy_ms = pricing::V41_FLASH_CHANGEOVER_MS
-                    .min(ev.ts_ms)
-                    .saturating_sub(ev.start_ms)
-                    .clamp(0, total_ms);
-                let cost = if pricing::peak_windowed(&ev.model)
-                    && total_ms > 0
-                    && (peak_ms > 0 || legacy_ms > 0)
-                {
-                    let new_base = pricing::request_cost(&p, &u, false);
-                    let legacy_base = pricing::dated_card(&ev.model, ev.start_ms)
-                        .map(|lp| pricing::request_cost(&lp, &u, false))
-                        .unwrap_or(new_base);
-                    let off_ms = total_ms - legacy_ms - peak_ms;
-                    (legacy_base * legacy_ms as f64
-                        + new_base * off_ms as f64
-                        + new_base * 2.0 * peak_ms as f64)
-                        / total_ms as f64
-                } else {
-                    cost_for(&ev.model, &p, &u, f64::INFINITY, ts)
-                };
+                let cost = hermes_cost(&slug, &p, &u, ev.start_ms, ev.ts_ms);
                 add_event(data, ts, &ev.model, cost, tokens);
             }
             None => note_unpriced(data, ts, &ev.model, tokens),
         }
     }
     buckets
+}
+
+/// Price one Hermes session row on its route-scoped slug. Rows aggregate
+/// a whole session's requests — long-context stays base (same reasoning
+/// as the Cursor CSV scanner). A session can straddle the card changeover
+/// AND a peak boundary: price each duration share at its own card and
+/// window (legacy 1×, new off-peak 1×, new peak 2×).
+fn hermes_cost(
+    slug: &str,
+    p: &pricing::Price,
+    u: &pricing::Usage,
+    start_ms: i64,
+    ts_ms: i64,
+) -> f64 {
+    let total_ms = (ts_ms - start_ms).max(0);
+    let peak_ms = pricing::peak_overlap_ms(start_ms, ts_ms);
+    let legacy_ms = pricing::V41_FLASH_CHANGEOVER_MS
+        .min(ts_ms)
+        .saturating_sub(start_ms)
+        .clamp(0, total_ms);
+    if pricing::peak_windowed(slug) && total_ms > 0 && (peak_ms > 0 || legacy_ms > 0) {
+        let new_base = pricing::request_cost(p, u, false);
+        let legacy_base = pricing::dated_card(slug, start_ms)
+            .map(|lp| pricing::request_cost(&lp, u, false))
+            .unwrap_or(new_base);
+        let off_ms = total_ms - legacy_ms - peak_ms;
+        (legacy_base * legacy_ms as f64
+            + new_base * off_ms as f64
+            + new_base * 2.0 * peak_ms as f64)
+            / total_ms as f64
+    } else {
+        let ts = DateTime::from_timestamp_millis(ts_ms).unwrap_or_default();
+        cost_for(slug, p, u, f64::INFINITY, ts)
+    }
 }
 
 /// One `token_count` usage object, tolerating the older field spellings
@@ -6180,6 +6192,45 @@ mod tests {
         let data = claude_run(std::slice::from_ref(&line));
         assert_eq!(data.days.values().map(|v| v.0).sum::<f64>(), 4.0);
         assert!(data.days.keys().all(|(_, m)| m == "gemini-4-argon"));
+    }
+
+    /// A prefixed Argon spelling on a verified AIHubMix route still
+    /// bills the gateway card — the display key keeps what pi logged.
+    #[test]
+    fn pi_aihubmix_prefixed_argon_prices_the_gateway_card() {
+        let mut seen = HashSet::new();
+        let mut data = FileData::default();
+        let line = json!({"type": "message", "id": "a2", "timestamp": "2026-10-14T12:00:00Z",
+            "message": {"role": "assistant", "provider": "aihubmix", "model": "google/gemini-4-argon",
+                        "usage": {"input": 1000000.0, "output": 0.0, "cacheRead": 0.0,
+                                  "cacheWrite": 0.0, "totalTokens": 1000000.0}}})
+        .to_string();
+        pi_line(&mut seen, &line, &mut data);
+        let mix = take_tagged(&mut data, "aihubmix");
+        assert_eq!(mix.days.values().map(|v| v.0).sum::<f64>(), 4.0);
+        assert!(mix.days.keys().all(|(_, m)| m == "google/gemini-4-argon"));
+    }
+
+    /// Hermes rows price on the route-scoped slug end to end — the dated
+    /// intro overlay sees aihubmix/ and stays off, while a bare slug gets
+    /// Google's $2/$10 promo inside the window.
+    #[test]
+    fn hermes_argon_prices_on_the_route_scoped_slug() {
+        let card = pricing::Price::flat(4.0, 20.0, 0.20, 4.0);
+        let u = pricing::Usage {
+            input: 1_000_000.0,
+            output: 0.0,
+            cache_read: 0.0,
+            cache_write_5m: 0.0,
+            cache_write_1h: 0.0,
+        };
+        let ms = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis();
+        let t = ms("2026-10-14T12:00:00Z");
+        assert_eq!(
+            hermes_cost("aihubmix/gemini-4-argon", &card, &u, t, t),
+            4.0
+        );
+        assert_eq!(hermes_cost("gemini-4-argon", &card, &u, t, t), 2.0);
     }
 
     /// Step Code (StepFun's pi fork) writes the same v3 format under
