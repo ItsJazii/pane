@@ -197,6 +197,11 @@ pub fn price_lookup_slug(model: &str, provider: &str, base_url: &str) -> String 
         if matches!(sku, "deepseek-v4.1-flash" | "deepseek-v4-1-flash") {
             return "aihubmix/deepseek-v4.1-flash".into();
         }
+        // Gemini 4 Argon bills AIHubMix's flat $4/$20 card, not Google's
+        // dated intro rate the bare slug would take.
+        if let Some(scoped) = crate::pricing::aihubmix_scoped(bare) {
+            return scoped;
+        }
         return match bare {
             "glm-5.3" => "coding-glm-5.3".into(),
             "hy4-preview" => "aihubmix/hy4-preview".into(),
@@ -490,6 +495,20 @@ mod tests {
         assert_eq!(
             price_lookup_slug("deepseek-v4.1-flash", "deepseek", ""),
             "deepseek-v4.1-flash"
+        );
+        // Gemini 4 Argon on an AIHubMix route prices the gateway card;
+        // every other route keeps the bare slug (Google's dated intro).
+        assert_eq!(
+            price_lookup_slug("gemini-4-argon", "aihubmix", ""),
+            "aihubmix/gemini-4-argon"
+        );
+        assert_eq!(
+            price_lookup_slug("gemini-4-argon-high", "custom", "https://aihubmix.com/v1"),
+            "aihubmix/gemini-4-argon-high"
+        );
+        assert_eq!(
+            price_lookup_slug("gemini-4-argon", "google", ""),
+            "gemini-4-argon"
         );
     }
 

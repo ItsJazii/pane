@@ -158,6 +158,83 @@ pub fn v41_flash_legacy_card(model: &str, ts_ms: i64) -> Option<Price> {
     Some(Price::flat(0.142, 0.284, 0.0284, 0.142))
 }
 
+/// 2026-12-01T08:00Z — end of Nov 30 Pacific. Google dates the Gemini 4
+/// Argon intro promo in PT (ai.google.dev/gemini-api/docs/latest-model):
+/// $2 in / $10 out / $0.10 cache read through 2026-11-30, then the
+/// standard $4/$20/$0.20 card the bare arm carries.
+pub const ARGON_INTRO_END_MS: i64 = 1_796_112_000_000;
+
+/// The last `/` segment when it spells Gemini 4 Argon — exactly or as
+/// `gemini-4-argon-<suffix>` (effort tails, -fast, dated snapshots),
+/// case-insensitive. Route-agnostic: AIHubMix spellings still match.
+fn argon_segment(model: &str) -> Option<&str> {
+    let seg = model.rsplit('/').next().unwrap_or(model);
+    let lower = seg.to_lowercase();
+    (lower == "gemini-4-argon" || lower.starts_with("gemini-4-argon-")).then_some(seg)
+}
+
+/// Whether `model` is a Gemini 4 Argon slug on a non-AIHubMix route.
+/// The aihubmix/ spelling is excluded — that gateway bills its own flat
+/// card year-round and must never take the dated Google intro rate.
+fn argon_slug(model: &str) -> bool {
+    if model.to_lowercase().starts_with("aihubmix/") {
+        return false;
+    }
+    argon_segment(model).is_some()
+}
+
+/// Google's intro card for Gemini 4 Argon on direct/bare routes before
+/// ARGON_INTRO_END_MS; cache write bills at intro input ($2) since no
+/// cache-write rate is published. None for other models, later events,
+/// or AIHubMix-scoped slugs. A `-fast` slug scales the card by the
+/// supplement's fast multiplier — same as resolve()'s tier pricing.
+fn argon_intro_card_in(s: &Store, model: &str, ts_ms: i64) -> Option<Price> {
+    if ts_ms >= ARGON_INTRO_END_MS || !argon_slug(model) {
+        return None;
+    }
+    let intro = Price::flat(2.0, 10.0, 0.10, 2.0);
+    let lower = model.to_lowercase();
+    let seg = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    if !seg.ends_with("-fast") {
+        return Some(intro);
+    }
+    // Same base resolve() uses: the full slug minus the -fast tail.
+    let base = lower.strip_suffix("-fast").unwrap_or(seg);
+    Some(scaled_price(&intro, fast_tier_mult(s, base)))
+}
+
+pub fn argon_intro_card(model: &str, ts_ms: i64) -> Option<Price> {
+    argon_intro_card_in(&store().lock().unwrap(), model, ts_ms)
+}
+
+/// Devin's own Argon card — the model picker lists $1 in / $5 out /
+/// $0.05 cached input through Nov 30, 2026 (promo ends at
+/// ARGON_INTRO_END_MS, same PT cutoff as Google's). Cache write is
+/// unpublished, so writes bill at intro input. Afterwards Devin follows
+/// Google's list price, so callers fall through to the resolved card.
+/// Only the Devin spend scanner consults this.
+pub fn devin_argon_card(model: &str, ts_ms: i64) -> Option<Price> {
+    if ts_ms >= ARGON_INTRO_END_MS || argon_segment(model).is_none() {
+        return None;
+    }
+    Some(Price::flat(1.0, 5.0, 0.05, 1.0))
+}
+
+/// Every effective-dated card: a resolved price that differs by date.
+/// cost_for and the Hermes session splitter consult this before the
+/// resolved card — a bare result is the card in force at ts_ms.
+pub fn dated_card(model: &str, ts_ms: i64) -> Option<Price> {
+    v41_flash_legacy_card(model, ts_ms).or_else(|| argon_intro_card(model, ts_ms))
+}
+
+/// The AIHubMix spelling of any Argon slug — callers have already
+/// established the route is AIHubMix, so `google/gemini-4-argon` or a
+/// bare slug normalise to the gateway spelling that prices the flat
+/// $4/$20 card (and skips the dated Google intro overlay).
+pub fn aihubmix_scoped(model: &str) -> Option<String> {
+    argon_segment(model).map(|seg| format!("aihubmix/{seg}"))
+}
+
 /// Milliseconds of [start_ms, end_ms) inside V4.1 Flash peak windows —
 /// Hermes rows aggregate whole sessions, so a boundary-crossing session
 /// splits its cost by this share. The changeover clamps the interval:
@@ -253,7 +330,7 @@ pub fn generation() -> u64 {
 /// fingerprinted below — an app update that reprices the same files would
 /// otherwise leave history at the old dollars until upstream happens to
 /// rewrite a catalog.
-const CORRECTIONS_REV: u32 = 16; // 16: StepFun builtins (step-5-preview, audio, CN-only models)
+const CORRECTIONS_REV: u32 = 18; // 18: Gemini 4 Argon cards (Google intro, AIHubMix scope, Devin promo)
 
 /// The corrections revision on its own — the spend cache treats a changed
 /// revision as a hard discard (the *code* that prices changed), while a
@@ -655,6 +732,26 @@ pub fn lookup(model: &str) -> Option<Price> {
     result
 }
 
+/// The supplement's fast-tier multiplier for `base` (a slug minus
+/// `-fast`), 2.0 when none is published. Multipliers are keyed by the
+/// plain model name, so effort/mode tokens peel off composed bases
+/// ("gpt-5.6-sol-max" → "gpt-5.6-sol") until a key answers.
+fn fast_tier_mult(s: &Store, base: &str) -> f64 {
+    let mut mkey = base;
+    loop {
+        if let Some(m) = s.fast_multipliers.get(mkey) {
+            return *m;
+        }
+        match ["-xhigh", "-light", "-low", "-medium", "-high", "-max", "-ultra"]
+            .iter()
+            .find_map(|suf| mkey.strip_suffix(suf))
+        {
+            Some(next) => mkey = next,
+            None => return 2.0,
+        }
+    }
+}
+
 /// Every rate in `p` multiplied by `m` — service tiers (fast, priority)
 /// bill at a multiple of the base model's whole rate card.
 fn scaled_price(p: &Price, m: f64) -> Price {
@@ -736,22 +833,7 @@ fn resolve(s: &Store, model: &str, depth: u8) -> Option<Price> {
         if matches!(stem, "swe-1.7" | "swe-1-7" | "swe-1.6" | "swe-1-6" | "penguin") {
             return resolve(s, base, depth + 1);
         }
-        // Multipliers are keyed by the plain model name; peel effort/mode
-        // tokens off composed bases ("gpt-5.6-sol-max" → "gpt-5.6-sol") so
-        // "sol-max-fast" gets sol's real multiplier, not the default.
-        let mut mkey = base;
-        let m = loop {
-            if let Some(m) = s.fast_multipliers.get(mkey) {
-                break *m;
-            }
-            match ["-xhigh", "-light", "-low", "-medium", "-high", "-max", "-ultra"]
-                .iter()
-                .find_map(|suf| mkey.strip_suffix(suf))
-            {
-                Some(next) => mkey = next,
-                None => break 2.0,
-            }
-        };
+        let m = fast_tier_mult(s, base);
         if let Some(p) = resolve(s, base, depth + 1) {
             return Some(scaled_price(&p, m));
         }
@@ -1020,6 +1102,16 @@ fn builtin_price(canonical: &str) -> Option<Price> {
         // (-high, -xhigh) peel in resolve(); preview is its own SKU.
         "gemini-3.8-flash" | "gemini-3-8-flash" | "gemini-3.8-flash-preview"
         | "cursor-gemini-3.8-flash" => Some(Price::flat(0.75, 3.75, 0.075, 0.75)),
+        // Gemini 4 Argon — AIHubMix billing config (aihubmix.com,
+        // model_ratio 2 / completion_ratio 5 / cache_ratio 0.05, single
+        // tier): $4.00 in / $20.00 out / $0.20 cache read, matching
+        // Google's standard post-intro list ($4/$20, cached input 95%
+        // off). Google's direct intro promo is $2/$10/$0.10 through
+        // 2026-11-30 PT — dated_card()/argon_intro_card() overlay it for
+        // bare routes, while AIHubMix traffic is scoped to this spelling
+        // (aihubmix_scoped) so the gateway always bills $4/$20. Cache
+        // write is unpublished, so writes bill at input.
+        "gemini-4-argon" => Some(Price::flat(4.0, 20.0, 0.20, 4.0)),
         // Cognition SWE / Penguin — LiteLLM Cognition cost map
         // (docs.litellm.ai/docs/providers/cognition) and Devin's
         // in-app rate card: $0.50 / $2.50 / $0.20 cache read. Cache
@@ -1395,6 +1487,109 @@ mod tests {
                 "{slug}"
             );
         }
+
+        for slug in [
+            "gemini-4-argon",
+            "aihubmix/gemini-4-argon",
+            "google/gemini-4-argon",
+            "gemini-4-argon-high",
+        ] {
+            let p = super::resolve(&store, slug, 0)
+                .unwrap_or_else(|| panic!("{slug} did not price"));
+            assert_eq!(
+                (p.input, p.output, p.cache_read, p.cache_write),
+                (4.0, 20.0, 0.20, 4.0),
+                "{slug}"
+            );
+            assert!(p.input_200k.is_none(), "{slug}");
+        }
+    }
+
+    #[test]
+    fn argon_intro_card_is_dated_and_route_scoped() {
+        let ms = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis();
+        for slug in ["gemini-4-argon", "google/gemini-4-argon", "gemini-4-argon-high"] {
+            let p = super::argon_intro_card(slug, ms("2026-10-14T12:00:00Z"))
+                .unwrap_or_else(|| panic!("{slug} should intro-price"));
+            assert_eq!(
+                (p.input, p.output, p.cache_read, p.cache_write),
+                (2.0, 10.0, 0.10, 2.0),
+                "{slug}"
+            );
+        }
+        // AIHubMix routes keep the gateway card even during the promo.
+        assert!(super::argon_intro_card("aihubmix/gemini-4-argon", ms("2026-10-14T12:00:00Z")).is_none());
+        // The promo ends 2026-11-30 PT = 2026-12-01T08:00Z.
+        assert!(super::argon_intro_card("gemini-4-argon", ms("2026-12-01T07:59:59Z")).is_some());
+        assert!(super::argon_intro_card("gemini-4-argon", ms("2026-12-01T08:00:00Z")).is_none());
+        assert!(super::argon_intro_card("gemini-4-argon", ms("2026-12-05T00:00:00Z")).is_none());
+        // Other models never take the intro card.
+        assert!(super::argon_intro_card("gemini-4-flash", ms("2026-10-14T12:00:00Z")).is_none());
+        assert!(super::argon_intro_card("gpt-6.1-sol", ms("2026-10-14T12:00:00Z")).is_none());
+        // dated_card exposes the same override to the spend paths.
+        assert!(super::dated_card("gemini-4-argon", ms("2026-10-14T12:00:00Z")).is_some());
+        assert!(super::dated_card("gemini-4-argon", ms("2026-12-02T00:00:00Z")).is_none());
+    }
+
+    #[test]
+    fn devin_argon_card_is_dated_and_model_scoped() {
+        let ms = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis();
+        let p = super::devin_argon_card("gemini-4-argon", ms("2026-10-14T12:00:00Z")).unwrap();
+        assert_eq!((p.input, p.output, p.cache_read, p.cache_write), (1.0, 5.0, 0.05, 1.0));
+        // Promo ends 2026-11-30 PT = 2026-12-01T08:00Z.
+        assert!(super::devin_argon_card("gemini-4-argon", ms("2026-12-01T07:59:59Z")).is_some());
+        assert!(super::devin_argon_card("gemini-4-argon", ms("2026-12-01T08:00:00Z")).is_none());
+        assert!(super::devin_argon_card("gpt-6.1-sol", ms("2026-10-14T12:00:00Z")).is_none());
+    }
+
+    #[test]
+    fn aihubmix_scoped_normalises_any_argon_spelling() {
+        assert_eq!(
+            super::aihubmix_scoped("gemini-4-argon").as_deref(),
+            Some("aihubmix/gemini-4-argon")
+        );
+        assert_eq!(
+            super::aihubmix_scoped("gemini-4-argon-high").as_deref(),
+            Some("aihubmix/gemini-4-argon-high")
+        );
+        // Prefixed spellings on a verified AIHubMix route still normalise
+        // to the gateway slug (segment case preserved).
+        assert_eq!(
+            super::aihubmix_scoped("google/gemini-4-argon").as_deref(),
+            Some("aihubmix/gemini-4-argon")
+        );
+        assert_eq!(
+            super::aihubmix_scoped("aihubmix/gemini-4-argon").as_deref(),
+            Some("aihubmix/gemini-4-argon")
+        );
+        assert!(super::aihubmix_scoped("qwen3.8-max").is_none());
+        assert!(super::aihubmix_scoped("google/qwen3.8-max").is_none());
+    }
+
+    #[test]
+    fn argon_fast_intro_keeps_its_tier_multiplier() {
+        let ms = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis();
+        let mut store = super::Store::default();
+        // Default multiplier (2.0): the -fast slug's intro card scales.
+        let p = super::argon_intro_card_in(&store, "gemini-4-argon-fast", ms("2026-10-14T12:00:00Z"))
+            .expect("argon-fast should intro-price");
+        assert_eq!((p.input, p.output, p.cache_read, p.cache_write), (4.0, 20.0, 0.20, 4.0));
+        // A published 1.5 multiplier scales every rate.
+        store.fast_multipliers.insert("gemini-4-argon".into(), 1.5);
+        let p = super::argon_intro_card_in(&store, "gemini-4-argon-fast", ms("2026-10-14T12:00:00Z"))
+            .expect("argon-fast should intro-price");
+        for (got, want) in [
+            (p.input, 3.0),
+            (p.output, 15.0),
+            (p.cache_read, 0.15),
+            (p.cache_write, 3.0),
+        ] {
+            assert!((got - want).abs() < 1e-9, "{got} != {want}");
+        }
+        // Non-fast Argon is unscaled.
+        let p = super::argon_intro_card_in(&store, "gemini-4-argon", ms("2026-10-14T12:00:00Z"))
+            .expect("argon should intro-price");
+        assert_eq!((p.input, p.output, p.cache_read, p.cache_write), (2.0, 10.0, 0.10, 2.0));
     }
 
     #[test]
