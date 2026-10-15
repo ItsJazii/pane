@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.60 — 2026-10-15
+
+### Added
+- **Gemini 4 Argon pricing (#266).** Argon usage now has a price
+  instead of showing as unpriced. Pane picks the rate by where the
+  request went: through AIHubMix it is AIHubMix's flat $4 / $20 per
+  million tokens ($0.20 cached); in the Devin CLI it is Devin's own
+  launch price of $1 / $5 ($0.05 cached) until Dec 1, 2026; everywhere
+  else it is Google's launch price of $2 / $10 ($0.10 cached) through
+  Nov 30, 2026, then $4 / $20. Saved spend is recalculated once after
+  updating.
+
+### Changed
+- **A distinct color for every provider in Total Spend (#267).**
+  Providers that used to share near-identical colors (Claude, Kimi Code
+  and Droid in orange; Codex and Antigravity in blue; OpenCode and
+  Others in grey) now each have their own.
+- **Fuller per-model spend breakdown (#268).** Hovering Today /
+  Yesterday / Last 30 Days now names every model that cost $100 or more
+  (as well as any model with at least a 5% share), instead of at most
+  five. Only the cheaper models fold into "Other". When the list is
+  taller than the window, scroll the mouse wheel over the spend row to
+  see the rest.
+
 ## 0.4.59 — 2026-10-09
 
 ### Added
