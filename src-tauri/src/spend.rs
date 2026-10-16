@@ -5926,9 +5926,8 @@ mod tests {
             agy_candidates(Some("gemini-4-argon-trial"), None),
             vec!["gemini-4-argon"]
         );
-        let (_p, display) = agy_priced("gemini-4-argon").expect("argon prices");
+        let (card, display) = agy_priced("gemini-4-argon").expect("argon prices");
         assert_eq!(display, "gemini-4-argon");
-        let card = pricing::Price::flat(4.0, 20.0, 0.20, 4.0);
         let u = pricing::Usage {
             input: 1_000_000.0,
             output: 1_000_000.0,
@@ -5939,14 +5938,15 @@ mod tests {
         let ts = |s: &str| {
             DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
         };
-        // Google's $2/$10 intro through 2026-12-01T08:00Z, then $4/$20.
+        // Google's $2/$10 intro through 2026-12-01T08:00Z, then the
+        // resolved catalog card (whichever source answers on this machine).
         assert_eq!(
             cost_for("gemini-4-argon", &card, &u, 200_000.0, ts("2026-10-16T12:00:00Z")),
             12.0
         );
         assert_eq!(
             cost_for("gemini-4-argon", &card, &u, 200_000.0, ts("2026-12-02T00:00:00Z")),
-            24.0
+            pricing::request_cost_at(&card, &u, 200_000.0)
         );
     }
 
