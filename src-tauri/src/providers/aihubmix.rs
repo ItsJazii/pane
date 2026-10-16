@@ -4,8 +4,8 @@
 //! and month-to-date usage and meters one against the other.
 //!
 //! Key source: pasted in Settings, `AIHUBMIX_API_KEY`, or — since AihubMix
-//! is typically used *through* OpenCode — the `aihubmix` entry OpenCode
-//! stores in its own auth.json (same reuse the OpenRouter provider does).
+//! is typically used *through* OpenCode — the `aihubmix` credential entry
+//! OpenCode stores locally (same reuse the OpenRouter provider does).
 
 use super::{http, stored_api_key, Metric, Snapshot};
 use serde_json::Value;

@@ -142,21 +142,27 @@ Ground rules that apply to every provider:
 
 ## OpenCode (Go plan)
 
-- **Reads:** the Go key from
-  `%USERPROFILE%\.local\share\opencode\auth.json`;
-  extra profiles from `OPENCODE_HOME`, `~\.local\share\opencode-*`,
-  and the same scan roots as Claude/Codex (one card per login).
-  `%USERPROFILE%\.local\share\opencode\opencode.db` (read live,
-  read-only) for spend — message costs your own OpenCode history already
-  contains. Swapping `auth.json` drops the old account's cached
-  snapshot (fingerprint of the current key, never the key itself).
+- **Reads:** the Go key from OpenCode's local credential store: on
+  OpenCode 2 that is the `credential` table in
+  `%USERPROFILE%\.local\share\opencode\opencode*.db` (read-only), which
+  becomes authoritative once OpenCode 2 imports logins — `auth.json`
+  is only used on OpenCode 1 installs and can never revive an account
+  you logged out of in v2. Extra profiles come from `OPENCODE_HOME`,
+  `~\.local\share\opencode-*`, and the same scan roots as Claude/Codex
+  (one card per login). Every `opencode*.db` channel database (stable,
+  `-next`, …) is read live and read-only for spend — message costs your
+  own OpenCode history already contains; OpenCode 2's `session_message`
+  table is unioned with OpenCode 1's `message` table and the rows v2
+  copied over are counted once. Swapping the credential drops the old
+  account's cached snapshot (fingerprint of the current key, never the
+  key itself).
 - **Calls:** `opencode.ai/zen/go/v1/usage` (the official account-wide
   usage API, shipped in anomalyco/opencode#16513) — Session / Weekly /
   Monthly percentages and resets counted on OpenCode's servers, the
   same numbers the Zen dashboard shows, so usage from your other
   devices and shared-subscription participants is included. If the API
   is unreachable, meters fall back to the old local computation from
-  `opencode.db` (rolling 5-hour session, UTC Monday-start week, monthly
+  `opencode*.db` (rolling 5-hour session, UTC Monday-start week, monthly
   cycle anchored to your first-ever Go usage) — the fallback counts
   this PC only. Dollar spend rows are always computed locally.
 
@@ -470,8 +476,9 @@ Ground rules that apply to every provider:
 ## AihubMix
 
 - **Reads:** pasted key (Settings), `AIHUBMIX_API_KEY`, or the `aihubmix`
-  key OpenCode stores in its own `auth.json` (AihubMix is typically used
-  through OpenCode as an OpenAI-compatible gateway).
+  key OpenCode stores locally — the `credential` table on OpenCode 2,
+  `auth.json` before it (AihubMix is typically used through OpenCode as
+  an OpenAI-compatible gateway).
 - **Calls:** `aihubmix.com/v1/dashboard/billing/subscription` (spending
   limit) and `/usage` (month-to-date usage).
 - **Shows:** usage metered against your account's spending limit, plan.
