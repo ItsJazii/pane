@@ -1,6 +1,6 @@
 use super::{Metric, Snapshot};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 const ID: &str = "opencode";
@@ -785,79 +785,250 @@ pub fn collect_cost_events_in(dir: &Path) -> Vec<(f64, f64, f64, String, String)
 /// rows across tables and DBs, v2 winning.
 type CostRow = (f64, f64, f64, String, String, String, bool);
 
-/// One channel database's spend rows, served from a db/WAL stamp cache.
-/// Only a COMPLETE read is cached: a partial read (one table failed)
-/// serves the last-good entry when present and otherwise returns its
-/// partial rows uncached so the next refresh retries; a failed read keeps
-/// last-good or empty, never cached.
-fn collect_db_cost_events(db_path: &Path) -> Vec<CostRow> {
-    use std::sync::Mutex;
-    use std::time::SystemTime;
-    type Stamp = (SystemTime, u64);
-    static CACHE: Mutex<Vec<(PathBuf, Stamp, Stamp, Vec<CostRow>)>> = Mutex::new(Vec::new());
+/// (mtime as epoch ms, length) — a change means new writes landed.
+type Stamp = (u64, u64);
 
+fn file_stamp(path: &Path) -> Stamp {
+    std::fs::metadata(path)
+        .map(|m| {
+            let ms = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            (ms, m.len())
+        })
+        .unwrap_or((0, 0))
+}
+
+/// Per-table incremental state for one channel database.
+#[derive(Default)]
+struct TableCache {
+    /// id → (time_created, spend row or None when scanned-but-not-spend —
+    /// in-progress, zero-cost, non-assistant). Keeping the id either way
+    /// lets the row-count check catch deletions.
+    rows: HashMap<String, (i64, Option<CostRow>)>,
+    /// High-water mark on `time_updated`: only rows touched at-or-after
+    /// it are re-read. Verified on a live OpenCode 2 database — a row's
+    /// time_updated bumps to its completion instant, so an assistant row
+    /// that gains cost later always resurfaces.
+    watermark: i64,
+}
+
+/// One channel database's ledger cache: per-table incremental state
+/// plus the db/WAL stamps it was last fully-refreshed against.
+#[derive(Default)]
+struct DbCache {
+    db_stamp: Stamp,
+    wal_stamp: Stamp,
+    v2: TableCache,
+    v1: TableCache,
+}
+
+impl DbCache {
+    fn table_mut(&mut self, v2: bool) -> &mut TableCache {
+        if v2 { &mut self.v2 } else { &mut self.v1 }
+    }
+}
+
+/// A cached DB's spend rows inside the current 31-day window — cached
+/// rows can sit for days, so rows that aged out are dropped on serve.
+fn cached_spend_rows(c: &DbCache) -> Vec<CostRow> {
+    let cutoff_ms = crate::spend::spend_cutoff_ms(chrono::Local::now()) as f64;
+    [&c.v2, &c.v1]
+        .into_iter()
+        .flat_map(|t| t.rows.values())
+        .filter(|(tc, _)| {
+            let tc = *tc as f64;
+            if tc > 1_000_000_000_000.0 { tc >= cutoff_ms } else { tc >= cutoff_ms / 1000.0 }
+        })
+        .filter_map(|(_, r)| r.clone())
+        .collect()
+}
+
+/// Rows touched at-or-after `watermark` in one ledger table, upserted
+/// into `map` by id. `data` is projected through
+/// `json_remove('$.content')` in SQL — v2 assistant rows embed whole
+/// tool transcripts (over a gigabyte a month on this machine), and the
+/// fields Pane needs never live in `content`. Malformed blobs come back
+/// NULL via `json_valid` and are skipped without aborting neighbours.
+/// Returns (raw rows scanned, max time_updated seen).
+fn scan_incremental(
+    conn: &rusqlite::Connection,
+    table: &str,
+    v2: bool,
+    cutoff: i64,
+    watermark: i64,
+    map: &mut HashMap<String, (i64, Option<CostRow>)>,
+) -> Result<(u64, i64), String> {
+    let sql = if v2 {
+        format!(
+            "SELECT id, time_created, time_updated, type,
+                    CASE WHEN json_valid(data) THEN json_remove(data, '$.content') END
+             FROM {table}
+             WHERE time_updated >= {watermark} AND time_created >= {cutoff}
+               AND type IN ('assistant','compaction')
+             ORDER BY rowid DESC LIMIT {}",
+            super::MAX_LEDGER_ROWS
+        )
+    } else {
+        format!(
+            "SELECT id, time_created, time_updated,
+                    CASE WHEN json_valid(data) THEN json_remove(data, '$.content') END
+             FROM {table}
+             WHERE time_updated >= {watermark} AND time_created >= {cutoff}
+             ORDER BY rowid DESC LIMIT {}",
+            super::MAX_LEDGER_ROWS
+        )
+    };
+    let data_col = if v2 { 4 } else { 3 };
+    let mut stmt = conn.prepare(&sql).map_err(|e| format!("query ledger: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0).unwrap_or_default(),
+                row.get::<_, i64>(1).unwrap_or(0),
+                row.get::<_, i64>(2).unwrap_or(0),
+                row.get::<_, String>(3).unwrap_or_default(),
+                row.get::<_, Option<String>>(data_col).unwrap_or(None),
+            ))
+        })
+        .map_err(|e| format!("read ledger: {e}"))?;
+    let mut scanned = 0u64;
+    let mut max_tu = watermark;
+    for row in rows {
+        scanned += 1;
+        let Ok((id, tc, tu, ty, data)) = row else { continue };
+        max_tu = max_tu.max(tu);
+        let shape = if v2 {
+            match ty.as_str() {
+                "assistant" => RowShape::V2Assistant,
+                "compaction" => RowShape::V2Compaction,
+                // The SQL type filter already ran; anything else simply
+                // is not spend.
+                _ => continue,
+            }
+        } else {
+            RowShape::V1
+        };
+        if id.is_empty() {
+            continue;
+        }
+        let spend = data
+            .as_deref()
+            .and_then(|d| ledger_row(shape, tc, d))
+            .and_then(|m| {
+                (m.cost > 0.0 || m.tokens > 0.0)
+                    .then_some((m.ts, m.cost, m.tokens, m.model, m.provider, id.clone(), v2))
+            });
+        map.insert(id, (tc, spend));
+    }
+    Ok((scanned, max_tu))
+}
+
+/// One channel database's spend rows, served from a per-table
+/// incremental cache. A stamp hit serves cached rows window-filtered;
+/// otherwise each present table is refreshed by `time_updated` watermark
+/// (first read scans everything in-window), with a row-count check that
+/// catches deletions and backdated inserts — a mismatch rescans the
+/// table from scratch, as does a shrunk db file. A failed table keeps
+/// its previous map and watermark and the DB stamps stay old, so the
+/// next refresh retries it; every-present-table-failed with an empty
+/// cache is just an empty result, retried next refresh.
+static SPEND_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<PathBuf, DbCache>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+fn collect_db_cost_events(db_path: &Path) -> Vec<CostRow> {
     if !db_path.exists() {
         return Vec::new();
     }
-    let db_stamp = std::fs::metadata(db_path)
-        .map(|m| (m.modified().unwrap_or(SystemTime::UNIX_EPOCH), m.len()))
-        .unwrap_or((SystemTime::UNIX_EPOCH, 0));
-    let wal = db_path.with_extension("db-wal");
-    let wal_stamp = std::fs::metadata(&wal)
-        .map(|m| (m.modified().unwrap_or(SystemTime::UNIX_EPOCH), m.len()))
-        .unwrap_or((SystemTime::UNIX_EPOCH, 0));
+    let db_stamp = file_stamp(db_path);
+    let wal_stamp = file_stamp(&db_path.with_extension("db-wal"));
 
-    if let Ok(cache) = CACHE.lock() {
-        if let Some((_, d, w, rows)) = cache.iter().find(|(p, _, _, _)| p == db_path) {
-            if *d == db_stamp && *w == wal_stamp {
-                // Stamp can sit still for days. Drop rows that have
-                // aged out of the 31-day window without a db re-read.
-                return rows_in_spend_window(rows);
+    if let Ok(cache) = SPEND_CACHE.lock() {
+        if let Some(c) = cache.get(db_path) {
+            if c.db_stamp == db_stamp && c.wal_stamp == wal_stamp {
+                return cached_spend_rows(c);
             }
         }
     }
 
-    let rows = match read_recent_cost_events(db_path) {
-        Ok((rows, true)) => rows,
-        Ok((partial, false)) => {
-            if let Ok(cache) = CACHE.lock() {
-                if let Some((_, _, _, rows)) = cache.iter().find(|(p, _, _, _)| p == db_path) {
-                    return rows_in_spend_window(rows);
-                }
-            }
-            return partial;
-        }
-        Err(_) => {
-            if let Ok(cache) = CACHE.lock() {
-                if let Some((_, _, _, rows)) = cache.iter().find(|(p, _, _, _)| p == db_path) {
-                    return rows_in_spend_window(rows);
-                }
-            }
-            return Vec::new();
-        }
+    let Ok(conn) = super::open_readonly_sqlite(db_path) else {
+        return SPEND_CACHE
+            .lock()
+            .ok()
+            .and_then(|c| c.get(db_path).map(cached_spend_rows))
+            .unwrap_or_default();
     };
-    if let Ok(mut cache) = CACHE.lock() {
-        if let Some(slot) = cache.iter_mut().find(|(p, _, _, _)| p == db_path) {
-            *slot = (db_path.to_path_buf(), db_stamp, wal_stamp, rows.clone());
-        } else {
-            cache.push((db_path.to_path_buf(), db_stamp, wal_stamp, rows.clone()));
+
+    let cutoff_ms = crate::spend::spend_cutoff_ms(chrono::Local::now());
+    let mut cache = SPEND_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    // A shrunk db means the file was replaced or vacuumed — cached ids
+    // may not exist anymore; rescan from scratch. WAL length is not a
+    // signal: checkpoints shrink it legitimately.
+    if cache
+        .get(db_path)
+        .is_some_and(|c| db_stamp.1 < c.db_stamp.1)
+    {
+        cache.remove(db_path);
+    }
+    let entry = cache
+        .entry(db_path.to_path_buf())
+        .or_insert_with(|| DbCache { db_stamp, wal_stamp, ..Default::default() });
+
+    let mut complete = true;
+    for (table, v2) in [("session_message", true), ("message", false)] {
+        if !table_exists(&conn, table) {
+            continue;
+        }
+        let cutoff = table_cutoff(&conn, table, cutoff_ms);
+        let type_filter = if v2 { " AND type IN ('assistant','compaction')" } else { "" };
+        let db_count: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE time_created >= {cutoff}{type_filter}"),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(-1);
+        let tcache = entry.table_mut(v2);
+        let cached_count = tcache
+            .rows
+            .values()
+            .filter(|(tc, _)| *tc >= cutoff)
+            .count() as i64;
+        // Any count mismatch — deleted rows, or inserts the watermark
+        // can't see — forces a full table rescan. A failed count (-1)
+        // leaves the last-good map alone.
+        if db_count >= 0 && db_count != cached_count {
+            tcache.rows.clear();
+            tcache.watermark = 0;
+        }
+        match scan_incremental(&conn, table, v2, cutoff, tcache.watermark, &mut tcache.rows) {
+            Ok((scanned, max_tu)) => {
+                if scanned >= super::MAX_LEDGER_ROWS {
+                    eprintln!(
+                        "[pane] opencode: {table} table hit the {}-row read cap — keeping newest rows, oldest usage is dropped",
+                        super::MAX_LEDGER_ROWS
+                    );
+                }
+                tcache.watermark = max_tu;
+            }
+            Err(e) => {
+                eprintln!("[pane] opencode: {table} read failed ({e})");
+                complete = false;
+            }
         }
     }
-    rows
-}
-
-fn rows_in_spend_window(rows: &[CostRow]) -> Vec<CostRow> {
-    let cutoff_ms = crate::spend::spend_cutoff_ms(chrono::Local::now()) as f64;
-    rows.iter()
-        .filter(|(ts, _, _, _, _, _, _)| {
-            if *ts > 1_000_000_000_000.0 {
-                *ts >= cutoff_ms
-            } else {
-                *ts >= cutoff_ms / 1000.0
-            }
-        })
-        .cloned()
-        .collect()
+    // Stamps only advance on a complete refresh — a table that failed
+    // keeps its old map AND leaves the entry unstamped so the next
+    // refresh retries it.
+    if complete {
+        entry.db_stamp = db_stamp;
+        entry.wal_stamp = wal_stamp;
+    }
+    cached_spend_rows(entry)
 }
 
 /// Which ledger shape a row came from. v1 `message` rows carry flat
@@ -974,62 +1145,6 @@ fn table_cutoff(conn: &rusqlite::Connection, table: &str, cutoff_ms: i64) -> i64
     if max_ts > 1_000_000_000_000 { cutoff_ms } else { cutoff_ms / 1000 }
 }
 
-/// Spend only needs ~31 days. One channel database's newest rows across
-/// both ledger tables; the caller dedupes ids across tables and DBs.
-/// Newest-first via rowid (clustered) — `ORDER BY time_created DESC`
-/// would filesort the 31-day match before LIMIT on a multi-hundred-MB
-/// ledger. Returns (rows, complete): Err only when every present table
-/// failed — a v2-only DB with a broken session_message is unreadable,
-/// not empty; one good table contributes its rows flagged incomplete.
-fn read_recent_cost_events(db: &Path) -> Result<(Vec<CostRow>, bool), String> {
-    let conn = super::open_readonly_sqlite(db)?;
-    let cutoff_ms = crate::spend::spend_cutoff_ms(chrono::Local::now());
-    let mut out: Vec<CostRow> = Vec::new();
-    let mut present = 0u32;
-    let mut ok = 0u32;
-    let mut last_err = None;
-    for (table, v2) in [("session_message", true), ("message", false)] {
-        if !table_exists(&conn, table) {
-            continue;
-        }
-        present += 1;
-        let cutoff = table_cutoff(&conn, table, cutoff_ms);
-        let sql = if v2 {
-            format!(
-                "SELECT id, time_created, type, data FROM session_message
-                 WHERE time_created >= {cutoff} AND type IN ('assistant','compaction')
-                 ORDER BY rowid DESC LIMIT {}",
-                super::MAX_LEDGER_ROWS
-            )
-        } else {
-            format!(
-                "SELECT id, time_created, data FROM message
-                 WHERE time_created >= {cutoff}
-                 ORDER BY rowid DESC LIMIT {}",
-                super::MAX_LEDGER_ROWS
-            )
-        };
-        let mut parsed = Vec::new();
-        match scan_ledger_rows(&conn, &sql, v2, &mut parsed) {
-            Ok(_) => {
-                ok += 1;
-                out.extend(parsed.into_iter().filter_map(|(id, m)| {
-                    (m.cost > 0.0 || m.tokens > 0.0)
-                        .then_some((m.ts, m.cost, m.tokens, m.model, m.provider, id, v2))
-                }));
-            }
-            Err(e) => {
-                eprintln!("[pane] opencode: {table} read failed ({e})");
-                last_err = Some(e);
-            }
-        }
-    }
-    if present > 0 && ok == 0 {
-        return Err(last_err.unwrap_or_else(|| "ledger unreadable".into()));
-    }
-    Ok((out, ok == present))
-}
-
 pub struct MessageRow {
     pub ts: f64,
     pub cost: f64,
@@ -1100,14 +1215,18 @@ fn read_db_messages(db: &Path) -> Result<(Vec<(String, MessageRow, bool)>, bool)
         present += 1;
         let sql = if v2 {
             format!(
-                "SELECT id, time_created, type, data FROM {table}
+                "SELECT id, time_created, type,
+                        CASE WHEN json_valid(data) THEN json_remove(data, '$.content') END
+                 FROM {table}
                  WHERE type IN ('assistant','compaction')
                  ORDER BY time_created DESC LIMIT {}",
                 super::MAX_LEDGER_ROWS
             )
         } else {
             format!(
-                "SELECT id, time_created, data FROM {table}
+                "SELECT id, time_created,
+                        CASE WHEN json_valid(data) THEN json_remove(data, '$.content') END
+                 FROM {table}
                  ORDER BY time_created DESC LIMIT {}",
                 super::MAX_LEDGER_ROWS
             )
@@ -1161,13 +1280,17 @@ fn earliest_go_anchor(dir: &Path, key: &str) -> Option<f64> {
             }
             let sql = if v2 {
                 format!(
-                    "SELECT id, time_created, type, data FROM {table}
+                    "SELECT id, time_created, type,
+                            CASE WHEN json_valid(data) THEN json_remove(data, '$.content') END
+                     FROM {table}
                      WHERE type IN ('assistant','compaction')
                      ORDER BY time_created ASC LIMIT {MAX_ANCHOR_PROBE_ROWS}"
                 )
             } else {
                 format!(
-                    "SELECT id, time_created, data FROM {table}
+                    "SELECT id, time_created,
+                            CASE WHEN json_valid(data) THEN json_remove(data, '$.content') END
+                     FROM {table}
                      ORDER BY time_created ASC LIMIT {MAX_ANCHOR_PROBE_ROWS}"
                 )
             };
@@ -1197,14 +1320,19 @@ mod tests {
 
     #[test]
     fn stamp_cache_drops_rows_past_the_cutoff() {
-        let now = chrono::Utc::now().timestamp_millis() as f64;
-        let old = now - 40.0 * 86_400_000.0;
-        let fresh = now - 2.0 * 86_400_000.0;
-        let rows = vec![
-            (old, 1.0, 10.0, "m".into(), "p".into(), "id-a".into(), true),
-            (fresh, 2.0, 20.0, "m".into(), "p".into(), "id-b".into(), true),
-        ];
-        let kept = rows_in_spend_window(&rows);
+        let now = chrono::Utc::now().timestamp_millis();
+        let old = now - 40 * 86_400_000;
+        let fresh = now - 2 * 86_400_000;
+        let mut c = DbCache::default();
+        c.v2.rows.insert(
+            "a".into(),
+            (old, Some((old as f64, 1.0, 10.0, "m".into(), "p".into(), "a".into(), true))),
+        );
+        c.v2.rows.insert(
+            "b".into(),
+            (fresh, Some((fresh as f64, 2.0, 20.0, "m".into(), "p".into(), "b".into(), true))),
+        );
+        let kept = cached_spend_rows(&c);
         assert_eq!(kept.len(), 1);
         assert!((kept[0].1 - 2.0).abs() < 1e-9);
     }
@@ -1752,8 +1880,7 @@ mod tests {
             // Err, not a silent zero.
             conn.execute_batch("CREATE TABLE session_message (id TEXT);").unwrap();
         }
-        assert!(read_recent_cost_events(&db).is_err());
-        assert!(collect_cost_events_in(&dir).is_empty());
+        assert!(collect_db_cost_events(&db).is_empty());
         // Fix the table — the next read returns rows (nothing cached a
         // fake empty result).
         {
@@ -1810,7 +1937,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_read_without_last_good_returns_partial_uncached() {
+    fn partial_read_surfaces_good_rows_then_serves_them_on_failure() {
         let dir = tmp_dir("partial-nocache");
         let db = dir.join("opencode.db");
         let now = chrono::Utc::now().timestamp_millis();
@@ -1823,14 +1950,16 @@ mod tests {
         let rows = collect_cost_events_in(&dir);
         assert_eq!(rows.len(), 1, "the surviving table's rows still surface");
         assert!((rows[0].1 - 2.0).abs() < 1e-9);
-        // Now break session_message too: every table fails → Err. The
-        // earlier partial was uncached, so there is nothing to fall
-        // back to — an empty result, not the partial replayed.
+        // Now break session_message too: every table fails — but the
+        // failed reads leave the maps untouched, so the already-scanned
+        // v2 row is still served (and the entry stays unstamped, so the
+        // next refresh retries both tables).
         {
             let conn = rusqlite::Connection::open(&db).unwrap();
             conn.execute_batch("DROP TABLE session_message; CREATE TABLE session_message (id TEXT);").unwrap();
         }
-        assert!(collect_cost_events_in(&dir).is_empty());
+        let rows = collect_cost_events_in(&dir);
+        assert_eq!(rows.len(), 1, "the cached map outlives a failed read");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2014,4 +2143,139 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn incremental_reads_only_fetch_touched_rows() {
+        let dir = tmp_dir("incr");
+        let db = dir.join("opencode.db");
+        let now = chrono::Utc::now().timestamp_millis();
+        {
+            let conn = make_db(&db, LEDGER_SCHEMA);
+            add_session_message(&conn, "done", "assistant", now - 1000, &v2_blob("opencode-go", "k3", 1.0, now - 1000));
+            // In-progress row: parses, but no cost/tokens — cached as None.
+            add_session_message(
+                &conn,
+                "wip",
+                "assistant",
+                now - 500,
+                &serde_json::json!({"model": {"id": "m", "providerID": "opencode-go"},
+                                    "time": {"created": now - 500}})
+                .to_string(),
+            );
+        }
+        assert_eq!(collect_cost_events_in(&dir).len(), 1);
+
+        // Nothing touched since the watermark → the incremental query
+        // fetches zero rows (not a whole-table rescan).
+        {
+            let conn = crate::providers::open_readonly_sqlite(&db).unwrap();
+            let cutoff = table_cutoff(
+                &conn,
+                "session_message",
+                crate::spend::spend_cutoff_ms(chrono::Local::now()),
+            );
+            let mut map = HashMap::new();
+            let (scanned, _) =
+                scan_incremental(&conn, "session_message", true, cutoff, now - 499, &mut map)
+                    .unwrap();
+            assert_eq!(scanned, 0, "untouched rows are not refetched");
+        }
+
+        // wip finishes — OpenCode bumps time_updated on completion, so
+        // the watermark catches it and its cost replaces the None slot.
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute(
+                "UPDATE session_message SET data=?1, time_updated=?2 WHERE id='wip'",
+                rusqlite::params![v2_blob("opencode-go", "k3", 3.0, now), now + 1000],
+            )
+            .unwrap();
+        }
+        let rows = collect_cost_events_in(&dir);
+        assert_eq!(rows.len(), 2, "the finished row replaces its placeholder");
+        let total: f64 = rows.iter().map(|r| r.1).sum();
+        assert!((total - 4.0).abs() < 1e-9);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn deleted_row_forces_a_table_rescan() {
+        let dir = tmp_dir("incr-del");
+        let db = dir.join("opencode.db");
+        let now = chrono::Utc::now().timestamp_millis();
+        {
+            let conn = make_db(&db, LEDGER_SCHEMA);
+            add_session_message(&conn, "a", "assistant", now, &v2_blob("opencode-go", "k3", 1.0, now));
+            add_session_message(&conn, "b", "assistant", now, &v2_blob("opencode-go", "k3", 2.0, now));
+        }
+        assert_eq!(collect_cost_events_in(&dir).len(), 2);
+        {
+            // Deleting touches no time_updated — only the count check
+            // can see it, and it must force a rescan.
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute("DELETE FROM session_message WHERE id='b'", []).unwrap();
+        }
+        let rows = collect_cost_events_in(&dir);
+        assert_eq!(rows.len(), 1, "count mismatch rescans the table");
+        assert!((rows[0].1 - 1.0).abs() < 1e-9);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn incremental_result_matches_a_fresh_scan() {
+        let dir = tmp_dir("incr-eq");
+        let db = dir.join("opencode.db");
+        let now = chrono::Utc::now().timestamp_millis();
+        {
+            let conn = make_db(&db, LEDGER_SCHEMA);
+            add_session_message(&conn, "v2a", "assistant", now - 100, &v2_blob("opencode-go", "k3", 2.0, now - 100));
+            add_session_message(&conn, "v2b", "assistant", now - 200, &v2_blob("openrouter", "m", 0.5, now - 200));
+            add_message(&conn, "v1a", now - 300, &v1_blob("opencode-go", "k3", 1.5, now - 300));
+            add_message(&conn, "v1u", now - 400, r#"{"role":"user"}"#);
+        }
+        let first = collect_cost_events_in(&dir);
+        // Touch the db without changing rows — stamps change, the
+        // watermark path runs, and the result must be identical.
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch("PRAGMA user_version=7;").unwrap();
+        }
+        let second = collect_cost_events_in(&dir);
+        let key = |v: Vec<(f64, f64, f64, String, String)>| -> Vec<(i64, i64, String)> {
+            let mut k: Vec<_> = v
+                .into_iter()
+                .map(|r| ((r.1 * 1e9) as i64, (r.2 * 1e9) as i64, r.4))
+                .collect();
+            k.sort();
+            k
+        };
+        assert_eq!(first.len(), 3);
+        assert_eq!(key(first), key(second));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn v2_content_is_stripped_and_malformed_rows_skip() {
+        let dir = tmp_dir("content");
+        let db = dir.join("opencode.db");
+        let now = chrono::Utc::now().timestamp_millis();
+        {
+            let conn = make_db(&db, LEDGER_SCHEMA);
+            // The transcript lives in `content` — SQL strips it before
+            // the blob reaches the parser; the row still counts.
+            let mut b: Value =
+                serde_json::from_str(&v2_blob("opencode-go", "k3", 2.0, now)).unwrap();
+            b["content"] =
+                serde_json::json!([{"type": "tool_result", "output": "x".repeat(200_000)}]);
+            add_session_message(&conn, "big", "assistant", now, &b.to_string());
+            // Malformed JSON → json_valid=0 → NULL → skipped, neighbours
+            // still count.
+            add_session_message(&conn, "bad", "assistant", now, "{not-json");
+            add_session_message(&conn, "ok", "assistant", now, &v2_blob("opencode-go", "k3", 1.0, now));
+        }
+        let rows = collect_cost_events_in(&dir);
+        assert_eq!(rows.len(), 2);
+        let total: f64 = rows.iter().map(|r| r.1).sum();
+        assert!((total - 3.0).abs() < 1e-9);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
