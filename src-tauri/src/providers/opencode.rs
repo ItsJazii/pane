@@ -189,14 +189,11 @@ fn auth_json_key(dir: &Path, entry: &str) -> CredResult {
 
 /// Channel databases that belong to THIS Go login — the local-window
 /// fallback must only meter the account the card shows (channels can
-/// hold different Go accounts; spend deliberately stays combined).
-/// Ledger rows carry no per-row owner, so only a channel PROVABLY signed
-/// into another Go account is excluded: `Found(Some)` must equal the
-/// key, while a logged-out (`Found(None)`) or unknown channel is assumed
-/// to be the same user rather than dropping its history. A pre-import
-/// DB inherits the dir's auth.json identity and is excluded only when
-/// that file holds a DIFFERENT key; an unreadable DB is excluded — its
-/// rows are unreadable anyway.
+/// hold different Go accounts; spend deliberately stays combined). An
+/// imported `credential` table is per-channel truth: `Found(Some)` must
+/// equal the key and `Found(None)` is a logout in that channel; a
+/// pre-import DB inherits the dir's auth.json key; an unreadable DB is
+/// excluded.
 fn go_dbs(dir: &Path, key: &str) -> Vec<PathBuf> {
     let file_key = match auth_json_key(dir, "opencode-go") {
         CredResult::Key(k) => Some(k),
@@ -206,8 +203,8 @@ fn go_dbs(dir: &Path, key: &str) -> Vec<PathBuf> {
         .into_iter()
         .filter(|db| match db_entry_key(db, "opencode-go") {
             Ok(DbCred::Found(Some(k))) => k == key,
-            Ok(DbCred::Found(None)) => true,
-            Ok(DbCred::NotImported) => file_key.as_deref().is_none_or(|fk| fk == key),
+            Ok(DbCred::Found(None)) => false,
+            Ok(DbCred::NotImported) => file_key.as_deref() == Some(key),
             Err(_) => false,
         })
         .collect()
@@ -1866,7 +1863,6 @@ mod tests {
         }
         {
             // A third channel where Go was logged out (imported, no row).
-            // Rows carry no owner — assumed to be the same user, counted.
             let conn = full_db(&dir.join("opencode-zeta.db"), None);
             add_session_message(&conn, "z", "assistant", now, &v2_blob("opencode-go", "k3", 11.0, now));
         }
@@ -1886,29 +1882,10 @@ mod tests {
                 .map(|m| m.cost)
                 .sum()
         };
-        // key-a: opencode.db + logged-out zeta + the auth.json-matching
-        // old channel. The key-b channel is the only exclusion.
-        assert!((go_cost(&dir, "test-key-a") - (5.0 + 13.0 + 11.0)).abs() < 1e-9);
-        // key-b: opencode-next.db + logged-out zeta; auth.json's key-a
-        // makes the pre-import channel provably foreign.
-        assert!((go_cost(&dir, "test-key-b") - (7.0 + 11.0)).abs() < 1e-9);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn pre_import_db_on_a_different_auth_key_is_excluded() {
-        // A NotImported channel inherits auth.json — when that file holds
-        // ANOTHER Go login the channel is provably foreign.
-        let dir = tmp_dir("go-foreign");
-        write_auth(&dir, r#"{"opencode-go":{"type":"api","key":"test-key-c"}}"#);
-        {
-            let conn = make_db(&dir.join("opencode.db"), LEDGER_SCHEMA);
-            conn.execute_batch(CRED_SCHEMA).unwrap(); // no migration row
-            let now = chrono::Utc::now().timestamp_millis();
-            add_session_message(&conn, "f", "assistant", now, &v2_blob("opencode-go", "k3", 17.0, now));
-        }
-        assert!(go_dbs(&dir, "test-key-a").is_empty());
-        assert_eq!(go_dbs(&dir, "test-key-c").len(), 1);
+        // key-a: opencode.db + the auth.json-matching old channel.
+        assert!((go_cost(&dir, "test-key-a") - (5.0 + 13.0)).abs() < 1e-9);
+        // key-b: only opencode-next.db — logged-out and foreign channels out.
+        assert!((go_cost(&dir, "test-key-b") - 7.0).abs() < 1e-9);
         std::fs::remove_dir_all(&dir).ok();
     }
 
