@@ -524,30 +524,32 @@ fn parse_quota_buckets_all(docs: &[Value]) -> Vec<Metric> {
     let mut rows: Vec<(usize, Metric)> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
     for doc in docs {
-    let groups = doc.get("groups").and_then(Value::as_array).cloned().unwrap_or_default();
-    for group in groups {
-        let buckets = group.get("buckets").and_then(Value::as_array).cloned().unwrap_or_default();
-        for bucket in buckets {
-            let Some(id) = bucket.get("bucketId").and_then(Value::as_str) else { continue };
-            if seen.iter().any(|s| s == id) {
-                continue;
+        let groups = doc.get("groups").and_then(Value::as_array).cloned().unwrap_or_default();
+        for group in groups {
+            let buckets =
+                group.get("buckets").and_then(Value::as_array).cloned().unwrap_or_default();
+            for bucket in buckets {
+                let Some(id) = bucket.get("bucketId").and_then(Value::as_str) else { continue };
+                if seen.iter().any(|s| s == id) {
+                    continue;
+                }
+                let Some((label, period_ms, order)) = bucket_label(id) else { continue };
+                let Some(remaining) = bucket.get("remainingFraction").and_then(Value::as_f64)
+                else {
+                    continue;
+                };
+                if !remaining.is_finite() {
+                    continue;
+                }
+                seen.push(id.to_string());
+                let used = ((1.0 - remaining) * 100.0).clamp(0.0, 100.0);
+                let resets_at = parse_iso_ms(bucket.get("resetTime"));
+                rows.push((
+                    order,
+                    Metric::progress(label, used, None).with_reset(resets_at, Some(period_ms)),
+                ));
             }
-            let Some((label, period_ms, order)) = bucket_label(id) else { continue };
-            let Some(remaining) = bucket.get("remainingFraction").and_then(Value::as_f64) else {
-                continue;
-            };
-            if !remaining.is_finite() {
-                continue;
-            }
-            seen.push(id.to_string());
-            let used = ((1.0 - remaining) * 100.0).clamp(0.0, 100.0);
-            let resets_at = parse_iso_ms(bucket.get("resetTime"));
-            rows.push((
-                order,
-                Metric::progress(label, used, None).with_reset(resets_at, Some(period_ms)),
-            ));
         }
-    }
     }
     rows.sort_by_key(|(order, _)| *order);
     rows.into_iter().map(|(_, m)| m).collect()
@@ -1561,6 +1563,7 @@ mod tests {
         let labels: Vec<&str> = metrics.iter().map(|m| m.label.as_str()).collect();
         assert_eq!(labels, ["Session", "Weekly", "Claude", "Claude Weekly"]);
         let used: Vec<f64> = metrics.iter().filter_map(|m| m.used_percent).collect();
+        assert_eq!(used.len(), 4);
         for (u, want) in used.iter().zip([30.0, 40.0, 10.0, 20.0]) {
             // Claude rows came from the first doc (daily), not prod's 0.1s.
             assert!((u - want).abs() < 1e-9);
@@ -1594,6 +1597,7 @@ mod tests {
         let labels: Vec<&str> = merged.iter().map(|m| m.label.as_str()).collect();
         assert_eq!(labels, ["Session", "Weekly", "Claude", "Claude Weekly"]);
         let used: Vec<f64> = merged.iter().filter_map(|m| m.used_percent).collect();
+        assert_eq!(used.len(), 4);
         for (u, want) in used.iter().zip([30.0, 40.0, 10.0, 20.0]) {
             assert!((u - want).abs() < 1e-9);
         }
