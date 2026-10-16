@@ -1486,6 +1486,29 @@ fn card_is_disabled(id: &str, disabled: &[String]) -> bool {
     is_managed_key_card(id) && disabled.iter().any(|d| d == &family_of(id))
 }
 
+/// Backoff for a failed card fetch: a vendor-stated `retry_after_s=`
+/// wins over the fixed backoff (capped at an hour) — except a zero,
+/// which vendors emit when the number is unknown and which must not
+/// clear the bench. Returns the bench duration and the honored
+/// Retry-After (ms) for the note text.
+fn bench_for_error(err: &str) -> (i64, Option<i64>) {
+    let rate_limited = err.contains("429");
+    let retry_after_ms = err
+        .split("retry_after_s=")
+        .nth(1)
+        .and_then(|rest| {
+            rest.chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse::<i64>()
+                .ok()
+        })
+        .filter(|s| *s > 0)
+        .map(|s| (s * 1000).min(3_600_000));
+    let bench_ms = retry_after_ms.unwrap_or(if rate_limited { 300_000 } else { 60_000 });
+    (bench_ms, retry_after_ms)
+}
+
 // Owned id/name so dynamically discovered account cards (claude@<hash>)
 // can ride the same guard as the static providers under a 'static spawn.
 async fn guarded<F>(id: String, name: String, fut: F) -> providers::Snapshot
@@ -1525,21 +1548,7 @@ where
     if snap.status == "error" {
         let err = snap.error.clone().unwrap_or_default();
         let rate_limited = err.contains("429");
-        // A vendor-stated Retry-After wins over our fixed backoff — bench
-        // for exactly that long (capped at an hour) instead of knocking on
-        // a door the server said stays shut.
-        let retry_after_ms = err
-            .split("retry_after_s=")
-            .nth(1)
-            .and_then(|rest| {
-                rest.chars()
-                    .take_while(|c| c.is_ascii_digit())
-                    .collect::<String>()
-                    .parse::<i64>()
-                    .ok()
-            })
-            .map(|s| (s * 1000).min(3_600_000));
-        let bench_ms = retry_after_ms.unwrap_or(if rate_limited { 300_000 } else { 60_000 });
+        let (bench_ms, retry_after_ms) = bench_for_error(&err);
         map.insert(
             id.to_string(),
             FailState {
@@ -3621,7 +3630,7 @@ mod tests {
         hydrate_fetch_time, restore_last_success_after_error,
         retain_current_key_card_results, strip_entry_application_order, strip_icon_ids_to_clear,
         strip_is_active, strip_reset_ids, telemetry_starred_id, is_stable_metric_label,
-        updater_endpoint_strings, CachedSnap, FailState,
+        bench_for_error, updater_endpoint_strings, CachedSnap, FailState,
         KeyCardMutationGuard, StripEntry, SNAPSHOT_CACHE_MS, SNAPSHOT_CACHE_NEEDS_FLUSH,
         STALE_GRACE_MS, TEST_PERSIST_LAST_OK_FAIL,
     };
@@ -3638,6 +3647,32 @@ mod tests {
             values: vec![value],
             tooltip: id.into(),
         }
+    }
+
+    #[test]
+    fn bench_for_error_honors_only_a_positive_retry_after() {
+        // A zero Retry-After means "unknown", not "retry now" — the card
+        // still takes the fixed 429 bench.
+        assert_eq!(
+            bench_for_error("usage endpoint: HTTP 429 (retry_after_s=0)"),
+            (300_000, None)
+        );
+        assert_eq!(
+            bench_for_error("usage endpoint: HTTP 429 (retry_after_s=120)"),
+            (120_000, Some(120_000))
+        );
+        assert_eq!(
+            bench_for_error("usage endpoint: HTTP 429 (retry_after_s=99999)"),
+            (3_600_000, Some(3_600_000))
+        );
+        assert_eq!(
+            bench_for_error("usage endpoint: HTTP 500 Internal Server Error"),
+            (60_000, None)
+        );
+        assert_eq!(
+            bench_for_error("usage endpoint: HTTP 429 Too Many Requests"),
+            (300_000, None)
+        );
     }
 
     #[test]
