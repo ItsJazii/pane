@@ -1,8 +1,13 @@
 //! Antigravity (Google's AI IDE). Mirrors the Mac app's three-step strategy:
 //! 1. Talk to the IDE's local language server (found by scanning processes
-//!    for `language_server*` / `agy` started with Antigravity flags).
+//!    for `language_server*` / `agy` started with Antigravity flags). When
+//!    the answer is missing any of the four quota windows it is topped up
+//!    from Cloud Code.
 //! 2. Fall back to Google's Cloud Code API with the OAuth token Antigravity
-//!    keeps in Windows Credential Manager (`gemini:antigravity`).
+//!    keeps in Windows Credential Manager (`gemini:antigravity`). Prod
+//!    `cloudcode-pa` is tried first, then `daily-cloudcode-pa`; each host's
+//!    buckets merge into one list (first host wins per bucketId) because
+//!    the hosts disagree on which quota groups they serve.
 //! 3. Report honestly when neither works.
 
 use std::time::Duration;
@@ -16,8 +21,10 @@ const NAME: &str = "Antigravity";
 
 const LS_SERVICE: &str = "exa.language_server_pb.LanguageServerService";
 const CLOUD_BASES: [&str; 2] = [
-    "https://daily-cloudcode-pa.googleapis.com",
+    // Prod first: daily now answers retrieveUserQuotaSummary with only
+    // the Claude/GPT pool, while prod still returns both groups.
     "https://cloudcode-pa.googleapis.com",
+    "https://daily-cloudcode-pa.googleapis.com",
 ];
 // Installed-app OAuth client — intentionally public, same values the IDE ships.
 const GOOGLE_CLIENT_ID: &str =
@@ -243,6 +250,20 @@ async fn try_language_server(server: &LanguageServer) -> Option<Snapshot> {
                 let plan = ls_call(&scheme, port, &server.csrf_token, "GetUserStatus")
                     .await
                     .and_then(|d| extract_plan(&d));
+                if has_all_windows(&metrics) {
+                    return Some(Snapshot::ok(ID, NAME, plan, metrics));
+                }
+                // The LS can answer with a subset of the windows too —
+                // fill the missing rows from Cloud Code when the OAuth
+                // token works.
+                if let CloudResult::Ok(cloud) = try_cloud().await {
+                    return Some(Snapshot::ok(
+                        ID,
+                        NAME,
+                        plan.or(cloud.plan),
+                        merge_metrics(metrics, cloud.metrics),
+                    ));
+                }
                 return Some(Snapshot::ok(ID, NAME, plan, metrics));
             }
         }
@@ -356,43 +377,77 @@ async fn refresh_google_token(refresh_token: &str) -> Refresh {
     }
 }
 
+/// One POST against one Cloud Code base.
+/// Ok(Some(doc)) = 2xx + parseable; Ok(None) = anything non-auth;
+/// Err(true) = 401/403 (the token itself is bad — stop trying bases).
+async fn cloud_post(base: &str, access_token: &str, path: &str) -> Result<Option<Value>, bool> {
+    let resp = super::http()
+        .post(format!("{base}{path}"))
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("User-Agent", "antigravity")
+        .json(&json!({}))
+        .send()
+        .await;
+    match resp {
+        Ok(r) if r.status().is_success() => Ok(r.json::<Value>().await.ok()),
+        Ok(r) if matches!(r.status().as_u16(), 401 | 403) => Err(true),
+        _ => Ok(None),
+    }
+}
+
 async fn cloud_call(access_token: &str, path: &str) -> Result<Option<Value>, bool> {
-    // Ok(Some(doc)) = 2xx; Ok(None) = non-auth failure; Err(true) = 401/403.
+    // Ok(Some(doc)) = 2xx; Ok(None) = non-auth failure; Err(true) = every
+    // host 401/403'd. One host denying the token doesn't end the search —
+    // another base may still accept it.
+    let mut denied = false;
     for base in CLOUD_BASES {
-        let resp = super::http()
-            .post(format!("{base}{path}"))
-            .header("Accept", "application/json")
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {access_token}"))
-            .header("User-Agent", "antigravity")
-            .json(&json!({}))
-            .send()
-            .await;
-        match resp {
-            Ok(r) if r.status().is_success() => return Ok(r.json::<Value>().await.ok()),
-            Ok(r) if matches!(r.status().as_u16(), 401 | 403) => return Err(true),
+        match cloud_post(base, access_token, path).await {
+            Ok(Some(doc)) => return Ok(Some(doc)),
+            Err(true) => denied = true,
             _ => continue,
         }
     }
-    Ok(None)
+    if denied { Err(true) } else { Ok(None) }
+}
+
+/// retrieveUserQuotaSummary on every base until all four quota windows are
+/// covered — daily currently omits the Gemini group, prod serves both.
+/// A host's 401/403 doesn't end the search; it only fails the call when
+/// no host produced a usable doc at all.
+async fn cloud_quota_docs(access_token: &str) -> Result<Vec<Value>, bool> {
+    let mut docs = Vec::new();
+    let mut denied = false;
+    for base in CLOUD_BASES {
+        match cloud_post(base, access_token, "/v1internal:retrieveUserQuotaSummary").await {
+            Ok(Some(doc)) => {
+                docs.push(doc);
+                if has_all_windows(&parse_quota_buckets_all(&docs)) {
+                    break;
+                }
+            }
+            Err(true) => denied = true,
+            _ => continue,
+        }
+    }
+    if docs.is_empty() && denied { Err(true) } else { Ok(docs) }
 }
 
 async fn cloud_snapshot(access_token: &str) -> Result<Option<Snapshot>, bool> {
-    let doc = cloud_call(access_token, "/v1internal:retrieveUserQuotaSummary").await?;
-    if let Some(doc) = doc {
-        let metrics = parse_quota_buckets(&doc);
-        if !metrics.is_empty() {
-            let plan = match cloud_call(access_token, "/v1internal:loadCodeAssist").await {
-                Ok(Some(d)) => d
-                    .get("paidTier")
-                    .or_else(|| d.get("currentTier"))
-                    .and_then(|t| t.get("name"))
-                    .and_then(Value::as_str)
-                    .map(format_plan),
-                _ => None,
-            };
-            return Ok(Some(Snapshot::ok(ID, NAME, plan, metrics)));
-        }
+    let docs = cloud_quota_docs(access_token).await?;
+    let metrics = parse_quota_buckets_all(&docs);
+    if !metrics.is_empty() {
+        let plan = match cloud_call(access_token, "/v1internal:loadCodeAssist").await {
+            Ok(Some(d)) => d
+                .get("paidTier")
+                .or_else(|| d.get("currentTier"))
+                .and_then(|t| t.get("name"))
+                .and_then(Value::as_str)
+                .map(format_plan),
+            _ => None,
+        };
+        return Ok(Some(Snapshot::ok(ID, NAME, plan, metrics)));
     }
     Ok(None)
 }
@@ -469,35 +524,75 @@ fn parse_iso_ms(v: Option<&Value>) -> Option<i64> {
         .map(|d| d.timestamp_millis())
 }
 
-fn parse_quota_buckets(doc: &Value) -> Vec<Metric> {
+/// Merge every retrieveUserQuotaSummary response into one bucket list.
+/// Hosts now disagree on which groups they serve, so each doc contributes
+/// only the bucketIds the earlier docs didn't have (first doc wins).
+fn parse_quota_buckets_all(docs: &[Value]) -> Vec<Metric> {
     let mut rows: Vec<(usize, Metric)> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
-    let groups = doc.get("groups").and_then(Value::as_array).cloned().unwrap_or_default();
-    for group in groups {
-        let buckets = group.get("buckets").and_then(Value::as_array).cloned().unwrap_or_default();
-        for bucket in buckets {
-            let Some(id) = bucket.get("bucketId").and_then(Value::as_str) else { continue };
-            if seen.iter().any(|s| s == id) {
-                continue;
+    for doc in docs {
+        let groups = doc.get("groups").and_then(Value::as_array).cloned().unwrap_or_default();
+        for group in groups {
+            let buckets =
+                group.get("buckets").and_then(Value::as_array).cloned().unwrap_or_default();
+            for bucket in buckets {
+                let Some(id) = bucket.get("bucketId").and_then(Value::as_str) else { continue };
+                if seen.iter().any(|s| s == id) {
+                    continue;
+                }
+                let Some((label, period_ms, order)) = bucket_label(id) else { continue };
+                let Some(remaining) = bucket.get("remainingFraction").and_then(Value::as_f64)
+                else {
+                    continue;
+                };
+                if !remaining.is_finite() {
+                    continue;
+                }
+                seen.push(id.to_string());
+                let used = ((1.0 - remaining) * 100.0).clamp(0.0, 100.0);
+                let resets_at = parse_iso_ms(bucket.get("resetTime"));
+                rows.push((
+                    order,
+                    Metric::progress(label, used, None).with_reset(resets_at, Some(period_ms)),
+                ));
             }
-            let Some((label, period_ms, order)) = bucket_label(id) else { continue };
-            let Some(remaining) = bucket.get("remainingFraction").and_then(Value::as_f64) else {
-                continue;
-            };
-            if !remaining.is_finite() {
-                continue;
-            }
-            seen.push(id.to_string());
-            let used = ((1.0 - remaining) * 100.0).clamp(0.0, 100.0);
-            let resets_at = parse_iso_ms(bucket.get("resetTime"));
-            rows.push((
-                order,
-                Metric::progress(label, used, None).with_reset(resets_at, Some(period_ms)),
-            ));
         }
     }
     rows.sort_by_key(|(order, _)| *order);
     rows.into_iter().map(|(_, m)| m).collect()
+}
+
+fn parse_quota_buckets(doc: &Value) -> Vec<Metric> {
+    parse_quota_buckets_all(std::slice::from_ref(doc))
+}
+
+/// All four quota windows present — hosts can answer with any subset of
+/// them, so the search doesn't stop at merely one row per pool.
+fn has_all_windows(metrics: &[Metric]) -> bool {
+    ["Session", "Weekly", "Claude", "Claude Weekly"]
+        .iter()
+        .all(|want| metrics.iter().any(|m| m.label == *want))
+}
+
+/// `primary` keeps its values; `extra` only fills labels primary lacks.
+/// Ordered like bucket_label: Session, Weekly, Claude, Claude Weekly,
+/// anything else last (stable).
+fn merge_metrics(primary: Vec<Metric>, extra: Vec<Metric>) -> Vec<Metric> {
+    let mut out = primary;
+    for m in extra {
+        if !out.iter().any(|e| e.label == m.label) {
+            out.push(m);
+        }
+    }
+    let order = |label: &str| match label {
+        "Session" => 0,
+        "Weekly" => 1,
+        "Claude" => 2,
+        "Claude Weekly" => 3,
+        _ => usize::MAX,
+    };
+    out.sort_by_key(|m| order(&m.label));
+    out
 }
 
 /// Legacy shape: per-model quotas pooled into "Session" (Gemini) and
@@ -1449,6 +1544,84 @@ mod tests {
             1
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn quota_doc(buckets: &[(&str, f64)]) -> Value {
+        json!({"groups": [{"buckets": buckets
+            .iter()
+            .map(|(id, r)| json!({"bucketId": id, "remainingFraction": r}))
+            .collect::<Vec<_>>()}]})
+    }
+
+    /// daily-cloudcode answers with only the Claude/GPT pool while prod
+    /// serves both — merged docs must yield all four rows, and a bucketId
+    /// present in an earlier doc keeps that doc's values.
+    #[test]
+    fn quota_docs_merge_groups_across_hosts() {
+        let daily = quota_doc(&[("3p-5h", 0.9), ("3p-weekly", 0.8)]);
+        let prod = quota_doc(&[
+            ("gemini-5h", 0.7),
+            ("gemini-weekly", 0.6),
+            ("3p-5h", 0.1),
+            ("3p-weekly", 0.1),
+        ]);
+        let metrics = parse_quota_buckets_all(&[daily, prod]);
+        let labels: Vec<&str> = metrics.iter().map(|m| m.label.as_str()).collect();
+        assert_eq!(labels, ["Session", "Weekly", "Claude", "Claude Weekly"]);
+        let used: Vec<f64> = metrics.iter().filter_map(|m| m.used_percent).collect();
+        assert_eq!(used.len(), 4);
+        for (u, want) in used.iter().zip([30.0, 40.0, 10.0, 20.0]) {
+            // Claude rows came from the first doc (daily), not prod's 0.1s.
+            assert!((u - want).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn has_all_windows_needs_every_label_not_just_both_pools() {
+        let third_party = parse_quota_buckets(&quota_doc(&[("3p-5h", 0.9), ("3p-weekly", 0.8)]));
+        assert!(!has_all_windows(&third_party));
+        let gemini = parse_quota_buckets(&quota_doc(&[("gemini-5h", 0.7), ("gemini-weekly", 0.6)]));
+        assert!(!has_all_windows(&gemini));
+        // One row per pool is still a partial answer.
+        let subset = parse_quota_buckets(&quota_doc(&[("gemini-weekly", 0.6), ("3p-5h", 0.9)]));
+        assert!(!has_all_windows(&subset));
+        assert!(has_all_windows(&merge_metrics(gemini, third_party)));
+    }
+
+    /// Two docs that each hold a different subset combine into all four
+    /// rows — the shape the prod/daily split actually takes.
+    #[test]
+    fn quota_docs_split_windows_merge_to_all_four() {
+        let a = quota_doc(&[("gemini-weekly", 0.6), ("3p-5h", 0.9)]);
+        let b = quota_doc(&[("3p-weekly", 0.8), ("gemini-5h", 0.7)]);
+        let metrics = parse_quota_buckets_all(&[a, b]);
+        let labels: Vec<&str> = metrics.iter().map(|m| m.label.as_str()).collect();
+        assert_eq!(labels, ["Session", "Weekly", "Claude", "Claude Weekly"]);
+        assert!(has_all_windows(&metrics));
+    }
+
+    /// LS answers the 3p pool; cloud fills the Gemini rows and keeps the
+    /// LS values for the labels it already had.
+    #[test]
+    fn ls_partial_pools_merge_cloud_rows() {
+        let ls = vec![
+            Metric::progress("Claude", 10.0, None),
+            Metric::progress("Claude Weekly", 20.0, None),
+        ];
+        let cloud = parse_quota_buckets(&quota_doc(&[
+            ("gemini-5h", 0.7),
+            ("gemini-weekly", 0.6),
+            ("3p-5h", 0.5),
+            ("3p-weekly", 0.5),
+        ]));
+        let merged = merge_metrics(ls, cloud);
+        let labels: Vec<&str> = merged.iter().map(|m| m.label.as_str()).collect();
+        assert_eq!(labels, ["Session", "Weekly", "Claude", "Claude Weekly"]);
+        let used: Vec<f64> = merged.iter().filter_map(|m| m.used_percent).collect();
+        assert_eq!(used.len(), 4);
+        for (u, want) in used.iter().zip([30.0, 40.0, 10.0, 20.0]) {
+            assert!((u - want).abs() < 1e-9);
+        }
     }
 
     /// Live probe against this machine's real credentials — run manually via

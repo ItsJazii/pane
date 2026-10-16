@@ -280,9 +280,12 @@ Ground rules that apply to every provider:
 
 - **Reads:** the running IDE's local language server (loopback), or the
   `gemini:antigravity` token in Windows Credential Manager.
-- **Calls:** the local language-server RPC when the IDE runs; otherwise
-  Google's Cloud Code quota API (`cloudcode-pa.googleapis.com`) with
-  Google's own token refresh.
+- **Calls:** the local language-server RPC when the IDE runs (an answer
+  missing any of the four windows is topped up from Cloud Code);
+  otherwise Google's Cloud Code quota API with Google's own token
+  refresh — prod `cloudcode-pa.googleapis.com` first, then
+  `daily-cloudcode-pa.googleapis.com`, answers merged per bucket since
+  the hosts disagree on which quota groups they serve.
 - **Shows:** Gemini + Claude pool windows, plan.
 - **Spend:** reads per-generation token counts from the conversation
   databases under `~/.gemini/antigravity*/conversations/*.db` — strictly
