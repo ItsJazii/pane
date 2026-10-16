@@ -514,6 +514,9 @@ fn bucket_label(bucket_id: &str) -> Option<(&'static str, i64, usize)> {
         "gemini-weekly" => Some(("Weekly", ONE_WEEK_MS, 1)),
         "3p-5h" => Some(("Claude", FIVE_HOURS_MS, 2)),
         "3p-weekly" => Some(("Claude Weekly", ONE_WEEK_MS, 3)),
+        id if id.starts_with("gemini-argon") && id.ends_with("weekly") => {
+            Some(("Argon Weekly", ONE_WEEK_MS, 4))
+        }
         _ => None,
     }
 }
@@ -576,7 +579,7 @@ fn has_all_windows(metrics: &[Metric]) -> bool {
 
 /// `primary` keeps its values; `extra` only fills labels primary lacks.
 /// Ordered like bucket_label: Session, Weekly, Claude, Claude Weekly,
-/// anything else last (stable).
+/// Argon Weekly, anything else last (stable).
 fn merge_metrics(primary: Vec<Metric>, extra: Vec<Metric>) -> Vec<Metric> {
     let mut out = primary;
     for m in extra {
@@ -589,6 +592,7 @@ fn merge_metrics(primary: Vec<Metric>, extra: Vec<Metric>) -> Vec<Metric> {
         "Weekly" => 1,
         "Claude" => 2,
         "Claude Weekly" => 3,
+        "Argon Weekly" => 4,
         _ => usize::MAX,
     };
     out.sort_by_key(|m| order(&m.label));
@@ -1564,13 +1568,17 @@ mod tests {
             ("gemini-weekly", 0.6),
             ("3p-5h", 0.1),
             ("3p-weekly", 0.1),
+            ("gemini-argon-wtu-weekly", 0.75),
         ]);
         let metrics = parse_quota_buckets_all(&[daily, prod]);
         let labels: Vec<&str> = metrics.iter().map(|m| m.label.as_str()).collect();
-        assert_eq!(labels, ["Session", "Weekly", "Claude", "Claude Weekly"]);
+        assert_eq!(
+            labels,
+            ["Session", "Weekly", "Claude", "Claude Weekly", "Argon Weekly"]
+        );
         let used: Vec<f64> = metrics.iter().filter_map(|m| m.used_percent).collect();
-        assert_eq!(used.len(), 4);
-        for (u, want) in used.iter().zip([30.0, 40.0, 10.0, 20.0]) {
+        assert_eq!(used.len(), 5);
+        for (u, want) in used.iter().zip([30.0, 40.0, 10.0, 20.0, 25.0]) {
             // Claude rows came from the first doc (daily), not prod's 0.1s.
             assert!((u - want).abs() < 1e-9);
         }
@@ -1613,13 +1621,17 @@ mod tests {
             ("gemini-weekly", 0.6),
             ("3p-5h", 0.5),
             ("3p-weekly", 0.5),
+            ("gemini-argon-wtu-weekly", 0.75),
         ]));
         let merged = merge_metrics(ls, cloud);
         let labels: Vec<&str> = merged.iter().map(|m| m.label.as_str()).collect();
-        assert_eq!(labels, ["Session", "Weekly", "Claude", "Claude Weekly"]);
+        assert_eq!(
+            labels,
+            ["Session", "Weekly", "Claude", "Claude Weekly", "Argon Weekly"]
+        );
         let used: Vec<f64> = merged.iter().filter_map(|m| m.used_percent).collect();
-        assert_eq!(used.len(), 4);
-        for (u, want) in used.iter().zip([30.0, 40.0, 10.0, 20.0]) {
+        assert_eq!(used.len(), 5);
+        for (u, want) in used.iter().zip([30.0, 40.0, 10.0, 20.0, 25.0]) {
             assert!((u - want).abs() < 1e-9);
         }
     }
