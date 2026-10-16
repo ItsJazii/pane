@@ -984,6 +984,22 @@ fn collect_db_cost_events(db_path: &Path) -> Vec<CostRow> {
             continue;
         }
         let cutoff = table_cutoff(&conn, table, cutoff_ms);
+        let tcache = entry.table_mut(v2);
+        let (mut scanned, mut max_tu) =
+            match scan_incremental(&conn, table, v2, cutoff, tcache.watermark, &mut tcache.rows)
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("[pane] opencode: {table} read failed ({e})");
+                    complete = false;
+                    continue;
+                }
+            };
+        // New inserts already arrived via the watermark above, so the
+        // in-window row count must now match the map exactly; a
+        // shortfall means deletions or a rewrite the watermark can't
+        // see — rescan the table from scratch. A failed count (-1)
+        // leaves the map alone.
         let type_filter = if v2 { " AND type IN ('assistant','compaction')" } else { "" };
         let db_count: i64 = conn
             .query_row(
@@ -992,34 +1008,32 @@ fn collect_db_cost_events(db_path: &Path) -> Vec<CostRow> {
                 |r| r.get(0),
             )
             .unwrap_or(-1);
-        let tcache = entry.table_mut(v2);
         let cached_count = tcache
             .rows
             .values()
             .filter(|(tc, _)| *tc >= cutoff)
             .count() as i64;
-        // Any count mismatch — deleted rows, or inserts the watermark
-        // can't see — forces a full table rescan. A failed count (-1)
-        // leaves the last-good map alone.
         if db_count >= 0 && db_count != cached_count {
             tcache.rows.clear();
-            tcache.watermark = 0;
-        }
-        match scan_incremental(&conn, table, v2, cutoff, tcache.watermark, &mut tcache.rows) {
-            Ok((scanned, max_tu)) => {
-                if scanned >= super::MAX_LEDGER_ROWS {
-                    eprintln!(
-                        "[pane] opencode: {table} table hit the {}-row read cap — keeping newest rows, oldest usage is dropped",
-                        super::MAX_LEDGER_ROWS
-                    );
+            match scan_incremental(&conn, table, v2, cutoff, 0, &mut tcache.rows) {
+                Ok((s, m)) => {
+                    scanned = s;
+                    max_tu = m;
                 }
-                tcache.watermark = max_tu;
-            }
-            Err(e) => {
-                eprintln!("[pane] opencode: {table} read failed ({e})");
-                complete = false;
+                Err(e) => {
+                    eprintln!("[pane] opencode: {table} rescan failed ({e})");
+                    complete = false;
+                    continue;
+                }
             }
         }
+        if scanned >= super::MAX_LEDGER_ROWS {
+            eprintln!(
+                "[pane] opencode: {table} table hit the {}-row read cap — keeping newest rows, oldest usage is dropped",
+                super::MAX_LEDGER_ROWS
+            );
+        }
+        tcache.watermark = max_tu;
     }
     // Stamps only advance on a complete refresh — a table that failed
     // keeps its old map AND leaves the entry unstamped so the next
