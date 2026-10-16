@@ -161,7 +161,7 @@ pub fn v41_flash_legacy_card(model: &str, ts_ms: i64) -> Option<Price> {
 /// 2026-12-01T08:00Z — end of Nov 30 Pacific. Google dates the Gemini 4
 /// Argon intro promo in PT (ai.google.dev/gemini-api/docs/latest-model):
 /// $2 in / $10 out / $0.10 cache read through 2026-11-30, then the
-/// standard $4/$20/$0.20 card the bare arm carries.
+/// standard $4/$20/$0.20 card argon_list_card enforces over the catalogs.
 pub const ARGON_INTRO_END_MS: i64 = 1_796_112_000_000;
 
 /// The last `/` segment when it spells Gemini 4 Argon — exactly or as
@@ -183,28 +183,47 @@ fn argon_slug(model: &str) -> bool {
     argon_segment(model).is_some()
 }
 
-/// Google's intro card for Gemini 4 Argon on direct/bare routes before
-/// ARGON_INTRO_END_MS; cache write bills at intro input ($2) since no
-/// cache-write rate is published. None for other models, later events,
-/// or AIHubMix-scoped slugs. A `-fast` slug scales the card by the
+/// `card` scoped to Google's Gemini 4 Argon slugs on direct/bare routes —
+/// None for other models and AIHubMix-scoped spellings (the gateway bills
+/// its own flat card year-round). A `-fast` slug scales the card by the
 /// supplement's fast multiplier — same as resolve()'s tier pricing.
-fn argon_intro_card_in(s: &Store, model: &str, ts_ms: i64) -> Option<Price> {
-    if ts_ms >= ARGON_INTRO_END_MS || !argon_slug(model) {
+fn argon_google_card_in(s: &Store, model: &str, card: Price) -> Option<Price> {
+    if !argon_slug(model) {
         return None;
     }
-    let intro = Price::flat(2.0, 10.0, 0.10, 2.0);
     let lower = model.to_lowercase();
     let seg = lower.rsplit('/').next().unwrap_or(lower.as_str());
     if !seg.ends_with("-fast") {
-        return Some(intro);
+        return Some(card);
     }
     // Same base resolve() uses: the full slug minus the -fast tail.
     let base = lower.strip_suffix("-fast").unwrap_or(seg);
-    Some(scaled_price(&intro, fast_tier_mult(s, base)))
+    Some(scaled_price(&card, fast_tier_mult(s, base)))
+}
+
+/// Google's intro card for Gemini 4 Argon before ARGON_INTRO_END_MS:
+/// $2 in / $10 out / $0.10 cache read; cache write bills at intro input
+/// ($2) since no cache-write rate is published.
+fn argon_intro_card_in(s: &Store, model: &str, ts_ms: i64) -> Option<Price> {
+    if ts_ms >= ARGON_INTRO_END_MS {
+        return None;
+    }
+    argon_google_card_in(s, model, Price::flat(2.0, 10.0, 0.10, 2.0))
 }
 
 pub fn argon_intro_card(model: &str, ts_ms: i64) -> Option<Price> {
     argon_intro_card_in(&store().lock().unwrap(), model, ts_ms)
+}
+
+/// Google's list card for Gemini 4 Argon from ARGON_INTRO_END_MS on:
+/// $4 in / $20 out / $0.20 cache read, cache write at input. Enforced
+/// over the catalogs, which still carry the intro rate after the promo
+/// ends — the bare baked arm alone would lose to LiteLLM's stale card.
+pub fn argon_list_card(model: &str, ts_ms: i64) -> Option<Price> {
+    if ts_ms < ARGON_INTRO_END_MS {
+        return None;
+    }
+    argon_google_card_in(&store().lock().unwrap(), model, Price::flat(4.0, 20.0, 0.20, 4.0))
 }
 
 /// Devin's own Argon card — the model picker lists $1 in / $5 out /
@@ -222,9 +241,13 @@ pub fn devin_argon_card(model: &str, ts_ms: i64) -> Option<Price> {
 
 /// Every effective-dated card: a resolved price that differs by date.
 /// cost_for and the Hermes session splitter consult this before the
-/// resolved card — a bare result is the card in force at ts_ms.
+/// resolved card — a bare result is the card in force at ts_ms. Argon
+/// is covered on both sides of the promo: intro before the cutoff, the
+/// enforced list card after it.
 pub fn dated_card(model: &str, ts_ms: i64) -> Option<Price> {
-    v41_flash_legacy_card(model, ts_ms).or_else(|| argon_intro_card(model, ts_ms))
+    v41_flash_legacy_card(model, ts_ms)
+        .or_else(|| argon_intro_card(model, ts_ms))
+        .or_else(|| argon_list_card(model, ts_ms))
 }
 
 /// The AIHubMix spelling of any Argon slug — callers have already
@@ -330,7 +353,7 @@ pub fn generation() -> u64 {
 /// fingerprinted below — an app update that reprices the same files would
 /// otherwise leave history at the old dollars until upstream happens to
 /// rewrite a catalog.
-const CORRECTIONS_REV: u32 = 18; // 18: Gemini 4 Argon cards (Google intro, AIHubMix scope, Devin promo)
+const CORRECTIONS_REV: u32 = 20; // 19: Antigravity `-trial` ids (gemini-4-argon-trial) price like the base card; 20: Argon post-intro list card enforced over catalogs
 
 /// The corrections revision on its own — the spend cache treats a changed
 /// revision as a hard discard (the *code* that prices changed), while a
@@ -1526,9 +1549,35 @@ mod tests {
         // Other models never take the intro card.
         assert!(super::argon_intro_card("gemini-4-flash", ms("2026-10-14T12:00:00Z")).is_none());
         assert!(super::argon_intro_card("gpt-6.1-sol", ms("2026-10-14T12:00:00Z")).is_none());
-        // dated_card exposes the same override to the spend paths.
+        // dated_card exposes the override to the spend paths on both
+        // sides of the promo: intro inside the window, the enforced
+        // list card after it.
         assert!(super::dated_card("gemini-4-argon", ms("2026-10-14T12:00:00Z")).is_some());
-        assert!(super::dated_card("gemini-4-argon", ms("2026-12-02T00:00:00Z")).is_none());
+        let p = super::dated_card("gemini-4-argon", ms("2026-12-02T00:00:00Z"))
+            .expect("post-intro argon takes the list card");
+        assert_eq!((p.input, p.output, p.cache_read, p.cache_write), (4.0, 20.0, 0.20, 4.0));
+    }
+
+    #[test]
+    fn argon_list_card_is_dated_and_route_scoped() {
+        let ms = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis();
+        // From the PT cutoff on the list card is enforced — the catalogs
+        // still carry the intro rate then, so this must not defer to them.
+        for slug in ["gemini-4-argon", "google/gemini-4-argon", "gemini-4-argon-high"] {
+            let p = super::argon_list_card(slug, ms("2026-12-01T08:00:00Z"))
+                .unwrap_or_else(|| panic!("{slug} should list-price"));
+            assert_eq!(
+                (p.input, p.output, p.cache_read, p.cache_write),
+                (4.0, 20.0, 0.20, 4.0),
+                "{slug}"
+            );
+        }
+        // Inside the promo the intro card applies instead.
+        assert!(super::argon_list_card("gemini-4-argon", ms("2026-12-01T07:59:59Z")).is_none());
+        // AIHubMix keeps its flat gateway card year-round.
+        assert!(super::argon_list_card("aihubmix/gemini-4-argon", ms("2026-12-05T00:00:00Z")).is_none());
+        // Other models never take it.
+        assert!(super::argon_list_card("gemini-4-flash", ms("2026-12-05T00:00:00Z")).is_none());
     }
 
     #[test]

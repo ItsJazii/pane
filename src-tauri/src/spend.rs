@@ -3539,11 +3539,19 @@ fn agy_label_slug(label: &str) -> Option<String> {
 }
 
 /// Candidate catalog spellings, best first. `-tiered` ids are the same
-/// model at the same rate (a server-chosen subagent tier), so the suffix
-/// drops. A `*-default` id is the picker's placeholder, not a model —
-/// the label names what served, so it leads.
+/// model at the same rate (a server-chosen subagent tier), and `-trial`
+/// ids are the same model on Antigravity's included trial quota — both
+/// suffixes drop and price like the base model. A `*-default` id is the
+/// picker's placeholder, not a model — the label names what served, so
+/// it leads.
 fn agy_candidates(model_id: Option<&str>, label: Option<&str>) -> Vec<String> {
-    let id = model_id.map(|i| i.strip_suffix("-tiered").unwrap_or(i).to_string());
+    let id = model_id.map(|i| {
+        ["-tiered", "-trial"]
+            .iter()
+            .find_map(|&s| i.strip_suffix(s))
+            .unwrap_or(i)
+            .to_string()
+    });
     let label = label.and_then(agy_label_slug);
     let placeholder = id.as_deref().is_some_and(|i| i.ends_with("-default"));
     let ordered: [Option<String>; 2] = if placeholder {
@@ -5907,6 +5915,38 @@ mod tests {
         assert_eq!(
             agy_candidates(Some("gemini-3.7-flash"), Some("Gemini 3.7 Flash (High)")),
             vec!["gemini-3.7-flash"]
+        );
+    }
+
+    #[test]
+    fn agy_argon_trial_prices_like_the_base_model() {
+        // `gemini-4-argon-trial` is Argon on Antigravity's included trial
+        // quota — same model, billed on the base card.
+        assert_eq!(
+            agy_candidates(Some("gemini-4-argon-trial"), None),
+            vec!["gemini-4-argon"]
+        );
+        let (card, display) = agy_priced("gemini-4-argon").expect("argon prices");
+        assert_eq!(display, "gemini-4-argon");
+        let u = pricing::Usage {
+            input: 1_000_000.0,
+            output: 1_000_000.0,
+            cache_read: 0.0,
+            cache_write_5m: 0.0,
+            cache_write_1h: 0.0,
+        };
+        let ts = |s: &str| {
+            DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+        };
+        // Google's $2/$10 intro through 2026-12-01T08:00Z, then the
+        // $4/$20 list card enforced over whatever the catalogs say.
+        assert_eq!(
+            cost_for("gemini-4-argon", &card, &u, 200_000.0, ts("2026-10-16T12:00:00Z")),
+            12.0
+        );
+        assert_eq!(
+            cost_for("gemini-4-argon", &card, &u, 200_000.0, ts("2026-12-02T00:00:00Z")),
+            24.0
         );
     }
 
