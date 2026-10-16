@@ -164,6 +164,11 @@ fn resolve_entry_key(dir: &Path, entry: &str) -> CredResult {
     if imported {
         return CredResult::None;
     }
+    auth_json_key(dir, entry)
+}
+
+/// `entry`'s key from the dir's auth.json — the pre-OpenCode-2 store.
+fn auth_json_key(dir: &Path, entry: &str) -> CredResult {
     let path = dir.join("auth.json");
     if !path.exists() {
         return CredResult::Missing;
@@ -180,6 +185,29 @@ fn resolve_entry_key(dir: &Path, entry: &str) -> CredResult {
         .filter(|k| !k.is_empty())
         .map(|k| CredResult::Key(k.to_string()))
         .unwrap_or(CredResult::None)
+}
+
+/// Channel databases that belong to THIS Go login — the local-window
+/// fallback must only meter the account the card shows (channels can
+/// hold different Go accounts; spend deliberately stays combined). An
+/// imported `credential` table is per-channel truth: `Found(Some)` must
+/// equal the key and `Found(None)` is a logout in that channel; a
+/// pre-import DB inherits the dir's auth.json key; an unreadable DB is
+/// excluded.
+fn go_dbs(dir: &Path, key: &str) -> Vec<PathBuf> {
+    let file_key = match auth_json_key(dir, "opencode-go") {
+        CredResult::Key(k) => Some(k),
+        _ => None,
+    };
+    opencode_dbs(dir)
+        .into_iter()
+        .filter(|db| match db_entry_key(db, "opencode-go") {
+            Ok(DbCred::Found(Some(k))) => k == key,
+            Ok(DbCred::Found(None)) => false,
+            Ok(DbCred::NotImported) => file_key.as_deref() == Some(key),
+            Err(_) => false,
+        })
+        .collect()
 }
 
 /// Stable fingerprint of a credential — never the key itself. Written
@@ -450,7 +478,7 @@ async fn fetch(
             // history), the card must carry both causes — surfacing only
             // "opencode.db not found" would send someone troubleshooting
             // an offline/revoked-key card after the wrong problem.
-            let mut snap = local_windows_snapshot(dir, id, name)
+            let mut snap = local_windows_snapshot(dir, id, name, &key)
                 .map_err(|db| format!("usage API failed ({e}); local fallback: {db}"))?;
             snap.plan = Some("Go — this PC only".into());
             Ok(snap)
@@ -549,11 +577,13 @@ fn month_period_ending(resets_ms: i64) -> i64 {
 
 /// Fallback: the pre-API local computation from opencode.db — this PC's
 /// rows only, so shared subscriptions under-count here.
-fn local_windows_snapshot(dir: &Path, id: &str, name: &str) -> Result<Snapshot, String> {
-    // Query the live ledgers read-only. Copying db+WAL into
-    // `%APPDATA%\Pane\tmp` used the same pattern that grew Devin's temp
-    // journal to tens of GB — never clone a vendor database onto C:.
-    let (msgs, capped) = read_messages(dir)?;
+fn local_windows_snapshot(dir: &Path, id: &str, name: &str, key: &str) -> Result<Snapshot, String> {
+    // Query the live ledgers read-only — only the channel DBs that hold
+    // THIS Go login (`go_dbs`); other channels may belong to a different
+    // account. Copying db+WAL into `%APPDATA%\Pane\tmp` used the same
+    // pattern that grew Devin's temp journal to tens of GB — never clone
+    // a vendor database onto C:.
+    let (msgs, capped) = read_messages(dir, key)?;
     let w = {
         let rows: Vec<(f64, f64)> = msgs
             .into_iter()
@@ -563,7 +593,7 @@ fn local_windows_snapshot(dir: &Path, id: &str, name: &str) -> Result<Snapshot, 
         // The monthly anchor is the earliest-ever Go row; when the row cap
         // dropped the oldest rows, recover it with the bounded oldest-first
         // probe instead of re-anchoring on the newest window's edge.
-        let anchor = if capped { earliest_go_anchor(dir) } else { None };
+        let anchor = if capped { earliest_go_anchor(dir, key) } else { None };
         go_windows(&rows, anchor, chrono::Utc::now().timestamp_millis() as f64)
     };
     let metrics = vec![
@@ -728,32 +758,38 @@ pub fn collect_cost_events() -> Vec<(f64, f64, f64, String, String)> {
 }
 
 pub fn collect_cost_events_in(dir: &Path) -> Vec<(f64, f64, f64, String, String)> {
+    let mut rows: Vec<CostRow> = Vec::new();
+    for db in opencode_dbs(dir) {
+        rows.extend(collect_db_cost_events(&db));
+    }
+    // OpenCode 2 copies legacy `message` rows into `session_message`
+    // under the same id — the union would count each copied row twice.
+    // The session_message copy wins even when its channel DB sorts after
+    // the v1 copy's, so dedupe in two passes: every v2 row across every
+    // DB first, then v1 rows with an unseen id. Rows with no id still
+    // count — nothing to dedupe them by.
+    let (v2, v1): (Vec<CostRow>, Vec<CostRow>) = rows.into_iter().partition(|r| r.6);
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::new();
-    for db in opencode_dbs(dir) {
-        for (ts, cost, tokens, model, provider, id) in collect_db_cost_events(&db) {
-            // OpenCode 2 copies legacy `message` rows into
-            // `session_message` under the same id — the union would count
-            // each copied row twice. The session_message copy wins (it is
-            // read first); rows with no id still count — nothing to
-            // dedupe them by.
-            if !id.is_empty() && !seen.insert(id) {
-                continue;
-            }
-            out.push((ts, cost, tokens, model, provider));
+    for (ts, cost, tokens, model, provider, id, _v2) in v2.into_iter().chain(v1) {
+        if !id.is_empty() && !seen.insert(id) {
+            continue;
         }
+        out.push((ts, cost, tokens, model, provider));
     }
     out
 }
 
-/// (ts, cost, tokens, model, provider, id) — the id rides along so the
-/// caller can dedupe OpenCode 2's copied rows across tables and DBs.
-type CostRow = (f64, f64, f64, String, String, String);
+/// (ts, cost, tokens, model, provider, id, from session_message) — the id
+/// and source flag ride along so callers can dedupe OpenCode 2's copied
+/// rows across tables and DBs, v2 winning.
+type CostRow = (f64, f64, f64, String, String, String, bool);
 
 /// One channel database's spend rows, served from a db/WAL stamp cache.
-/// A failed read must not cache empty — the next stamp hit would hide
-/// spend until the db/WAL changes again; keep the last good rows (if
-/// any) and retry on the next refresh.
+/// Only a COMPLETE read is cached: a partial read (one table failed)
+/// serves the last-good entry when present and otherwise returns its
+/// partial rows uncached so the next refresh retries; a failed read keeps
+/// last-good or empty, never cached.
 fn collect_db_cost_events(db_path: &Path) -> Vec<CostRow> {
     use std::sync::Mutex;
     use std::time::SystemTime;
@@ -782,7 +818,15 @@ fn collect_db_cost_events(db_path: &Path) -> Vec<CostRow> {
     }
 
     let rows = match read_recent_cost_events(db_path) {
-        Ok(rows) => rows,
+        Ok((rows, true)) => rows,
+        Ok((partial, false)) => {
+            if let Ok(cache) = CACHE.lock() {
+                if let Some((_, _, _, rows)) = cache.iter().find(|(p, _, _, _)| p == db_path) {
+                    return rows_in_spend_window(rows);
+                }
+            }
+            return partial;
+        }
         Err(_) => {
             if let Ok(cache) = CACHE.lock() {
                 if let Some((_, _, _, rows)) = cache.iter().find(|(p, _, _, _)| p == db_path) {
@@ -805,7 +849,7 @@ fn collect_db_cost_events(db_path: &Path) -> Vec<CostRow> {
 fn rows_in_spend_window(rows: &[CostRow]) -> Vec<CostRow> {
     let cutoff_ms = crate::spend::spend_cutoff_ms(chrono::Local::now()) as f64;
     rows.iter()
-        .filter(|(ts, _, _, _, _, _)| {
+        .filter(|(ts, _, _, _, _, _, _)| {
             if *ts > 1_000_000_000_000.0 {
                 *ts >= cutoff_ms
             } else {
@@ -934,44 +978,56 @@ fn table_cutoff(conn: &rusqlite::Connection, table: &str, cutoff_ms: i64) -> i64
 /// both ledger tables; the caller dedupes ids across tables and DBs.
 /// Newest-first via rowid (clustered) — `ORDER BY time_created DESC`
 /// would filesort the 31-day match before LIMIT on a multi-hundred-MB
-/// ledger. A session_message failure never sinks the OpenCode 1 table.
-fn read_recent_cost_events(db: &Path) -> Result<Vec<CostRow>, String> {
+/// ledger. Returns (rows, complete): Err only when every present table
+/// failed — a v2-only DB with a broken session_message is unreadable,
+/// not empty; one good table contributes its rows flagged incomplete.
+fn read_recent_cost_events(db: &Path) -> Result<(Vec<CostRow>, bool), String> {
     let conn = super::open_readonly_sqlite(db)?;
     let cutoff_ms = crate::spend::spend_cutoff_ms(chrono::Local::now());
-    let keep = |(id, m): (String, MessageRow)| -> Option<CostRow> {
-        (m.cost > 0.0 || m.tokens > 0.0)
-            .then_some((m.ts, m.cost, m.tokens, m.model, m.provider, id))
-    };
     let mut out: Vec<CostRow> = Vec::new();
-    if table_exists(&conn, "session_message") {
-        let cutoff = table_cutoff(&conn, "session_message", cutoff_ms);
-        let sql = format!(
-            "SELECT id, time_created, type, data FROM session_message
-             WHERE time_created >= {cutoff} AND type IN ('assistant','compaction')
-             ORDER BY rowid DESC LIMIT {}",
-            super::MAX_LEDGER_ROWS
-        );
+    let mut present = 0u32;
+    let mut ok = 0u32;
+    let mut last_err = None;
+    for (table, v2) in [("session_message", true), ("message", false)] {
+        if !table_exists(&conn, table) {
+            continue;
+        }
+        present += 1;
+        let cutoff = table_cutoff(&conn, table, cutoff_ms);
+        let sql = if v2 {
+            format!(
+                "SELECT id, time_created, type, data FROM session_message
+                 WHERE time_created >= {cutoff} AND type IN ('assistant','compaction')
+                 ORDER BY rowid DESC LIMIT {}",
+                super::MAX_LEDGER_ROWS
+            )
+        } else {
+            format!(
+                "SELECT id, time_created, data FROM message
+                 WHERE time_created >= {cutoff}
+                 ORDER BY rowid DESC LIMIT {}",
+                super::MAX_LEDGER_ROWS
+            )
+        };
         let mut parsed = Vec::new();
-        match scan_ledger_rows(&conn, &sql, true, &mut parsed) {
-            Ok(_) => out.extend(parsed.into_iter().filter_map(keep)),
-            Err(e) => eprintln!(
-                "[pane] opencode: session_message read failed ({e}) — message table still counted"
-            ),
+        match scan_ledger_rows(&conn, &sql, v2, &mut parsed) {
+            Ok(_) => {
+                ok += 1;
+                out.extend(parsed.into_iter().filter_map(|(id, m)| {
+                    (m.cost > 0.0 || m.tokens > 0.0)
+                        .then_some((m.ts, m.cost, m.tokens, m.model, m.provider, id, v2))
+                }));
+            }
+            Err(e) => {
+                eprintln!("[pane] opencode: {table} read failed ({e})");
+                last_err = Some(e);
+            }
         }
     }
-    if table_exists(&conn, "message") {
-        let cutoff = table_cutoff(&conn, "message", cutoff_ms);
-        let sql = format!(
-            "SELECT id, time_created, data FROM message
-             WHERE time_created >= {cutoff}
-             ORDER BY rowid DESC LIMIT {}",
-            super::MAX_LEDGER_ROWS
-        );
-        let mut parsed = Vec::new();
-        scan_ledger_rows(&conn, &sql, false, &mut parsed)?;
-        out.extend(parsed.into_iter().filter_map(keep));
+    if present > 0 && ok == 0 {
+        return Err(last_err.unwrap_or_else(|| "ledger unreadable".into()));
     }
-    Ok(out)
+    Ok((out, ok == present))
 }
 
 pub struct MessageRow {
@@ -982,25 +1038,25 @@ pub struct MessageRow {
     pub model: String,
 }
 
-/// Assistant/compaction rows across every `opencode*.db` in `dir`,
-/// deduped by message id (session_message wins). `capped` flags any
-/// table that hit the row cap so the monthly anchor can be recovered by
-/// the oldest-first probe.
-fn read_messages(dir: &Path) -> Result<(Vec<MessageRow>, bool), String> {
-    let dbs = opencode_dbs(dir);
+/// Assistant/compaction rows across the channel DBs that hold THIS Go
+/// login (`go_dbs`), deduped by message id with v2 copies winning across
+/// files. `capped` flags any table that hit the row cap so the monthly
+/// anchor can be recovered by the oldest-first probe.
+fn read_messages(dir: &Path, key: &str) -> Result<(Vec<MessageRow>, bool), String> {
+    let dbs = go_dbs(dir, key);
     if dbs.is_empty() {
-        return Err("opencode.db not found — has OpenCode been used on this PC?".into());
+        return Err("no opencode*.db for this Go login — has OpenCode been used on this PC?".into());
     }
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut out = Vec::new();
+    let mut rows: Vec<(String, MessageRow, bool)> = Vec::new();
     let mut capped = false;
     let mut read_any = false;
     let mut first_err = None;
     for db in &dbs {
-        match read_db_messages(db, &mut seen, &mut out) {
-            Ok(c) => {
+        match read_db_messages(db) {
+            Ok((r, c)) => {
                 read_any = true;
                 capped |= c;
+                rows.extend(r);
             }
             Err(e) => {
                 if first_err.is_none() {
@@ -1012,22 +1068,36 @@ fn read_messages(dir: &Path) -> Result<(Vec<MessageRow>, bool), String> {
     if !read_any {
         return Err(first_err.unwrap_or_else(|| "no readable opencode*.db".into()));
     }
+    // v2 wins the id dedupe even when its DB sorted after the v1 copy's.
+    let (v2, v1): (Vec<_>, Vec<_>) = rows.into_iter().partition(|(_, _, v)| *v);
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out = Vec::new();
+    for (id, m, _) in v2.into_iter().chain(v1) {
+        if !id.is_empty() && !seen.insert(id) {
+            continue;
+        }
+        out.push(m);
+    }
     Ok((out, capped))
 }
 
-/// One database's newest rows from both tables — session_message first
-/// so its copies win the dedupe. A v2 read failure never sinks v1.
-fn read_db_messages(
-    db: &Path,
-    seen: &mut HashSet<String>,
-    out: &mut Vec<MessageRow>,
-) -> Result<bool, String> {
+/// One database's newest rows from both tables, tagged with the source
+/// (true = session_message) so the caller's dedupe can prefer v2 copies
+/// across files. Err only when no present table could be read — a
+/// session_message failure never sinks the OpenCode 1 table, and vice
+/// versa.
+fn read_db_messages(db: &Path) -> Result<(Vec<(String, MessageRow, bool)>, bool), String> {
     let conn = super::open_readonly_sqlite(db)?;
+    let mut out = Vec::new();
     let mut capped = false;
+    let mut present = 0u32;
+    let mut ok = 0u32;
+    let mut last_err = None;
     for (table, v2) in [("session_message", true), ("message", false)] {
         if !table_exists(&conn, table) {
             continue;
         }
+        present += 1;
         let sql = if v2 {
             format!(
                 "SELECT id, time_created, type, data FROM {table}
@@ -1043,40 +1113,35 @@ fn read_db_messages(
             )
         };
         let mut parsed = Vec::new();
-        let scanned = match scan_ledger_rows(&conn, &sql, v2, &mut parsed) {
-            Ok(n) => n,
-            Err(e) => {
-                if v2 {
+        match scan_ledger_rows(&conn, &sql, v2, &mut parsed) {
+            Ok(scanned) => {
+                ok += 1;
+                if scanned >= super::MAX_LEDGER_ROWS {
                     eprintln!(
-                        "[pane] opencode: session_message read failed ({e}) — message table still counted"
+                        "[pane] opencode: {table} table hit the {}-row read cap — keeping newest rows, oldest usage is dropped",
+                        super::MAX_LEDGER_ROWS
                     );
-                    continue;
+                    capped = true;
                 }
-                return Err(e);
+                out.extend(parsed.into_iter().map(|(id, m)| (id, m, v2)));
             }
-        };
-        if scanned >= super::MAX_LEDGER_ROWS {
-            eprintln!(
-                "[pane] opencode: {table} table hit the {}-row read cap — keeping newest rows, oldest usage is dropped",
-                super::MAX_LEDGER_ROWS
-            );
-            capped = true;
-        }
-        for (id, m) in parsed {
-            if !id.is_empty() && !seen.insert(id) {
-                continue;
+            Err(e) => {
+                eprintln!("[pane] opencode: {table} read failed ({e})");
+                last_err = Some(e);
             }
-            out.push(m);
         }
     }
-    Ok(capped)
+    if present > 0 && ok == 0 {
+        return Err(last_err.unwrap_or_else(|| "ledger unreadable".into()));
+    }
+    Ok((out, capped))
 }
 
 /// The monthly cycle anchors on the earliest-ever Go row — which the
 /// newest-first cap in read_messages intentionally drops. When (and only
 /// when) the cap binds, find the anchor with a small oldest-first probe
-/// across both tables and every channel database: bounded regardless of
-/// table size, skipped entirely on normal DBs.
+/// across both tables of every channel DB that holds this login:
+/// bounded regardless of table size, skipped entirely on normal DBs.
 ///
 /// Known limitation: read_messages covers the newest MAX_LEDGER_ROWS per
 /// table and this probe covers the oldest MAX_ANCHOR_PROBE_ROWS per
@@ -1085,10 +1150,10 @@ fn read_db_messages(
 /// earliest paid Go row falls in that band the monthly anchor lands
 /// late, shifting the reported billing boundary and reset time. Only
 /// reachable on an implausibly large local ledger (>2.1M rows).
-fn earliest_go_anchor(dir: &Path) -> Option<f64> {
+fn earliest_go_anchor(dir: &Path, key: &str) -> Option<f64> {
     const MAX_ANCHOR_PROBE_ROWS: u64 = 100_000;
     let mut best: Option<f64> = None;
-    for db in opencode_dbs(dir) {
+    for db in go_dbs(dir, key) {
         let Ok(conn) = super::open_readonly_sqlite(&db) else { continue };
         for (table, v2) in [("session_message", true), ("message", false)] {
             if !table_exists(&conn, table) {
@@ -1136,8 +1201,8 @@ mod tests {
         let old = now - 40.0 * 86_400_000.0;
         let fresh = now - 2.0 * 86_400_000.0;
         let rows = vec![
-            (old, 1.0, 10.0, "m".into(), "p".into(), "id-a".into()),
-            (fresh, 2.0, 20.0, "m".into(), "p".into(), "id-b".into()),
+            (old, 1.0, 10.0, "m".into(), "p".into(), "id-a".into(), true),
+            (fresh, 2.0, 20.0, "m".into(), "p".into(), "id-b".into(), true),
         ];
         let kept = rows_in_spend_window(&rows);
         assert_eq!(kept.len(), 1);
@@ -1482,6 +1547,24 @@ mod tests {
         conn
     }
 
+    /// Ledger + credential schema with the import migration applied —
+    /// an OpenCode 2 channel DB. `go_key` installs that integration's
+    /// credential row (None = logged out in this channel).
+    fn full_db(path: &Path, go_key: Option<&str>) -> rusqlite::Connection {
+        let conn = make_db(path, LEDGER_SCHEMA);
+        conn.execute_batch(CRED_SCHEMA).unwrap();
+        conn.execute(
+            "INSERT INTO migration (id, time_created) VALUES (?1, 0)",
+            rusqlite::params![CRED_IMPORT_MIGRATION],
+        )
+        .unwrap();
+        if let Some(k) = go_key {
+            let v = serde_json::json!({"type": "api", "key": k}).to_string();
+            add_credential(&conn, "opencode-go", &v, 1, 1000);
+        }
+        conn
+    }
+
     fn v1_blob(provider: &str, model: &str, cost: f64, ts: i64) -> String {
         serde_json::json!({
             "role": "assistant", "providerID": provider, "modelID": model,
@@ -1608,15 +1691,201 @@ mod tests {
     fn read_messages_dedupes_both_tables() {
         let dir = tmp_dir("winunion");
         {
-            let conn = make_db(&dir.join("opencode.db"), LEDGER_SCHEMA);
+            let conn = full_db(&dir.join("opencode.db"), Some("test-key-a"));
             let now = chrono::Utc::now().timestamp_millis();
             add_message(&conn, "x", now, &v1_blob("opencode-go", "k3", 1.0, now));
             add_session_message(&conn, "x", "assistant", now, &v2_blob("opencode-go", "k3", 1.0, now));
             add_session_message(&conn, "y", "assistant", now, &v2_blob("other", "m", 0.5, now));
         }
-        let (msgs, capped) = read_messages(&dir).unwrap();
+        let (msgs, capped) = read_messages(&dir, "test-key-a").unwrap();
         assert!(!capped);
         assert_eq!(msgs.len(), 2, "the copied id counts once");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cross_db_v2_copy_beats_the_v1_original() {
+        // opencode-next.db sorts FIRST: its legacy `message` copy must not
+        // suppress opencode.db's `session_message` copy of the same id.
+        let dir = tmp_dir("v2wins");
+        let now = chrono::Utc::now().timestamp_millis();
+        {
+            let conn = make_db(&dir.join("opencode-next.db"), LEDGER_SCHEMA);
+            add_message(&conn, "shared", now, &v1_blob("opencode-go", "k3", 1.0, now));
+        }
+        {
+            let conn = make_db(&dir.join("opencode.db"), LEDGER_SCHEMA);
+            add_session_message(&conn, "shared", "assistant", now, &v2_blob("opencode-go", "k3", 2.0, now));
+        }
+        let rows = collect_cost_events_in(&dir);
+        assert_eq!(rows.len(), 1);
+        assert!((rows[0].1 - 2.0).abs() < 1e-9, "the v2 copy wins; got {}", rows[0].1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_messages_v2_wins_across_dbs_too() {
+        let dir = tmp_dir("winv2wins");
+        let now = chrono::Utc::now().timestamp_millis();
+        {
+            let conn = full_db(&dir.join("opencode-next.db"), Some("test-key-a"));
+            add_message(&conn, "shared", now, &v1_blob("opencode-go", "k3", 1.0, now));
+        }
+        {
+            let conn = full_db(&dir.join("opencode.db"), Some("test-key-a"));
+            add_session_message(&conn, "shared", "assistant", now, &v2_blob("opencode-go", "k3", 2.0, now));
+        }
+        let (msgs, _) = read_messages(&dir, "test-key-a").unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert!((msgs[0].cost - 2.0).abs() < 1e-9, "the v2 copy wins; got {}", msgs[0].cost);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn v2_only_db_with_a_broken_table_is_err_not_empty() {
+        let dir = tmp_dir("v2broken");
+        let db = dir.join("opencode.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            // session_message exists but lacks the columns the SELECT
+            // needs — the only present table fails, so the read is an
+            // Err, not a silent zero.
+            conn.execute_batch("CREATE TABLE session_message (id TEXT);").unwrap();
+        }
+        assert!(read_recent_cost_events(&db).is_err());
+        assert!(collect_cost_events_in(&dir).is_empty());
+        // Fix the table — the next read returns rows (nothing cached a
+        // fake empty result).
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "DROP TABLE session_message;
+                 CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, time_updated INTEGER, data TEXT);",
+            )
+            .unwrap();
+            let now = chrono::Utc::now().timestamp_millis();
+            add_session_message(&conn, "v2-only", "assistant", now, &v2_blob("opencode-go", "k3", 4.0, now));
+        }
+        let rows = collect_cost_events_in(&dir);
+        assert_eq!(rows.len(), 1);
+        assert!((rows[0].1 - 4.0).abs() < 1e-9);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn partial_read_serves_last_good_and_never_replaces_it() {
+        let dir = tmp_dir("partial");
+        let db = dir.join("opencode.db");
+        let now = chrono::Utc::now().timestamp_millis();
+        {
+            let conn = make_db(&db, LEDGER_SCHEMA);
+            add_session_message(&conn, "v2row", "assistant", now, &v2_blob("opencode-go", "k3", 2.0, now));
+            add_message(&conn, "v1row", now, &v1_blob("opencode-go", "k3", 1.0, now));
+        }
+        // Complete read seeds last-good.
+        assert_eq!(collect_cost_events_in(&dir).len(), 2);
+        // Break session_message → partial read: last-good (both rows)
+        // wins over the live partial {v1row}.
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch("DROP TABLE session_message; CREATE TABLE session_message (id TEXT);").unwrap();
+        }
+        assert_eq!(
+            collect_cost_events_in(&dir).len(),
+            2,
+            "an incomplete read serves last-good, not the partial"
+        );
+        // Break message too → every present table fails. Still last-good
+        // {2 rows}: had the partial been cached, this would return 1.
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch("DROP TABLE message; CREATE TABLE message (id TEXT);").unwrap();
+        }
+        assert_eq!(
+            collect_cost_events_in(&dir).len(),
+            2,
+            "the partial read must never become last-good"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn partial_read_without_last_good_returns_partial_uncached() {
+        let dir = tmp_dir("partial-nocache");
+        let db = dir.join("opencode.db");
+        let now = chrono::Utc::now().timestamp_millis();
+        {
+            let conn = make_db(&db, LEDGER_SCHEMA);
+            add_session_message(&conn, "v2row", "assistant", now, &v2_blob("opencode-go", "k3", 2.0, now));
+            // message present but broken → partial read, no last-good yet.
+            conn.execute_batch("DROP TABLE message; CREATE TABLE message (id TEXT);").unwrap();
+        }
+        let rows = collect_cost_events_in(&dir);
+        assert_eq!(rows.len(), 1, "the surviving table's rows still surface");
+        assert!((rows[0].1 - 2.0).abs() < 1e-9);
+        // Now break session_message too: every table fails → Err. The
+        // earlier partial was uncached, so there is nothing to fall
+        // back to — an empty result, not the partial replayed.
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch("DROP TABLE session_message; CREATE TABLE session_message (id TEXT);").unwrap();
+        }
+        assert!(collect_cost_events_in(&dir).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn window_read_keeps_v2_rows_when_v1_fails() {
+        let dir = tmp_dir("winpartial");
+        let now = chrono::Utc::now().timestamp_millis();
+        {
+            let conn = full_db(&dir.join("opencode.db"), Some("test-key-a"));
+            add_session_message(&conn, "v2row", "assistant", now, &v2_blob("opencode-go", "k3", 2.0, now));
+            conn.execute_batch("DROP TABLE message; CREATE TABLE message (id TEXT);").unwrap();
+        }
+        let (msgs, _) = read_messages(&dir, "test-key-a").unwrap();
+        assert_eq!(msgs.len(), 1, "the failed v1 table does not sink v2 rows");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn go_windows_only_use_dbs_matching_the_login() {
+        let dir = tmp_dir("go-scope");
+        let now = chrono::Utc::now().timestamp_millis();
+        {
+            let conn = full_db(&dir.join("opencode.db"), Some("test-key-a"));
+            add_session_message(&conn, "a", "assistant", now, &v2_blob("opencode-go", "k3", 5.0, now));
+        }
+        {
+            // A second channel logged into a DIFFERENT Go account.
+            let conn = full_db(&dir.join("opencode-next.db"), Some("test-key-b"));
+            add_session_message(&conn, "b", "assistant", now, &v2_blob("opencode-go", "k3", 7.0, now));
+        }
+        {
+            // A third channel where Go was logged out (imported, no row).
+            let conn = full_db(&dir.join("opencode-zeta.db"), None);
+            add_session_message(&conn, "z", "assistant", now, &v2_blob("opencode-go", "k3", 11.0, now));
+        }
+        // A pre-import channel inherits auth.json's identity.
+        write_auth(&dir, r#"{"opencode-go":{"type":"api","key":"test-key-a"}}"#);
+        {
+            let conn = make_db(&dir.join("opencode-old.db"), LEDGER_SCHEMA);
+            conn.execute_batch(CRED_SCHEMA).unwrap(); // tables exist, no migration row
+            add_session_message(&conn, "o", "assistant", now, &v2_blob("opencode-go", "k3", 13.0, now));
+        }
+        let go_cost = |dir: &Path, key: &str| -> f64 {
+            read_messages(dir, key)
+                .unwrap()
+                .0
+                .iter()
+                .filter(|m| m.provider == "opencode-go")
+                .map(|m| m.cost)
+                .sum()
+        };
+        // key-a: opencode.db + the auth.json-matching old channel.
+        assert!((go_cost(&dir, "test-key-a") - (5.0 + 13.0)).abs() < 1e-9);
+        // key-b: only opencode-next.db — logged-out and foreign channels out.
+        assert!((go_cost(&dir, "test-key-b") - 7.0).abs() < 1e-9);
         std::fs::remove_dir_all(&dir).ok();
     }
 
