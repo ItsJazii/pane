@@ -1,8 +1,13 @@
 //! Antigravity (Google's AI IDE). Mirrors the Mac app's three-step strategy:
 //! 1. Talk to the IDE's local language server (found by scanning processes
-//!    for `language_server*` / `agy` started with Antigravity flags).
+//!    for `language_server*` / `agy` started with Antigravity flags). When
+//!    the answer is missing any of the four quota windows it is topped up
+//!    from Cloud Code.
 //! 2. Fall back to Google's Cloud Code API with the OAuth token Antigravity
-//!    keeps in Windows Credential Manager (`gemini:antigravity`).
+//!    keeps in Windows Credential Manager (`gemini:antigravity`). Prod
+//!    `cloudcode-pa` is tried first, then `daily-cloudcode-pa`; each host's
+//!    buckets merge into one list (first host wins per bucketId) because
+//!    the hosts disagree on which quota groups they serve.
 //! 3. Report honestly when neither works.
 
 use std::time::Duration;
@@ -245,11 +250,12 @@ async fn try_language_server(server: &LanguageServer) -> Option<Snapshot> {
                 let plan = ls_call(&scheme, port, &server.csrf_token, "GetUserStatus")
                     .await
                     .and_then(|d| extract_plan(&d));
-                if covers_both_pools(&metrics) {
+                if has_all_windows(&metrics) {
                     return Some(Snapshot::ok(ID, NAME, plan, metrics));
                 }
-                // The LS can answer with only one pool too — fill the
-                // missing rows from Cloud Code when the OAuth token works.
+                // The LS can answer with a subset of the windows too —
+                // fill the missing rows from Cloud Code when the OAuth
+                // token works.
                 if let CloudResult::Ok(cloud) = try_cloud().await {
                     return Some(Snapshot::ok(
                         ID,
@@ -392,39 +398,40 @@ async fn cloud_post(base: &str, access_token: &str, path: &str) -> Result<Option
 }
 
 async fn cloud_call(access_token: &str, path: &str) -> Result<Option<Value>, bool> {
-    // Ok(Some(doc)) = 2xx; Ok(None) = non-auth failure; Err(true) = 401/403.
+    // Ok(Some(doc)) = 2xx; Ok(None) = non-auth failure; Err(true) = every
+    // host 401/403'd. One host denying the token doesn't end the search —
+    // another base may still accept it.
+    let mut denied = false;
     for base in CLOUD_BASES {
         match cloud_post(base, access_token, path).await {
             Ok(Some(doc)) => return Ok(Some(doc)),
-            Err(true) => return Err(true),
+            Err(true) => denied = true,
             _ => continue,
         }
     }
-    Ok(None)
+    if denied { Err(true) } else { Ok(None) }
 }
 
-/// retrieveUserQuotaSummary on every base until both quota pools are
+/// retrieveUserQuotaSummary on every base until all four quota windows are
 /// covered — daily currently omits the Gemini group, prod serves both.
+/// A host's 401/403 doesn't end the search; it only fails the call when
+/// no host produced a usable doc at all.
 async fn cloud_quota_docs(access_token: &str) -> Result<Vec<Value>, bool> {
     let mut docs = Vec::new();
+    let mut denied = false;
     for base in CLOUD_BASES {
         match cloud_post(base, access_token, "/v1internal:retrieveUserQuotaSummary").await {
             Ok(Some(doc)) => {
                 docs.push(doc);
-                if covers_both_pools(&parse_quota_buckets_all(&docs)) {
+                if has_all_windows(&parse_quota_buckets_all(&docs)) {
                     break;
                 }
             }
-            Err(true) => {
-                if docs.is_empty() {
-                    return Err(true);
-                }
-                break;
-            }
+            Err(true) => denied = true,
             _ => continue,
         }
     }
-    Ok(docs)
+    if docs.is_empty() && denied { Err(true) } else { Ok(docs) }
 }
 
 async fn cloud_snapshot(access_token: &str) -> Result<Option<Snapshot>, bool> {
@@ -562,13 +569,12 @@ fn parse_quota_buckets(doc: &Value) -> Vec<Metric> {
     parse_quota_buckets_all(std::slice::from_ref(doc))
 }
 
-/// Both quota pools present: a Gemini row (Session/Weekly) and a
-/// third-party row (Claude/Claude Weekly).
-fn covers_both_pools(metrics: &[Metric]) -> bool {
-    metrics.iter().any(|m| m.label == "Session" || m.label == "Weekly")
-        && metrics
-            .iter()
-            .any(|m| m.label == "Claude" || m.label == "Claude Weekly")
+/// All four quota windows present — hosts can answer with any subset of
+/// them, so the search doesn't stop at merely one row per pool.
+fn has_all_windows(metrics: &[Metric]) -> bool {
+    ["Session", "Weekly", "Claude", "Claude Weekly"]
+        .iter()
+        .all(|want| metrics.iter().any(|m| m.label == *want))
 }
 
 /// `primary` keeps its values; `extra` only fills labels primary lacks.
@@ -1579,12 +1585,27 @@ mod tests {
     }
 
     #[test]
-    fn covers_both_pools_needs_a_row_from_each_group() {
+    fn has_all_windows_needs_every_label_not_just_both_pools() {
         let third_party = parse_quota_buckets(&quota_doc(&[("3p-5h", 0.9), ("3p-weekly", 0.8)]));
-        assert!(!covers_both_pools(&third_party));
+        assert!(!has_all_windows(&third_party));
         let gemini = parse_quota_buckets(&quota_doc(&[("gemini-5h", 0.7), ("gemini-weekly", 0.6)]));
-        assert!(!covers_both_pools(&gemini));
-        assert!(covers_both_pools(&merge_metrics(gemini, third_party)));
+        assert!(!has_all_windows(&gemini));
+        // One row per pool is still a partial answer.
+        let subset = parse_quota_buckets(&quota_doc(&[("gemini-weekly", 0.6), ("3p-5h", 0.9)]));
+        assert!(!has_all_windows(&subset));
+        assert!(has_all_windows(&merge_metrics(gemini, third_party)));
+    }
+
+    /// Two docs that each hold a different subset combine into all four
+    /// rows — the shape the prod/daily split actually takes.
+    #[test]
+    fn quota_docs_split_windows_merge_to_all_four() {
+        let a = quota_doc(&[("gemini-weekly", 0.6), ("3p-5h", 0.9)]);
+        let b = quota_doc(&[("3p-weekly", 0.8), ("gemini-5h", 0.7)]);
+        let metrics = parse_quota_buckets_all(&[a, b]);
+        let labels: Vec<&str> = metrics.iter().map(|m| m.label.as_str()).collect();
+        assert_eq!(labels, ["Session", "Weekly", "Claude", "Claude Weekly"]);
+        assert!(has_all_windows(&metrics));
     }
 
     /// LS answers the 3p pool; cloud fills the Gemini rows and keeps the
