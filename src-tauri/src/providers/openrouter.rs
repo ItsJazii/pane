@@ -17,7 +17,7 @@ async fn fetch() -> Result<Snapshot, String> {
     let (key, source) = match stored_api_key("openrouter", &["OPENROUTER_API_KEY"]) {
         Some(key) => (key, "your saved key"),
         None => match super::opencode::auth_entry_key("openrouter") {
-            Some(key) => (key, "the key found in OpenCode's auth.json"),
+            Some(key) => (key, "the key stored by OpenCode"),
             None => {
                 return Ok(Snapshot::no_credentials(
                     ID,

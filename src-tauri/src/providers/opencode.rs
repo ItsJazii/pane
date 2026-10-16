@@ -1,5 +1,6 @@
 use super::{Metric, Snapshot};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 const ID: &str = "opencode";
@@ -31,20 +32,154 @@ pub fn data_dir() -> PathBuf {
         .join("opencode")
 }
 
-/// Reads an entry like {"opencode-go": {"type": "api", "key": "..."}} from
-/// OpenCode's auth.json. Also used by the OpenRouter provider.
+/// Every `opencode*.db` channel database in `dir`, path-sorted. OpenCode
+/// partitions storage by release channel (`opencode.db` for stable,
+/// `opencode-next.db` etc. for other channels), so all of them are
+/// unioned; the `.db` suffix keeps `-wal`/`-shm` sidecars out. A missing
+/// or unlistable dir reads as empty — the "never used OpenCode" case.
+fn opencode_dbs(dir: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.is_file()
+                        && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                            n.starts_with("opencode") && n.ends_with(".db")
+                        })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort();
+    out
+}
+
+fn table_exists(conn: &rusqlite::Connection, name: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        rusqlite::params![name],
+        |r| r.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+        > 0
+}
+
+/// Reads an entry like {"opencode-go": {"type": "api", "key": "..."}} —
+/// from OpenCode 2's `credential` table once it is authoritative, else
+/// from OpenCode 1's auth.json. Also used by the OpenRouter provider.
 pub fn auth_entry_key(entry: &str) -> Option<String> {
     auth_entry_key_in(&data_dir(), entry)
 }
 
 fn auth_entry_key_in(dir: &Path, entry: &str) -> Option<String> {
-    let raw = super::read_small_text(&dir.join("auth.json"), MAX_AUTH_BYTES, "auth.json").ok()?;
-    let doc: Value = serde_json::from_str(&raw).ok()?;
-    doc.get(entry)?
-        .get("key")
+    match resolve_entry_key(dir, entry) {
+        CredResult::Key(k) => Some(k),
+        _ => None,
+    }
+}
+
+/// Outcome of resolving one integration's key for a data dir.
+enum CredResult {
+    /// A key, wherever it lived.
+    Key(String),
+    /// Stores exist but hold no row for this integration — an OpenCode 2
+    /// logout or an auth.json without the entry.
+    None,
+    /// Nothing to read at all: no auth.json, no channel databases.
+    Missing,
+    /// A store was present but could not be read — never mistake a
+    /// locked database or half-written file for a logout.
+    Unreadable,
+}
+
+/// OpenCode 2's legacy-credential import marker: once this migration row
+/// exists in a channel database, that DB's `credential` table is the
+/// authoritative login record and `auth.json` must not revive a logout.
+const CRED_IMPORT_MIGRATION: &str = "20260805200742_import_legacy_credentials";
+
+enum DbCred {
+    /// The DB never imported file credentials (pre-OpenCode-2 store).
+    NotImported,
+    /// Imported: `credential` is authoritative — Some(key) or a genuine
+    /// absence (logout) that auth.json must not override.
+    Found(Option<String>),
+}
+
+/// `integration`'s current key in one channel database, or its absence.
+/// Row choice mirrors OpenCode's own ordering (active first, then the
+/// most recently updated).
+fn db_entry_key(db: &Path, integration: &str) -> Result<DbCred, String> {
+    let conn = super::open_readonly_sqlite(db)?;
+    if !table_exists(&conn, "migration") || !table_exists(&conn, "credential") {
+        return Ok(DbCred::NotImported);
+    }
+    let imported: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM migration WHERE id = ?1",
+            rusqlite::params![CRED_IMPORT_MIGRATION],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("read migrations: {e}"))?;
+    if imported == 0 {
+        return Ok(DbCred::NotImported);
+    }
+    use rusqlite::OptionalExtension;
+    let key = conn
+        .query_row(
+            "SELECT json_extract(value, '$.key') FROM credential
+             WHERE integration_id = ?1 AND (active IS NULL OR active = 1)
+             ORDER BY active DESC, time_updated DESC, id DESC
+             LIMIT 1",
+            rusqlite::params![integration],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|e| format!("read credentials: {e}"))?
+        .flatten();
+    Ok(DbCred::Found(
+        key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty()),
+    ))
+}
+
+/// Resolve `entry`'s key: each channel DB's `credential` table once its
+/// import migration ran (first key wins), else auth.json. A key found in
+/// any DB returns immediately; a DB read failure beats "imported but
+/// absent" (the locked DB might be the one holding the key); and only
+/// when NO imported DB exists does the file get a say.
+fn resolve_entry_key(dir: &Path, entry: &str) -> CredResult {
+    let mut imported = false;
+    let mut failed = false;
+    for db in opencode_dbs(dir) {
+        match db_entry_key(&db, entry) {
+            Ok(DbCred::Found(Some(k))) => return CredResult::Key(k),
+            Ok(DbCred::Found(None)) => imported = true,
+            Ok(DbCred::NotImported) => {}
+            Err(_) => failed = true,
+        }
+    }
+    if failed {
+        return CredResult::Unreadable;
+    }
+    if imported {
+        return CredResult::None;
+    }
+    let path = dir.join("auth.json");
+    if !path.exists() {
+        return CredResult::Missing;
+    }
+    let Ok(raw) = super::read_small_text(&path, MAX_AUTH_BYTES, "auth.json") else {
+        return CredResult::Unreadable;
+    };
+    let Ok(doc) = serde_json::from_str::<Value>(&raw) else {
+        return CredResult::Unreadable;
+    };
+    doc.get(entry)
+        .and_then(|e| e.get("key"))
         .and_then(Value::as_str)
         .filter(|k| !k.is_empty())
-        .map(str::to_string)
+        .map(|k| CredResult::Key(k.to_string()))
+        .unwrap_or(CredResult::None)
 }
 
 /// Stable fingerprint of a credential — never the key itself. Written
@@ -78,24 +213,11 @@ enum DirAuth {
 }
 
 fn dir_auth_state(dir: &Path) -> DirAuth {
-    let path = dir.join("auth.json");
-    if !path.exists() {
-        return DirAuth::Missing;
-    }
-    let Ok(raw) = super::read_small_text(&path, MAX_AUTH_BYTES, "auth.json") else {
-        return DirAuth::Unreadable;
-    };
-    let Ok(doc) = serde_json::from_str::<Value>(&raw) else {
-        return DirAuth::Unreadable;
-    };
-    match doc
-        .get("opencode-go")
-        .and_then(|e| e.get("key"))
-        .and_then(Value::as_str)
-        .filter(|k| !k.is_empty())
-    {
-        Some(k) => DirAuth::Identified(fingerprint_key(k)),
-        None => DirAuth::ParsedNoGo,
+    match resolve_entry_key(dir, "opencode-go") {
+        CredResult::Key(k) => DirAuth::Identified(fingerprint_key(&k)),
+        CredResult::None => DirAuth::ParsedNoGo,
+        CredResult::Missing => DirAuth::Missing,
+        CredResult::Unreadable => DirAuth::Unreadable,
     }
 }
 
@@ -231,7 +353,7 @@ fn extra_data_dirs() -> Vec<PathBuf> {
         }
     }
     for root in super::account_scan_roots() {
-        if root.join("opencode.db").is_file() || root.join("auth.json").is_file() {
+        if !opencode_dbs(&root).is_empty() || root.join("auth.json").is_file() {
             dirs.push(root);
         }
     }
@@ -256,17 +378,6 @@ fn scoped_id_charset(raw: &str) -> bool {
     !raw.is_empty() && raw.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
-/// Query the live OpenCode ledger read-only. Copying db+WAL into
-/// `%APPDATA%\Pane\tmp` used the same pattern that grew Devin's temp
-/// journal to tens of GB — never clone a vendor database onto C:.
-fn with_live_db<T>(dir: &Path, f: impl FnOnce(&Path) -> Result<T, String>) -> Result<T, String> {
-    let db_path = dir.join("opencode.db");
-    if !db_path.exists() {
-        return Err("opencode.db not found — has OpenCode been used on this PC?".into());
-    }
-    f(&db_path)
-}
-
 pub async fn snapshot() -> Snapshot {
     snapshot_at(data_dir(), ID.to_string(), NAME.to_string(), None).await
 }
@@ -289,20 +400,27 @@ async fn fetch(
     name: &str,
     expected_fp: Option<&str>,
 ) -> Result<Snapshot, String> {
-    let auth_path = dir.join("auth.json");
-    if !auth_path.exists() {
-        return Ok(Snapshot::no_credentials(
-            id,
-            name,
-            "OpenCode sign-in not found. Run `opencode` and log in.",
-        ));
-    }
-    let Some(key) = auth_entry_key_in(dir, "opencode-go") else {
-        return Ok(Snapshot::no_credentials(
-            id,
-            name,
-            "No OpenCode Go subscription found in auth.json.",
-        ));
+    let key = match resolve_entry_key(dir, "opencode-go") {
+        CredResult::Key(k) => k,
+        // A locked DB or half-written store is not a logout — keep the
+        // last-good numbers instead of painting "no credentials".
+        CredResult::Unreadable => {
+            return Err("couldn't read OpenCode's local credential store".into())
+        }
+        CredResult::None => {
+            return Ok(Snapshot::no_credentials(
+                id,
+                name,
+                "No OpenCode Go subscription found. Log into OpenCode Go.",
+            ))
+        }
+        CredResult::Missing => {
+            return Ok(Snapshot::no_credentials(
+                id,
+                name,
+                "OpenCode sign-in not found. Run `opencode` and log in.",
+            ))
+        }
     };
     if let Some(expected) = expected_fp {
         if fingerprint_key(&key) != expected {
@@ -432,8 +550,11 @@ fn month_period_ending(resets_ms: i64) -> i64 {
 /// Fallback: the pre-API local computation from opencode.db — this PC's
 /// rows only, so shared subscriptions under-count here.
 fn local_windows_snapshot(dir: &Path, id: &str, name: &str) -> Result<Snapshot, String> {
-    let w = with_live_db(dir, |db| {
-        let (msgs, capped) = read_messages(db)?;
+    // Query the live ledgers read-only. Copying db+WAL into
+    // `%APPDATA%\Pane\tmp` used the same pattern that grew Devin's temp
+    // journal to tens of GB — never clone a vendor database onto C:.
+    let (msgs, capped) = read_messages(dir)?;
+    let w = {
         let rows: Vec<(f64, f64)> = msgs
             .into_iter()
             .filter(|r| r.provider == "opencode-go" && r.cost > 0.0)
@@ -442,9 +563,9 @@ fn local_windows_snapshot(dir: &Path, id: &str, name: &str) -> Result<Snapshot, 
         // The monthly anchor is the earliest-ever Go row; when the row cap
         // dropped the oldest rows, recover it with the bounded oldest-first
         // probe instead of re-anchoring on the newest window's edge.
-        let anchor = if capped { earliest_go_anchor(db) } else { None };
-        Ok(go_windows(&rows, anchor, chrono::Utc::now().timestamp_millis() as f64))
-    })?;
+        let anchor = if capped { earliest_go_anchor(dir) } else { None };
+        go_windows(&rows, anchor, chrono::Utc::now().timestamp_millis() as f64)
+    };
     let metrics = vec![
         Metric::progress(
             "Session",
@@ -607,17 +728,42 @@ pub fn collect_cost_events() -> Vec<(f64, f64, f64, String, String)> {
 }
 
 pub fn collect_cost_events_in(dir: &Path) -> Vec<(f64, f64, f64, String, String)> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out = Vec::new();
+    for db in opencode_dbs(dir) {
+        for (ts, cost, tokens, model, provider, id) in collect_db_cost_events(&db) {
+            // OpenCode 2 copies legacy `message` rows into
+            // `session_message` under the same id — the union would count
+            // each copied row twice. The session_message copy wins (it is
+            // read first); rows with no id still count — nothing to
+            // dedupe them by.
+            if !id.is_empty() && !seen.insert(id) {
+                continue;
+            }
+            out.push((ts, cost, tokens, model, provider));
+        }
+    }
+    out
+}
+
+/// (ts, cost, tokens, model, provider, id) — the id rides along so the
+/// caller can dedupe OpenCode 2's copied rows across tables and DBs.
+type CostRow = (f64, f64, f64, String, String, String);
+
+/// One channel database's spend rows, served from a db/WAL stamp cache.
+/// A failed read must not cache empty — the next stamp hit would hide
+/// spend until the db/WAL changes again; keep the last good rows (if
+/// any) and retry on the next refresh.
+fn collect_db_cost_events(db_path: &Path) -> Vec<CostRow> {
     use std::sync::Mutex;
     use std::time::SystemTime;
     type Stamp = (SystemTime, u64);
-    type Row = (f64, f64, f64, String, String);
-    static CACHE: Mutex<Vec<(PathBuf, Stamp, Stamp, Vec<Row>)>> = Mutex::new(Vec::new());
+    static CACHE: Mutex<Vec<(PathBuf, Stamp, Stamp, Vec<CostRow>)>> = Mutex::new(Vec::new());
 
-    let db_path = dir.join("opencode.db");
     if !db_path.exists() {
         return Vec::new();
     }
-    let db_stamp = std::fs::metadata(&db_path)
+    let db_stamp = std::fs::metadata(db_path)
         .map(|m| (m.modified().unwrap_or(SystemTime::UNIX_EPOCH), m.len()))
         .unwrap_or((SystemTime::UNIX_EPOCH, 0));
     let wal = db_path.with_extension("db-wal");
@@ -626,7 +772,7 @@ pub fn collect_cost_events_in(dir: &Path) -> Vec<(f64, f64, f64, String, String)
         .unwrap_or((SystemTime::UNIX_EPOCH, 0));
 
     if let Ok(cache) = CACHE.lock() {
-        if let Some((_, d, w, rows)) = cache.iter().find(|(p, _, _, _)| p == &db_path) {
+        if let Some((_, d, w, rows)) = cache.iter().find(|(p, _, _, _)| p == db_path) {
             if *d == db_stamp && *w == wal_stamp {
                 // Stamp can sit still for days. Drop rows that have
                 // aged out of the 31-day window without a db re-read.
@@ -635,14 +781,11 @@ pub fn collect_cost_events_in(dir: &Path) -> Vec<(f64, f64, f64, String, String)
         }
     }
 
-    let rows = match with_live_db(dir, |db| read_recent_cost_events(db)) {
+    let rows = match read_recent_cost_events(db_path) {
         Ok(rows) => rows,
         Err(_) => {
-            // A failed read must not cache empty — the next stamp hit
-            // would hide spend until the db/WAL changes again. Keep the
-            // last good rows (if any) and retry on the next refresh.
             if let Ok(cache) = CACHE.lock() {
-                if let Some((_, _, _, rows)) = cache.iter().find(|(p, _, _, _)| p == &db_path) {
+                if let Some((_, _, _, rows)) = cache.iter().find(|(p, _, _, _)| p == db_path) {
                     return rows_in_spend_window(rows);
                 }
             }
@@ -650,19 +793,19 @@ pub fn collect_cost_events_in(dir: &Path) -> Vec<(f64, f64, f64, String, String)
         }
     };
     if let Ok(mut cache) = CACHE.lock() {
-        if let Some(slot) = cache.iter_mut().find(|(p, _, _, _)| p == &db_path) {
-            *slot = (db_path, db_stamp, wal_stamp, rows.clone());
+        if let Some(slot) = cache.iter_mut().find(|(p, _, _, _)| p == db_path) {
+            *slot = (db_path.to_path_buf(), db_stamp, wal_stamp, rows.clone());
         } else {
-            cache.push((db_path, db_stamp, wal_stamp, rows.clone()));
+            cache.push((db_path.to_path_buf(), db_stamp, wal_stamp, rows.clone()));
         }
     }
     rows
 }
 
-fn rows_in_spend_window(rows: &[(f64, f64, f64, String, String)]) -> Vec<(f64, f64, f64, String, String)> {
+fn rows_in_spend_window(rows: &[CostRow]) -> Vec<CostRow> {
     let cutoff_ms = crate::spend::spend_cutoff_ms(chrono::Local::now()) as f64;
     rows.iter()
-        .filter(|(ts, _, _, _, _)| {
+        .filter(|(ts, _, _, _, _, _)| {
             if *ts > 1_000_000_000_000.0 {
                 *ts >= cutoff_ms
             } else {
@@ -673,55 +816,46 @@ fn rows_in_spend_window(rows: &[(f64, f64, f64, String, String)]) -> Vec<(f64, f
         .collect()
 }
 
-/// Spend only needs ~31 days. The quota card still uses `read_messages`
-/// for the monthly Go cycle; this path must not pull that whole ledger.
-fn read_recent_cost_events(db: &Path) -> Result<Vec<(f64, f64, f64, String, String)>, String> {
-    let conn = super::open_readonly_sqlite(db)?;
-    let cutoff_ms = crate::spend::spend_cutoff_ms(chrono::Local::now());
-    // json_extract in WHERE made SQLite parse every blob in the table.
-    // Filter on the integer clock first; role/cost stay in Rust.
-    // Newest-first via rowid (clustered) — `ORDER BY time_created DESC`
-    // would filesort the 31-day match before LIMIT on a machine with a
-    // 176 MB ledger. Messages are inserted in clock order.
-    let max_ts: i64 = conn
-        .query_row("SELECT COALESCE(MAX(time_created), 0) FROM message", [], |row| row.get(0))
-        .unwrap_or(0);
-    let cutoff = if max_ts > 1_000_000_000_000 { cutoff_ms } else { cutoff_ms / 1000 };
-    // Pull raw blobs after the integer cutoff. json_extract in SELECT
-    // aborted the whole query on one malformed row; Rust skips those.
-    let mut stmt = conn
-        .prepare(
-            "SELECT time_created, data
-             FROM message
-             WHERE time_created >= ?1
-             ORDER BY rowid DESC
-             LIMIT ?2",
-        )
-        .map_err(|e| format!("query recent messages: {e}"))?;
-    let rows = stmt
-        .query_map(rusqlite::params![cutoff, super::MAX_LEDGER_ROWS as i64], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1).unwrap_or_default()))
-        })
-        .map_err(|e| format!("read recent messages: {e}"))?;
-    Ok(rows
-        .flatten()
-        .filter_map(|(time_created, data)| message_cost_event(time_created, &data))
-        .collect())
+/// Which ledger shape a row came from. v1 `message` rows carry flat
+/// `role`/`providerID`/`modelID`; v2 `session_message` rows put the role
+/// in the `type` column (pre-filtered by SQL) and nest model/provider
+/// under `model`.
+#[derive(Clone, Copy)]
+enum RowShape {
+    V1,
+    V2Assistant,
+    V2Compaction,
 }
 
-/// One assistant cost row, or None when the blob is junk / not spend.
-fn message_cost_event(time_created: i64, data: &str) -> Option<(f64, f64, f64, String, String)> {
+/// One assistant/compaction row parsed into a MessageRow, or None when
+/// the blob is junk, a non-assistant v1 row, or an unfinished
+/// compaction. Shared by the spend reader, the Go-window reader, and the
+/// monthly anchor probe.
+fn ledger_row(shape: RowShape, time_created: i64, data: &str) -> Option<MessageRow> {
     let msg = serde_json::from_str::<Value>(data).ok()?;
-    if msg.get("role").and_then(Value::as_str) != Some("assistant") {
-        return None;
+    match shape {
+        RowShape::V1 => {
+            if msg.get("role").and_then(Value::as_str) != Some("assistant") {
+                return None;
+            }
+        }
+        RowShape::V2Assistant => {}
+        RowShape::V2Compaction => {
+            // Only a finished compaction carries usage worth counting.
+            if msg.get("status").and_then(Value::as_str) != Some("completed") {
+                return None;
+            }
+        }
     }
     let provider = msg
-        .get("providerID")
+        .pointer("/model/providerID")
+        .or_else(|| msg.get("providerID"))
         .and_then(Value::as_str)
         .unwrap_or("unknown")
         .to_string();
     let model = msg
-        .get("modelID")
+        .pointer("/model/id")
+        .or_else(|| msg.get("modelID"))
         .and_then(Value::as_str)
         .unwrap_or("unknown")
         .to_string();
@@ -735,10 +869,109 @@ fn message_cost_event(time_created: i64, data: &str) -> Option<(f64, f64, f64, S
         .iter()
         .filter_map(|p| msg.pointer(p).and_then(Value::as_f64))
         .sum::<f64>();
-    if cost <= 0.0 && tokens <= 0.0 {
+    if matches!(shape, RowShape::V2Compaction) && cost <= 0.0 && tokens <= 0.0 {
         return None;
     }
-    Some((ts, cost, tokens, model, provider))
+    Some(MessageRow { ts, cost, tokens, provider, model })
+}
+
+/// Scan one ledger table into `sink` as (id, parsed row) pairs. `sql`
+/// must select id, time_created, (v2 only:) type, then data last.
+/// Returns the raw row count so callers can flag a hit row cap.
+fn scan_ledger_rows(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    v2: bool,
+    sink: &mut Vec<(String, MessageRow)>,
+) -> Result<u64, String> {
+    let mut stmt = conn.prepare(sql).map_err(|e| format!("query ledger: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            let shape = if v2 {
+                match row.get::<_, String>(2).unwrap_or_default().as_str() {
+                    "assistant" => RowShape::V2Assistant,
+                    "compaction" => RowShape::V2Compaction,
+                    _ => return Ok(None),
+                }
+            } else {
+                RowShape::V1
+            };
+            Ok(Some((
+                row.get::<_, String>(0).unwrap_or_default(),
+                row.get::<_, i64>(1).unwrap_or(0),
+                row.get::<_, String>(if v2 { 3 } else { 2 }).unwrap_or_default(),
+                shape,
+            )))
+        })
+        .map_err(|e| format!("read ledger: {e}"))?;
+    let mut scanned = 0u64;
+    for row in rows {
+        scanned += 1;
+        let Ok(Some((id, time_created, data, shape))) = row else { continue };
+        if let Some(m) = ledger_row(shape, time_created, &data) {
+            sink.push((id, m));
+        }
+    }
+    Ok(scanned)
+}
+
+/// v1 wrote seconds for a stretch before switching to ms; v2 always
+/// writes ms. Pick the cutoff unit from the table's own newest row —
+/// json_extract in WHERE made SQLite parse every blob, so the integer
+/// clock stays the pre-filter and role/cost stay in Rust.
+fn table_cutoff(conn: &rusqlite::Connection, table: &str, cutoff_ms: i64) -> i64 {
+    let max_ts: i64 = conn
+        .query_row(
+            &format!("SELECT COALESCE(MAX(time_created), 0) FROM {table}"),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if max_ts > 1_000_000_000_000 { cutoff_ms } else { cutoff_ms / 1000 }
+}
+
+/// Spend only needs ~31 days. One channel database's newest rows across
+/// both ledger tables; the caller dedupes ids across tables and DBs.
+/// Newest-first via rowid (clustered) — `ORDER BY time_created DESC`
+/// would filesort the 31-day match before LIMIT on a multi-hundred-MB
+/// ledger. A session_message failure never sinks the OpenCode 1 table.
+fn read_recent_cost_events(db: &Path) -> Result<Vec<CostRow>, String> {
+    let conn = super::open_readonly_sqlite(db)?;
+    let cutoff_ms = crate::spend::spend_cutoff_ms(chrono::Local::now());
+    let keep = |(id, m): (String, MessageRow)| -> Option<CostRow> {
+        (m.cost > 0.0 || m.tokens > 0.0)
+            .then_some((m.ts, m.cost, m.tokens, m.model, m.provider, id))
+    };
+    let mut out: Vec<CostRow> = Vec::new();
+    if table_exists(&conn, "session_message") {
+        let cutoff = table_cutoff(&conn, "session_message", cutoff_ms);
+        let sql = format!(
+            "SELECT id, time_created, type, data FROM session_message
+             WHERE time_created >= {cutoff} AND type IN ('assistant','compaction')
+             ORDER BY rowid DESC LIMIT {}",
+            super::MAX_LEDGER_ROWS
+        );
+        let mut parsed = Vec::new();
+        match scan_ledger_rows(&conn, &sql, true, &mut parsed) {
+            Ok(_) => out.extend(parsed.into_iter().filter_map(keep)),
+            Err(e) => eprintln!(
+                "[pane] opencode: session_message read failed ({e}) — message table still counted"
+            ),
+        }
+    }
+    if table_exists(&conn, "message") {
+        let cutoff = table_cutoff(&conn, "message", cutoff_ms);
+        let sql = format!(
+            "SELECT id, time_created, data FROM message
+             WHERE time_created >= {cutoff}
+             ORDER BY rowid DESC LIMIT {}",
+            super::MAX_LEDGER_ROWS
+        );
+        let mut parsed = Vec::new();
+        scan_ledger_rows(&conn, &sql, false, &mut parsed)?;
+        out.extend(parsed.into_iter().filter_map(keep));
+    }
+    Ok(out)
 }
 
 pub struct MessageRow {
@@ -749,103 +982,143 @@ pub struct MessageRow {
     pub model: String,
 }
 
-/// Raw assistant-message rows from opencode.db.
-fn read_messages(db: &Path) -> Result<(Vec<MessageRow>, bool), String> {
-    let conn = super::open_readonly_sqlite(db)?;
-    let mut stmt = conn
-        .prepare(&format!(
-            "SELECT time_created, data FROM message ORDER BY time_created DESC LIMIT {}",
-            super::MAX_LEDGER_ROWS
-        ))
-        .map_err(|e| format!("query messages: {e}"))?;
-
-    let rows = stmt
-        .query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(|e| format!("read messages: {e}"))?;
-
-    let mut scanned: u64 = 0;
+/// Assistant/compaction rows across every `opencode*.db` in `dir`,
+/// deduped by message id (session_message wins). `capped` flags any
+/// table that hit the row cap so the monthly anchor can be recovered by
+/// the oldest-first probe.
+fn read_messages(dir: &Path) -> Result<(Vec<MessageRow>, bool), String> {
+    let dbs = opencode_dbs(dir);
+    if dbs.is_empty() {
+        return Err("opencode.db not found — has OpenCode been used on this PC?".into());
+    }
+    let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::new();
-    for row in rows {
-        scanned += 1;
-        let Ok((time_created, data)) = row else { continue };
-        let Ok(msg) = serde_json::from_str::<Value>(&data) else { continue };
-        if msg.get("role").and_then(Value::as_str) != Some("assistant") {
+    let mut capped = false;
+    let mut read_any = false;
+    let mut first_err = None;
+    for db in &dbs {
+        match read_db_messages(db, &mut seen, &mut out) {
+            Ok(c) => {
+                read_any = true;
+                capped |= c;
+            }
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+    }
+    if !read_any {
+        return Err(first_err.unwrap_or_else(|| "no readable opencode*.db".into()));
+    }
+    Ok((out, capped))
+}
+
+/// One database's newest rows from both tables — session_message first
+/// so its copies win the dedupe. A v2 read failure never sinks v1.
+fn read_db_messages(
+    db: &Path,
+    seen: &mut HashSet<String>,
+    out: &mut Vec<MessageRow>,
+) -> Result<bool, String> {
+    let conn = super::open_readonly_sqlite(db)?;
+    let mut capped = false;
+    for (table, v2) in [("session_message", true), ("message", false)] {
+        if !table_exists(&conn, table) {
             continue;
         }
-        let provider = msg
-            .get("providerID")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
-        let model = msg
-            .get("modelID")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
-        let cost = msg.get("cost").and_then(Value::as_f64).unwrap_or(0.0);
-        let ts = msg
-            .pointer("/time/completed")
-            .or_else(|| msg.pointer("/time/created"))
-            .and_then(Value::as_f64)
-            .unwrap_or(time_created as f64);
-        let tokens = ["/tokens/input", "/tokens/output", "/tokens/reasoning"]
-            .iter()
-            .filter_map(|p| msg.pointer(p).and_then(Value::as_f64))
-            .sum::<f64>();
-        out.push(MessageRow { ts, cost, tokens, provider, model });
+        let sql = if v2 {
+            format!(
+                "SELECT id, time_created, type, data FROM {table}
+                 WHERE type IN ('assistant','compaction')
+                 ORDER BY time_created DESC LIMIT {}",
+                super::MAX_LEDGER_ROWS
+            )
+        } else {
+            format!(
+                "SELECT id, time_created, data FROM {table}
+                 ORDER BY time_created DESC LIMIT {}",
+                super::MAX_LEDGER_ROWS
+            )
+        };
+        let mut parsed = Vec::new();
+        let scanned = match scan_ledger_rows(&conn, &sql, v2, &mut parsed) {
+            Ok(n) => n,
+            Err(e) => {
+                if v2 {
+                    eprintln!(
+                        "[pane] opencode: session_message read failed ({e}) — message table still counted"
+                    );
+                    continue;
+                }
+                return Err(e);
+            }
+        };
+        if scanned >= super::MAX_LEDGER_ROWS {
+            eprintln!(
+                "[pane] opencode: {table} table hit the {}-row read cap — keeping newest rows, oldest usage is dropped",
+                super::MAX_LEDGER_ROWS
+            );
+            capped = true;
+        }
+        for (id, m) in parsed {
+            if !id.is_empty() && !seen.insert(id) {
+                continue;
+            }
+            out.push(m);
+        }
     }
-    if scanned >= super::MAX_LEDGER_ROWS {
-        eprintln!(
-            "[pane] opencode: message table hit the {}-row read cap — keeping newest rows, oldest usage is dropped",
-            super::MAX_LEDGER_ROWS
-        );
-    }
-    Ok((out, scanned >= super::MAX_LEDGER_ROWS))
+    Ok(capped)
 }
 
 /// The monthly cycle anchors on the earliest-ever Go row — which the
 /// newest-first cap in read_messages intentionally drops. When (and only
-/// when) the cap binds, find the anchor with a small oldest-first probe:
-/// bounded regardless of table size, skipped entirely on normal DBs.
+/// when) the cap binds, find the anchor with a small oldest-first probe
+/// across both tables and every channel database: bounded regardless of
+/// table size, skipped entirely on normal DBs.
 ///
-/// Known limitation: read_messages covers the newest MAX_LEDGER_ROWS and
-/// this probe covers the oldest MAX_ANCHOR_PROBE_ROWS, so a table with more
-/// than MAX_LEDGER_ROWS + MAX_ANCHOR_PROBE_ROWS rows leaves an unsearched
-/// middle band. If the earliest paid Go row falls in that band the monthly
-/// anchor lands late, shifting the reported billing boundary and reset time.
-/// Only reachable on an implausibly large local ledger (>2.1M rows).
-fn earliest_go_anchor(db: &Path) -> Option<f64> {
+/// Known limitation: read_messages covers the newest MAX_LEDGER_ROWS per
+/// table and this probe covers the oldest MAX_ANCHOR_PROBE_ROWS per
+/// table, so a table with more than MAX_LEDGER_ROWS +
+/// MAX_ANCHOR_PROBE_ROWS rows leaves an unsearched middle band. If the
+/// earliest paid Go row falls in that band the monthly anchor lands
+/// late, shifting the reported billing boundary and reset time. Only
+/// reachable on an implausibly large local ledger (>2.1M rows).
+fn earliest_go_anchor(dir: &Path) -> Option<f64> {
     const MAX_ANCHOR_PROBE_ROWS: u64 = 100_000;
-    let conn = super::open_readonly_sqlite(db).ok()?;
-    let mut stmt = conn
-        .prepare(&format!(
-            "SELECT time_created, data FROM message ORDER BY time_created ASC LIMIT {MAX_ANCHOR_PROBE_ROWS}"
-        ))
-        .ok()?;
-    let rows = stmt
-        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
-        .ok()?;
-    for row in rows.flatten() {
-        let (time_created, data) = row;
-        let Ok(msg) = serde_json::from_str::<Value>(&data) else { continue };
-        if msg.get("role").and_then(Value::as_str) != Some("assistant")
-            || msg.get("providerID").and_then(Value::as_str) != Some("opencode-go")
-        {
-            continue;
+    let mut best: Option<f64> = None;
+    for db in opencode_dbs(dir) {
+        let Ok(conn) = super::open_readonly_sqlite(&db) else { continue };
+        for (table, v2) in [("session_message", true), ("message", false)] {
+            if !table_exists(&conn, table) {
+                continue;
+            }
+            let sql = if v2 {
+                format!(
+                    "SELECT id, time_created, type, data FROM {table}
+                     WHERE type IN ('assistant','compaction')
+                     ORDER BY time_created ASC LIMIT {MAX_ANCHOR_PROBE_ROWS}"
+                )
+            } else {
+                format!(
+                    "SELECT id, time_created, data FROM {table}
+                     ORDER BY time_created ASC LIMIT {MAX_ANCHOR_PROBE_ROWS}"
+                )
+            };
+            let mut parsed = Vec::new();
+            if scan_ledger_rows(&conn, &sql, v2, &mut parsed).is_err() {
+                continue;
+            }
+            // Ascending: the first paid Go row is this table's earliest.
+            if let Some((_, m)) =
+                parsed.into_iter().find(|(_, m)| m.provider == "opencode-go" && m.cost > 0.0)
+            {
+                best = Some(best.map_or(m.ts, |b: f64| b.min(m.ts)));
+            }
         }
-        if msg.get("cost").and_then(Value::as_f64).unwrap_or(0.0) <= 0.0 {
-            continue;
-        }
-        return Some(
-            msg.pointer("/time/completed")
-                .or_else(|| msg.pointer("/time/created"))
-                .and_then(Value::as_f64)
-                .unwrap_or(time_created as f64),
-        );
     }
-    None
+    best
 }
 
 
@@ -863,8 +1136,8 @@ mod tests {
         let old = now - 40.0 * 86_400_000.0;
         let fresh = now - 2.0 * 86_400_000.0;
         let rows = vec![
-            (old, 1.0, 10.0, "m".into(), "p".into()),
-            (fresh, 2.0, 20.0, "m".into(), "p".into()),
+            (old, 1.0, 10.0, "m".into(), "p".into(), "id-a".into()),
+            (fresh, 2.0, 20.0, "m".into(), "p".into(), "id-b".into()),
         ];
         let kept = rows_in_spend_window(&rows);
         assert_eq!(kept.len(), 1);
@@ -877,10 +1150,10 @@ mod tests {
         let bad = "{not-json";
         let rows: Vec<_> = [good, bad, good]
             .into_iter()
-            .filter_map(|data| message_cost_event(1_784_208_630, data))
+            .filter_map(|data| ledger_row(RowShape::V1, 1_784_208_630, data))
             .collect();
         assert_eq!(rows.len(), 2);
-        assert!((rows[0].1 - 1.5).abs() < 1e-9);
+        assert!((rows[0].cost - 1.5).abs() < 1e-9);
     }
 
     #[test]
@@ -1133,4 +1406,343 @@ mod tests {
         assert_eq!(bob.len(), 1, "one distinct extra login");
         std::fs::remove_dir_all(&root).ok();
     }
+
+    // ---- OpenCode 2: session_message ledger + credential table --------
+
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "pane-oc-{tag}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    const LEDGER_SCHEMA: &str = "
+        CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+        CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, time_updated INTEGER, data TEXT);
+    ";
+
+    const CRED_SCHEMA: &str = "
+        CREATE TABLE credential (id TEXT, integration_id TEXT, label TEXT, value TEXT, connector_id TEXT, method_id TEXT, active INTEGER, time_created INTEGER, time_updated INTEGER);
+        CREATE TABLE migration (id TEXT, time_created INTEGER);
+    ";
+
+    fn make_db(path: &Path, schema: &str) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch(schema).unwrap();
+        conn
+    }
+
+    fn add_message(conn: &rusqlite::Connection, id: &str, ts: i64, data: &str) {
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?1,'s',?2,?2,?3)",
+            rusqlite::params![id, ts, data],
+        )
+        .unwrap();
+    }
+
+    fn add_session_message(conn: &rusqlite::Connection, id: &str, ty: &str, ts: i64, data: &str) {
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?1,'s',?2,0,?3,?3,?4)",
+            rusqlite::params![id, ty, ts, data],
+        )
+        .unwrap();
+    }
+
+    fn add_credential(
+        conn: &rusqlite::Connection,
+        integration: &str,
+        value: &str,
+        active: i64,
+        updated: i64,
+    ) {
+        conn.execute(
+            "INSERT INTO credential (id, integration_id, value, active, time_created, time_updated)
+             VALUES (lower(hex(randomblob(8))), ?1, ?2, ?3, ?4, ?4)",
+            rusqlite::params![integration, value, active, updated],
+        )
+        .unwrap();
+    }
+
+    /// A `credential`/`migration` schema; `migration=true` inserts the
+    /// OpenCode 2 legacy-import row that makes the table authoritative.
+    fn cred_db(path: &Path, imported: bool) -> rusqlite::Connection {
+        let conn = make_db(path, CRED_SCHEMA);
+        if imported {
+            conn.execute(
+                "INSERT INTO migration (id, time_created) VALUES (?1, 0)",
+                rusqlite::params![CRED_IMPORT_MIGRATION],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    fn v1_blob(provider: &str, model: &str, cost: f64, ts: i64) -> String {
+        serde_json::json!({
+            "role": "assistant", "providerID": provider, "modelID": model,
+            "cost": cost, "time": {"created": ts, "completed": ts},
+            "tokens": {"input": 10, "output": 5}
+        })
+        .to_string()
+    }
+
+    fn v2_blob(provider: &str, model: &str, cost: f64, ts: i64) -> String {
+        serde_json::json!({
+            "agent": "build",
+            "model": {"id": model, "providerID": provider, "variant": "xhigh"},
+            "cost": cost, "time": {"created": ts, "completed": ts},
+            "tokens": {"input": 10, "output": 5, "reasoning": 0}
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn v2_assistant_row_parses_the_nested_shape() {
+        let data = serde_json::json!({
+            "time": {"created": 1792158187712i64, "streamed": 1, "completed": 1792158269508i64},
+            "agent": "build",
+            "model": {"id": "qwen3.8-flash", "providerID": "opencode-go", "variant": "xhigh"},
+            "finish": "tool-calls", "rawFinish": "tool_use",
+            "cost": 0.006022268,
+            "tokens": {"input": 6, "output": 5172, "reasoning": 7,
+                       "cache": {"read": 211358, "write": 1044}}
+        })
+        .to_string();
+        let m = ledger_row(RowShape::V2Assistant, 1792158187712, &data).expect("v2 row parses");
+        assert_eq!(m.provider, "opencode-go");
+        assert_eq!(m.model, "qwen3.8-flash");
+        assert!((m.cost - 0.006022268).abs() < 1e-9);
+        assert_eq!(m.ts, 1792158269508.0, "time.completed wins over created");
+        // tokens = input+output+reasoning; cache read/write never counted.
+        assert_eq!(m.tokens, 6.0 + 5172.0 + 7.0);
+    }
+
+    #[test]
+    fn v2_in_progress_and_compaction_rows_follow_the_rules() {
+        // In-progress assistant: no cost/tokens — parses, but the spend
+        // filter (cost>0 || tokens>0) drops it downstream.
+        let live = r#"{"model":{"id":"m","providerID":"opencode-go"},"tokens":{"input":0}}"#;
+        let m = ledger_row(RowShape::V2Assistant, 1, live).unwrap();
+        assert!(m.cost <= 0.0 && m.tokens <= 0.0);
+        // A completed compaction with real numbers counts.
+        let done = r#"{"status":"completed","model":{"providerID":"opencode-go","id":"c"},"cost":0.5,"tokens":{"input":1,"output":2}}"#;
+        let m = ledger_row(RowShape::V2Compaction, 1, done).expect("paid compaction counts");
+        assert!((m.cost - 0.5).abs() < 1e-9);
+        // …but a compaction without numbers or still running never does.
+        let empty = r#"{"status":"completed","model":{"providerID":"opencode-go","id":"c"}}"#;
+        assert!(ledger_row(RowShape::V2Compaction, 1, empty).is_none());
+        let running = r#"{"status":"running","cost":0.5,"tokens":{"input":1}}"#;
+        assert!(ledger_row(RowShape::V2Compaction, 1, running).is_none());
+    }
+
+    #[test]
+    fn copied_rows_across_both_tables_count_once() {
+        let dir = tmp_dir("union");
+        {
+            let conn = make_db(&dir.join("opencode.db"), LEDGER_SCHEMA);
+            let now = chrono::Utc::now().timestamp_millis();
+            // Same id in both tables — the session_message copy wins.
+            add_message(&conn, "shared", now - 1000, &v1_blob("opencode-go", "k3", 1.0, now - 1000));
+            add_session_message(&conn, "shared", "assistant", now - 1000, &v2_blob("opencode-go", "k3", 2.0, now - 1000));
+            add_message(&conn, "v1-only", now - 2000, &v1_blob("opencode-go", "k3", 3.0, now - 2000));
+            add_session_message(&conn, "v2-only", "assistant", now - 3000, &v2_blob("opencode-go", "k3", 4.0, now - 3000));
+            // A non-assistant v2 row never counts.
+            add_session_message(&conn, "user-msg", "user", now - 4000, "{}");
+        }
+        let rows = collect_cost_events_in(&dir);
+        assert_eq!(rows.len(), 3);
+        let total: f64 = rows.iter().map(|r| r.1).sum();
+        assert!(
+            (total - (2.0 + 3.0 + 4.0)).abs() < 1e-9,
+            "v2 copy (2.0) wins over the 1.0 original; total {total}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn opencode1_db_without_session_message_still_reads() {
+        let dir = tmp_dir("v1only");
+        {
+            let conn = rusqlite::Connection::open(dir.join("opencode.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);",
+            )
+            .unwrap();
+            let now = chrono::Utc::now().timestamp_millis();
+            add_message(&conn, "a", now, &v1_blob("opencode-go", "k3", 1.25, now));
+            add_message(&conn, "u", now, r#"{"role":"user"}"#);
+        }
+        let rows = collect_cost_events_in(&dir);
+        assert_eq!(rows.len(), 1);
+        assert!((rows[0].1 - 1.25).abs() < 1e-9);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn overlapping_ids_across_db_files_count_once() {
+        let dir = tmp_dir("twodb");
+        let now = chrono::Utc::now().timestamp_millis();
+        {
+            let conn = make_db(&dir.join("opencode.db"), LEDGER_SCHEMA);
+            add_message(&conn, "shared", now, &v1_blob("opencode-go", "k3", 1.0, now));
+            add_message(&conn, "a-only", now, &v1_blob("opencode-go", "k3", 2.0, now));
+        }
+        {
+            // opencode-next.db sorts before opencode.db — its copy wins.
+            let conn = make_db(&dir.join("opencode-next.db"), LEDGER_SCHEMA);
+            add_session_message(&conn, "shared", "assistant", now, &v2_blob("opencode-go", "k3", 5.0, now));
+        }
+        let rows = collect_cost_events_in(&dir);
+        assert_eq!(rows.len(), 2);
+        let total: f64 = rows.iter().map(|r| r.1).sum();
+        assert!((total - (5.0 + 2.0)).abs() < 1e-9, "shared counted once; total {total}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_messages_dedupes_both_tables() {
+        let dir = tmp_dir("winunion");
+        {
+            let conn = make_db(&dir.join("opencode.db"), LEDGER_SCHEMA);
+            let now = chrono::Utc::now().timestamp_millis();
+            add_message(&conn, "x", now, &v1_blob("opencode-go", "k3", 1.0, now));
+            add_session_message(&conn, "x", "assistant", now, &v2_blob("opencode-go", "k3", 1.0, now));
+            add_session_message(&conn, "y", "assistant", now, &v2_blob("other", "m", 0.5, now));
+        }
+        let (msgs, capped) = read_messages(&dir).unwrap();
+        assert!(!capped);
+        assert_eq!(msgs.len(), 2, "the copied id counts once");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn db_discovery_ignores_wal_sidecars_and_sorts() {
+        let dir = tmp_dir("dbs");
+        std::fs::write(dir.join("opencode.db"), b"").unwrap();
+        std::fs::write(dir.join("opencode.db-wal"), b"").unwrap();
+        std::fs::write(dir.join("opencode.db-shm"), b"").unwrap();
+        std::fs::write(dir.join("opencode-next.db"), b"").unwrap();
+        std::fs::write(dir.join("other.db"), b"").unwrap();
+        let names: Vec<String> = opencode_dbs(&dir)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["opencode-next.db", "opencode.db"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn active_credential_row_wins_over_inactive_and_older() {
+        let dir = tmp_dir("cred-active");
+        {
+            let conn = cred_db(&dir.join("opencode.db"), true);
+            add_credential(&conn, "opencode-go", r#"{"type":"api","key":"test-key-inactive"}"#, 0, 3000);
+            add_credential(&conn, "opencode-go", r#"{"type":"api","key":"test-key-a"}"#, 1, 1000);
+            add_credential(&conn, "opencode-go", r#"{"type":"api","key":"test-key-b"}"#, 1, 2000);
+        }
+        // active DESC, then time_updated DESC — the newer active row.
+        assert_eq!(
+            auth_entry_key_in(&dir, "opencode-go").as_deref(),
+            Some("test-key-b")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn imported_db_without_the_integration_stays_logged_out() {
+        let dir = tmp_dir("cred-logout");
+        {
+            let conn = cred_db(&dir.join("opencode.db"), true);
+            add_credential(&conn, "openrouter", r#"{"type":"api","key":"test-key-or"}"#, 1, 1000);
+        }
+        // auth.json still carries the old key — it must not revive a
+        // v2 logout now that the credential table is authoritative.
+        write_auth(&dir, r#"{"opencode-go":{"type":"api","key":"stale-file-key"}}"#);
+        assert_eq!(auth_entry_key_in(&dir, "opencode-go"), None);
+        // …but an integration that IS imported resolves from the DB.
+        assert_eq!(
+            auth_entry_key_in(&dir, "openrouter").as_deref(),
+            Some("test-key-or")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pre_import_db_falls_back_to_auth_json() {
+        let dir = tmp_dir("cred-v1");
+        {
+            // credential rows exist but the import migration never ran —
+            // a pre-OpenCode-2 store: auth.json stays authoritative.
+            let conn = cred_db(&dir.join("opencode.db"), false);
+            add_credential(&conn, "opencode-go", r#"{"type":"api","key":"test-key-db"}"#, 1, 1000);
+        }
+        write_auth(&dir, r#"{"opencode-go":{"type":"api","key":"test-key-file"}}"#);
+        assert_eq!(
+            auth_entry_key_in(&dir, "opencode-go").as_deref(),
+            Some("test-key-file")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn second_channel_db_supplies_the_key() {
+        let dir = tmp_dir("cred-second");
+        {
+            // opencode-next.db sorts first: imported, no opencode-go row.
+            let conn = cred_db(&dir.join("opencode-next.db"), true);
+            add_credential(&conn, "moonshotai", r#"{"type":"api","key":"test-key-mm"}"#, 1, 1000);
+        }
+        {
+            let conn = cred_db(&dir.join("opencode.db"), true);
+            add_credential(&conn, "opencode-go", r#"{"type":"api","key":"test-key-a"}"#, 1, 1000);
+        }
+        assert_eq!(
+            auth_entry_key_in(&dir, "opencode-go").as_deref(),
+            Some("test-key-a")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn openrouter_and_aihubmix_resolve_through_the_same_path() {
+        let dir = tmp_dir("cred-entries");
+        {
+            let conn = cred_db(&dir.join("opencode.db"), true);
+            add_credential(&conn, "openrouter", r#"{"type":"api","key":"test-key-or"}"#, 1, 1000);
+            add_credential(&conn, "aihubmix", r#"{"type":"api","key":"test-key-mix"}"#, 1, 1000);
+        }
+        assert_eq!(
+            auth_entry_key_in(&dir, "openrouter").as_deref(),
+            Some("test-key-or")
+        );
+        assert_eq!(
+            auth_entry_key_in(&dir, "aihubmix").as_deref(),
+            Some("test-key-mix")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn dir_auth_state_reflects_a_db_logout_not_missing() {
+        let dir = tmp_dir("cred-state");
+        {
+            let conn = cred_db(&dir.join("opencode.db"), true);
+            add_credential(&conn, "openrouter", r#"{"type":"api","key":"test-key-or"}"#, 1, 1000);
+        }
+        // Imported store, no Go key → ParsedNoGo (a real logout), not
+        // Missing — and an identified key fingerprints as before.
+        assert!(matches!(dir_auth_state(&dir), DirAuth::ParsedNoGo));
+        {
+            let conn = rusqlite::Connection::open(dir.join("opencode.db")).unwrap();
+            add_credential(&conn, "opencode-go", r#"{"type":"api","key":"test-key-go"}"#, 1, 1000);
+        }
+        assert!(matches!(dir_auth_state(&dir), DirAuth::Identified(_)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
 }
