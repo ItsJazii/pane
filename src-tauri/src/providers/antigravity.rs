@@ -579,7 +579,7 @@ fn has_all_windows(metrics: &[Metric]) -> bool {
 
 /// `primary` keeps its values; `extra` only fills labels primary lacks.
 /// Ordered like bucket_label: Session, Weekly, Claude, Claude Weekly,
-/// anything else last (stable).
+/// Argon Weekly, anything else last (stable).
 fn merge_metrics(primary: Vec<Metric>, extra: Vec<Metric>) -> Vec<Metric> {
     let mut out = primary;
     for m in extra {

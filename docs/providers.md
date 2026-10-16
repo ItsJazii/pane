@@ -286,7 +286,9 @@ Ground rules that apply to every provider:
   refresh — prod `cloudcode-pa.googleapis.com` first, then
   `daily-cloudcode-pa.googleapis.com`, answers merged per bucket since
   the hosts disagree on which quota groups they serve.
-- **Shows:** Gemini + Claude pool windows, plan.
+- **Shows:** Gemini + Claude pool windows, plan. `Argon Weekly` also
+  appears while the Antigravity IDE's language server runs — the Cloud
+  Code hosts don't serve that bucket.
 - **Spend:** reads per-generation token counts from the conversation
   databases under `~/.gemini/antigravity*/conversations/*.db` — strictly
   read-only (the .pb transcripts carry no token data). Dollars are a
