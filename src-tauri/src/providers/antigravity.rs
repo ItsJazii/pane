@@ -16,8 +16,10 @@ const NAME: &str = "Antigravity";
 
 const LS_SERVICE: &str = "exa.language_server_pb.LanguageServerService";
 const CLOUD_BASES: [&str; 2] = [
-    "https://daily-cloudcode-pa.googleapis.com",
+    // Prod first: daily now answers retrieveUserQuotaSummary with only
+    // the Claude/GPT pool, while prod still returns both groups.
     "https://cloudcode-pa.googleapis.com",
+    "https://daily-cloudcode-pa.googleapis.com",
 ];
 // Installed-app OAuth client — intentionally public, same values the IDE ships.
 const GOOGLE_CLIENT_ID: &str =
@@ -243,6 +245,19 @@ async fn try_language_server(server: &LanguageServer) -> Option<Snapshot> {
                 let plan = ls_call(&scheme, port, &server.csrf_token, "GetUserStatus")
                     .await
                     .and_then(|d| extract_plan(&d));
+                if covers_both_pools(&metrics) {
+                    return Some(Snapshot::ok(ID, NAME, plan, metrics));
+                }
+                // The LS can answer with only one pool too — fill the
+                // missing rows from Cloud Code when the OAuth token works.
+                if let CloudResult::Ok(cloud) = try_cloud().await {
+                    return Some(Snapshot::ok(
+                        ID,
+                        NAME,
+                        plan.or(cloud.plan),
+                        merge_metrics(metrics, cloud.metrics),
+                    ));
+                }
                 return Some(Snapshot::ok(ID, NAME, plan, metrics));
             }
         }
@@ -356,43 +371,76 @@ async fn refresh_google_token(refresh_token: &str) -> Refresh {
     }
 }
 
+/// One POST against one Cloud Code base.
+/// Ok(Some(doc)) = 2xx + parseable; Ok(None) = anything non-auth;
+/// Err(true) = 401/403 (the token itself is bad — stop trying bases).
+async fn cloud_post(base: &str, access_token: &str, path: &str) -> Result<Option<Value>, bool> {
+    let resp = super::http()
+        .post(format!("{base}{path}"))
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("User-Agent", "antigravity")
+        .json(&json!({}))
+        .send()
+        .await;
+    match resp {
+        Ok(r) if r.status().is_success() => Ok(r.json::<Value>().await.ok()),
+        Ok(r) if matches!(r.status().as_u16(), 401 | 403) => Err(true),
+        _ => Ok(None),
+    }
+}
+
 async fn cloud_call(access_token: &str, path: &str) -> Result<Option<Value>, bool> {
     // Ok(Some(doc)) = 2xx; Ok(None) = non-auth failure; Err(true) = 401/403.
     for base in CLOUD_BASES {
-        let resp = super::http()
-            .post(format!("{base}{path}"))
-            .header("Accept", "application/json")
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {access_token}"))
-            .header("User-Agent", "antigravity")
-            .json(&json!({}))
-            .send()
-            .await;
-        match resp {
-            Ok(r) if r.status().is_success() => return Ok(r.json::<Value>().await.ok()),
-            Ok(r) if matches!(r.status().as_u16(), 401 | 403) => return Err(true),
+        match cloud_post(base, access_token, path).await {
+            Ok(Some(doc)) => return Ok(Some(doc)),
+            Err(true) => return Err(true),
             _ => continue,
         }
     }
     Ok(None)
 }
 
-async fn cloud_snapshot(access_token: &str) -> Result<Option<Snapshot>, bool> {
-    let doc = cloud_call(access_token, "/v1internal:retrieveUserQuotaSummary").await?;
-    if let Some(doc) = doc {
-        let metrics = parse_quota_buckets(&doc);
-        if !metrics.is_empty() {
-            let plan = match cloud_call(access_token, "/v1internal:loadCodeAssist").await {
-                Ok(Some(d)) => d
-                    .get("paidTier")
-                    .or_else(|| d.get("currentTier"))
-                    .and_then(|t| t.get("name"))
-                    .and_then(Value::as_str)
-                    .map(format_plan),
-                _ => None,
-            };
-            return Ok(Some(Snapshot::ok(ID, NAME, plan, metrics)));
+/// retrieveUserQuotaSummary on every base until both quota pools are
+/// covered — daily currently omits the Gemini group, prod serves both.
+async fn cloud_quota_docs(access_token: &str) -> Result<Vec<Value>, bool> {
+    let mut docs = Vec::new();
+    for base in CLOUD_BASES {
+        match cloud_post(base, access_token, "/v1internal:retrieveUserQuotaSummary").await {
+            Ok(Some(doc)) => {
+                docs.push(doc);
+                if covers_both_pools(&parse_quota_buckets_all(&docs)) {
+                    break;
+                }
+            }
+            Err(true) => {
+                if docs.is_empty() {
+                    return Err(true);
+                }
+                break;
+            }
+            _ => continue,
         }
+    }
+    Ok(docs)
+}
+
+async fn cloud_snapshot(access_token: &str) -> Result<Option<Snapshot>, bool> {
+    let docs = cloud_quota_docs(access_token).await?;
+    let metrics = parse_quota_buckets_all(&docs);
+    if !metrics.is_empty() {
+        let plan = match cloud_call(access_token, "/v1internal:loadCodeAssist").await {
+            Ok(Some(d)) => d
+                .get("paidTier")
+                .or_else(|| d.get("currentTier"))
+                .and_then(|t| t.get("name"))
+                .and_then(Value::as_str)
+                .map(format_plan),
+            _ => None,
+        };
+        return Ok(Some(Snapshot::ok(ID, NAME, plan, metrics)));
     }
     Ok(None)
 }
@@ -469,9 +517,13 @@ fn parse_iso_ms(v: Option<&Value>) -> Option<i64> {
         .map(|d| d.timestamp_millis())
 }
 
-fn parse_quota_buckets(doc: &Value) -> Vec<Metric> {
+/// Merge every retrieveUserQuotaSummary response into one bucket list.
+/// Hosts now disagree on which groups they serve, so each doc contributes
+/// only the bucketIds the earlier docs didn't have (first doc wins).
+fn parse_quota_buckets_all(docs: &[Value]) -> Vec<Metric> {
     let mut rows: Vec<(usize, Metric)> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
+    for doc in docs {
     let groups = doc.get("groups").and_then(Value::as_array).cloned().unwrap_or_default();
     for group in groups {
         let buckets = group.get("buckets").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -496,8 +548,43 @@ fn parse_quota_buckets(doc: &Value) -> Vec<Metric> {
             ));
         }
     }
+    }
     rows.sort_by_key(|(order, _)| *order);
     rows.into_iter().map(|(_, m)| m).collect()
+}
+
+fn parse_quota_buckets(doc: &Value) -> Vec<Metric> {
+    parse_quota_buckets_all(std::slice::from_ref(doc))
+}
+
+/// Both quota pools present: a Gemini row (Session/Weekly) and a
+/// third-party row (Claude/Claude Weekly).
+fn covers_both_pools(metrics: &[Metric]) -> bool {
+    metrics.iter().any(|m| m.label == "Session" || m.label == "Weekly")
+        && metrics
+            .iter()
+            .any(|m| m.label == "Claude" || m.label == "Claude Weekly")
+}
+
+/// `primary` keeps its values; `extra` only fills labels primary lacks.
+/// Ordered like bucket_label: Session, Weekly, Claude, Claude Weekly,
+/// anything else last (stable).
+fn merge_metrics(primary: Vec<Metric>, extra: Vec<Metric>) -> Vec<Metric> {
+    let mut out = primary;
+    for m in extra {
+        if !out.iter().any(|e| e.label == m.label) {
+            out.push(m);
+        }
+    }
+    let order = |label: &str| match label {
+        "Session" => 0,
+        "Weekly" => 1,
+        "Claude" => 2,
+        "Claude Weekly" => 3,
+        _ => usize::MAX,
+    };
+    out.sort_by_key(|m| order(&m.label));
+    out
 }
 
 /// Legacy shape: per-model quotas pooled into "Session" (Gemini) and
@@ -1449,6 +1536,67 @@ mod tests {
             1
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn quota_doc(buckets: &[(&str, f64)]) -> Value {
+        json!({"groups": [{"buckets": buckets
+            .iter()
+            .map(|(id, r)| json!({"bucketId": id, "remainingFraction": r}))
+            .collect::<Vec<_>>()}]})
+    }
+
+    /// daily-cloudcode answers with only the Claude/GPT pool while prod
+    /// serves both — merged docs must yield all four rows, and a bucketId
+    /// present in an earlier doc keeps that doc's values.
+    #[test]
+    fn quota_docs_merge_groups_across_hosts() {
+        let daily = quota_doc(&[("3p-5h", 0.9), ("3p-weekly", 0.8)]);
+        let prod = quota_doc(&[
+            ("gemini-5h", 0.7),
+            ("gemini-weekly", 0.6),
+            ("3p-5h", 0.1),
+            ("3p-weekly", 0.1),
+        ]);
+        let metrics = parse_quota_buckets_all(&[daily, prod]);
+        let labels: Vec<&str> = metrics.iter().map(|m| m.label.as_str()).collect();
+        assert_eq!(labels, ["Session", "Weekly", "Claude", "Claude Weekly"]);
+        let used: Vec<f64> = metrics.iter().filter_map(|m| m.used_percent).collect();
+        for (u, want) in used.iter().zip([30.0, 40.0, 10.0, 20.0]) {
+            // Claude rows came from the first doc (daily), not prod's 0.1s.
+            assert!((u - want).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn covers_both_pools_needs_a_row_from_each_group() {
+        let third_party = parse_quota_buckets(&quota_doc(&[("3p-5h", 0.9), ("3p-weekly", 0.8)]));
+        assert!(!covers_both_pools(&third_party));
+        let gemini = parse_quota_buckets(&quota_doc(&[("gemini-5h", 0.7), ("gemini-weekly", 0.6)]));
+        assert!(!covers_both_pools(&gemini));
+        assert!(covers_both_pools(&merge_metrics(gemini, third_party)));
+    }
+
+    /// LS answers the 3p pool; cloud fills the Gemini rows and keeps the
+    /// LS values for the labels it already had.
+    #[test]
+    fn ls_partial_pools_merge_cloud_rows() {
+        let ls = vec![
+            Metric::progress("Claude", 10.0, None),
+            Metric::progress("Claude Weekly", 20.0, None),
+        ];
+        let cloud = parse_quota_buckets(&quota_doc(&[
+            ("gemini-5h", 0.7),
+            ("gemini-weekly", 0.6),
+            ("3p-5h", 0.5),
+            ("3p-weekly", 0.5),
+        ]));
+        let merged = merge_metrics(ls, cloud);
+        let labels: Vec<&str> = merged.iter().map(|m| m.label.as_str()).collect();
+        assert_eq!(labels, ["Session", "Weekly", "Claude", "Claude Weekly"]);
+        let used: Vec<f64> = merged.iter().filter_map(|m| m.used_percent).collect();
+        for (u, want) in used.iter().zip([30.0, 40.0, 10.0, 20.0]) {
+            assert!((u - want).abs() < 1e-9);
+        }
     }
 
     /// Live probe against this machine's real credentials — run manually via
