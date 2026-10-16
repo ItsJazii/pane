@@ -2460,7 +2460,9 @@ async fn fetch_usage(
                 // sums same-key counters).
                 id: family_of(&s.id),
                 status: s.status.clone(),
-                stale: s.stale,
+                // Same projection the local API uses: a failed poll that
+                // restored last-good numbers still counts as stale here.
+                stale: s.stale || s.attempt_failed,
                 error: s.error.clone().or_else(|| s.warning.clone()),
             })
             .collect();
