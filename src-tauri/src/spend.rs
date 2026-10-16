@@ -5939,14 +5939,14 @@ mod tests {
             DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
         };
         // Google's $2/$10 intro through 2026-12-01T08:00Z, then the
-        // resolved catalog card (whichever source answers on this machine).
+        // $4/$20 list card enforced over whatever the catalogs say.
         assert_eq!(
             cost_for("gemini-4-argon", &card, &u, 200_000.0, ts("2026-10-16T12:00:00Z")),
             12.0
         );
         assert_eq!(
             cost_for("gemini-4-argon", &card, &u, 200_000.0, ts("2026-12-02T00:00:00Z")),
-            pricing::request_cost_at(&card, &u, 200_000.0)
+            24.0
         );
     }
 
