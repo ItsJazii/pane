@@ -1631,10 +1631,16 @@ fn restore_last_success_after_error(
     if current.status != "error" || (!sub2api && age_ms > SNAPSHOT_CACHE_MS) {
         return false;
     }
+    // Droid's expired login recovers on its own the next time the user
+    // opens Droid — show the last good numbers without the "Outdated"
+    // badge. The benched cycle keeps the same string (guarded's note is
+    // the error verbatim for non-429s), so the match still holds.
+    let quiet = current.id == "droid"
+        && current.error.as_deref() == Some(providers::droid::EXPIRED_MSG);
     let warning = current.error.clone();
     *current = previous.clone();
     current.attempt_failed = true;
-    if sub2api || age_ms > STALE_GRACE_MS {
+    if !quiet && (sub2api || age_ms > STALE_GRACE_MS) {
         current.stale = true;
         current.warning = warning;
     }
@@ -3626,6 +3632,7 @@ mod tests {
         STALE_GRACE_MS, TEST_PERSIST_LAST_OK_FAIL,
     };
     use crate::alerts;
+    use crate::providers::droid;
     use crate::providers::{Metric, Snapshot};
     use serde_json::{json, Value};
     use std::collections::{HashMap, HashSet};
@@ -3814,6 +3821,38 @@ mod tests {
         assert!(current.stale);
         assert_eq!(current.metrics[0].value.as_deref(), Some("$8.00"));
         assert_eq!(current.warning.as_deref(), Some("Network error"));
+    }
+
+    /// An expired Droid login restores quietly — last good numbers, no
+    /// "Outdated" badge, no warning. Opening Droid renews it anyway.
+    #[test]
+    fn droid_expired_login_restores_without_the_stale_badge() {
+        let previous = Snapshot::ok("droid", "Droid", None,
+            vec![Metric::progress("Session", 25.0, None)]);
+        let mut current = Snapshot::error(
+            "droid",
+            "Droid",
+            droid::EXPIRED_MSG.into(),
+        );
+        assert!(restore_last_success_after_error(&mut current, &previous, STALE_GRACE_MS + 1));
+        assert_eq!(current.status, "ok");
+        assert!(!current.stale);
+        assert!(current.warning.is_none());
+        assert!(current.attempt_failed);
+
+        // Any other error still marks the restore stale as before.
+        let mut current = Snapshot::error("droid", "Droid", "timeout".into());
+        assert!(restore_last_success_after_error(&mut current, &previous, STALE_GRACE_MS + 1));
+        assert!(current.stale);
+        assert_eq!(current.warning.as_deref(), Some("timeout"));
+
+        // Past the cache window there is nothing to restore to.
+        let mut current = Snapshot::error(
+            "droid",
+            "Droid",
+            droid::EXPIRED_MSG.into(),
+        );
+        assert!(!restore_last_success_after_error(&mut current, &previous, SNAPSHOT_CACHE_MS + 1));
     }
 
     #[test]
