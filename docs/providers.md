@@ -201,7 +201,10 @@ Ground rules that apply to every provider:
   AES-256-GCM; the key lives in the Windows Credential Manager entry
   `Factory CLI/auth-encryption-key`. Decrypted in memory only; the
   refresh token is never used. The access token lasts ~24 h — Droid
-  renews it when you run `droid`; until then the card goes stale.
+  renews it when you run `droid`. While it's expired the card quietly
+  keeps the last good numbers (no Outdated badge) for up to 24 h, then
+  shows the "open Droid" message; the numbers update the next time
+  Droid is opened.
 - **Calls:** `api.factory.ai` `/api/billing/limits` (and
   `/api/app/auth/me` for the plan name; the legacy
   `/api/organization/subscription/usage` when the account isn't on

@@ -32,7 +32,7 @@ const SESSION_MS: i64 = 5 * HOUR_MS;
 const WEEK_MS: i64 = 7 * DAY_MS;
 const MONTH_MS: i64 = 30 * DAY_MS;
 
-const EXPIRED_MSG: &str = "Droid login expired. Open Droid to refresh it.";
+pub(crate) const EXPIRED_MSG: &str = "Droid login expired. Open Droid to refresh it.";
 const UNREADABLE_MSG: &str = "Couldn't read the Droid login. Run droid once and try again.";
 
 pub async fn snapshot() -> Snapshot {

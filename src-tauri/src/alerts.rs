@@ -134,8 +134,11 @@ pub fn evaluate(snapshots: &[Snapshot], cfg: &Value) -> Vec<Alert> {
         // live. Skipping them means stale data can neither fire a new
         // worsening alert nor reset the armed state the live data left.
         // The 3-minute grace (`stale` still false, `attempt_failed` true)
-        // still alerts — same as today.
-        if snapshot.stale {
+        // still alerts — except Droid: its expired-login restore never
+        // sets `stale` (the quiet path in restore_last_success_after_
+        // error), so a Droid snapshot with `attempt_failed` is replayed
+        // last-good data and is skipped too.
+        if snapshot.stale || (snapshot.id == "droid" && snapshot.attempt_failed) {
             continue;
         }
         if snapshot.id.starts_with("sub2api@") {
@@ -392,6 +395,59 @@ mod tests {
         assert!(evaluate(&[make(95.0, false)], &cfg).is_empty());
         assert!(evaluate(&[make(50.0, false)], &cfg).is_empty());
         assert_eq!(evaluate(&[make(95.0, false)], &cfg).len(), 1);
+        forget_snapshot(id);
+    }
+
+    #[test]
+    fn quiet_droid_restores_never_fire_pace_alerts() {
+        let id = "droid";
+        let cfg = serde_json::json!({"notifyWillRunOut": true, "locale": "en"});
+        let period = 7 * 86_400_000_i64;
+        let resets = chrono::Utc::now().timestamp_millis() + period / 2;
+        let make = |used, failed| {
+            let mut s = Snapshot::ok(id, "Droid", None, vec![
+                crate::providers::Metric::progress("Weekly", used, None)
+                    .with_reset(Some(resets), Some(period)),
+            ]);
+            s.attempt_failed = failed;
+            s
+        };
+        forget_snapshot(id);
+        // Arm the baseline with a calm live reading.
+        assert!(evaluate(&[make(10.0, false)], &cfg).is_empty());
+        // A quiet expired-login restore replays last-good numbers — even
+        // when the replayed reading's pace would run the window out, it
+        // never alerts.
+        assert!(evaluate(&[make(80.0, true)], &cfg).is_empty());
+        // The same reading live does alert, proving the skip suppressed it.
+        let alerts = evaluate(&[make(80.0, false)], &cfg);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].title, "Will Run Out");
+        forget_snapshot(id);
+    }
+
+    #[test]
+    fn attempt_failed_grace_still_alerts_for_other_providers() {
+        // Within the 3-minute grace a failed poll's snapshot still alerts
+        // for everyone else — e.g. Kimi's partial wallet restore sets
+        // attempt_failed on a snapshot whose quota rows are live.
+        let id = "codex@attempt-failed-pace";
+        let cfg = serde_json::json!({"notifyWillRunOut": true, "locale": "en"});
+        let period = 7 * 86_400_000_i64;
+        let resets = chrono::Utc::now().timestamp_millis() + period / 2;
+        let make = |used, failed| {
+            let mut s = Snapshot::ok(id, "Codex", None, vec![
+                crate::providers::Metric::progress("Weekly", used, None)
+                    .with_reset(Some(resets), Some(period)),
+            ]);
+            s.attempt_failed = failed;
+            s
+        };
+        forget_snapshot(id);
+        assert!(evaluate(&[make(10.0, false)], &cfg).is_empty());
+        let alerts = evaluate(&[make(80.0, true)], &cfg);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].title, "Will Run Out");
         forget_snapshot(id);
     }
 
