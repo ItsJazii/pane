@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
-use super::minimax::{file_stamp, FileStamp};
+use super::minimax::FileStamp;
 
 /// DSH_HOME relocates the whole Harness home (portable installs).
 pub(crate) fn home() -> Option<PathBuf> {
@@ -47,17 +47,31 @@ const MAX_DECODED_BYTES: usize = 512 * 1024 * 1024;
 const SESSION_LINE_CAP: usize = 8 * 1024 * 1024;
 
 /// `session*.jsonl.zstd` / `session*.jsonl` under `root`, recursive —
-/// Harness nests sessions one project dir deep.
-fn session_files(root: &Path) -> Vec<PathBuf> {
+/// Harness nests sessions one project dir deep. The bool reports a
+/// complete listing: a read_dir/entry/file_type error (other than a
+/// missing dir, which is normal) means some subtree went unread, so
+/// callers must not treat an absent path as deleted.
+fn session_files(root: &Path) -> (Vec<PathBuf>, bool) {
     let mut out = Vec::new();
+    let mut listed = true;
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                listed = false;
+                continue;
+            }
         };
-        for e in entries.flatten() {
+        for entry in entries {
+            let Ok(e) = entry else {
+                listed = false;
+                continue;
+            };
             let p = e.path();
             let Ok(ft) = e.file_type() else {
+                listed = false;
                 continue;
             };
             if ft.is_dir() {
@@ -78,12 +92,12 @@ fn session_files(root: &Path) -> Vec<PathBuf> {
         }
     }
     out.sort();
-    out
+    (out, listed)
 }
 
 /// Whether any Harness session file exists — enough for the keyless card.
 pub(crate) fn sessions_present() -> bool {
-    home().is_some_and(|h| !session_files(&h.join("sessions")).is_empty())
+    home().is_some_and(|h| !session_files(&h.join("sessions")).0.is_empty())
 }
 
 /// Decode a session blob into UTF-8 JSONL bytes. zstd's stream decoder
@@ -116,13 +130,24 @@ fn decode(bytes: &[u8], zstd_framed: bool) -> (Vec<u8>, bool) {
     }
 }
 
+/// Route for the request in flight. `request/header`'s config is
+/// authoritative, so once a header lands `header_seen` locks the route
+/// against the `request/context` line that follows it; a context only
+/// fills in when no header arrived. The lock clears on each assistant
+/// reply — a new request starts there.
+#[derive(Default)]
+struct RouteState {
+    route: Option<(String, String)>,
+    header_seen: bool,
+}
+
 /// One JSONL line → possibly an event; also feeds the running route.
 /// `route` is the (provider, model) the following assistant messages
 /// bill to: `request/header`'s `data.header.config` is authoritative,
 /// `request/context` repeats it as a fallback. `model/selection` is the
 /// UI pick only — a session can select one provider and request through
 /// another, so it never moves the route.
-fn push_line(bytes: &[u8], route: &mut Option<(String, String)>, out: &mut Vec<DshEvent>) {
+fn push_line(bytes: &[u8], route: &mut RouteState, out: &mut Vec<DshEvent>) {
     let mut b = bytes;
     while matches!(b.last(), Some(b'\n') | Some(b'\r')) {
         b = &b[..b.len() - 1];
@@ -136,21 +161,25 @@ fn push_line(bytes: &[u8], route: &mut Option<(String, String)>, out: &mut Vec<D
     let data = v.get("data");
     match v.get("type").and_then(Value::as_str) {
         Some("request/header") => {
+            route.header_seen = true;
             let cfg = data.and_then(|d| d.get("header")).and_then(|h| h.get("config"));
             if let Some(r) = route_from(cfg) {
-                *route = Some(r);
+                route.route = Some(r);
             }
         }
         Some("request/context") => {
-            if let Some(r) = route_from(data) {
-                *route = Some(r);
+            if !route.header_seen {
+                if let Some(r) = route_from(data) {
+                    route.route = Some(r);
+                }
             }
         }
         Some("assistant/message") => {
+            route.header_seen = false; // a new request starts after replies
             let Some(u) = data.and_then(|d| d.get("usage")) else {
                 return;
             };
-            let Some((provider, model)) = route.clone() else {
+            let Some((provider, model)) = route.route.clone() else {
                 return;
             };
             let Some(ts_ms) = v.get("time").and_then(Value::as_f64) else {
@@ -191,7 +220,7 @@ fn session_events(path: &Path) -> Option<(Vec<DshEvent>, bool)> {
         .and_then(|n| n.to_str())
         .is_some_and(|n| n.ends_with(".zstd"));
     let (decoded, complete) = decode(&bytes, framed);
-    let mut route = None;
+    let mut route = RouteState::default();
     let mut out = Vec::new();
     for line in decoded.split(|b| *b == b'\n') {
         if line.len() > SESSION_LINE_CAP {
@@ -216,17 +245,50 @@ pub(crate) fn collect_from(
     cutoff: SystemTime,
     cache: &mut SessionCache,
 ) -> (Vec<DshEvent>, bool) {
-    let files = session_files(&home.join("sessions"));
+    let (files, listed) = session_files(&home.join("sessions"));
+    collect_files(files, listed, cutoff, cache)
+}
+
+/// The per-file half of `collect_from`, split out so a listing gap can
+/// be exercised without OS permission tricks. `listed: false` means the
+/// session tree didn't fully enumerate: absent paths are then NOT
+/// pruned from the cache (a missing entry may just live under the
+/// unreadable subtree) and their last-good events still serve.
+fn collect_files(
+    files: Vec<PathBuf>,
+    listed: bool,
+    cutoff: SystemTime,
+    cache: &mut SessionCache,
+) -> (Vec<DshEvent>, bool) {
     let live: HashSet<&PathBuf> = files.iter().collect();
-    cache.retain(|k, _| live.contains(k));
+    if listed {
+        cache.retain(|k, _| live.contains(k));
+    }
     let cutoff_ms = cutoff
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
     let mut out = Vec::new();
-    let mut complete = true;
-    for file in files {
-        let stamp = file_stamp(&file);
+    let mut complete = listed;
+    for file in &files {
+        let meta = match std::fs::metadata(file) {
+            Ok(meta) => meta,
+            // Vanished between listing and stat — genuinely gone.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                cache.remove(file);
+                continue;
+            }
+            // Unstattable: serve last-good and flag the gap instead of
+            // letting an epoch stamp skip it below the cutoff.
+            Err(_) => {
+                complete = false;
+                if let Some((_, _, events)) = cache.get(file) {
+                    out.extend(events.iter().filter(|e| e.ts_ms >= cutoff_ms).cloned());
+                }
+                continue;
+            }
+        };
+        let stamp: FileStamp = (meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len());
         if stamp.0 < cutoff {
             continue; // nothing newer than its last write can be inside
         }
@@ -234,7 +296,7 @@ pub(crate) fn collect_from(
             .entry(file.clone())
             .or_insert_with(|| ((SystemTime::UNIX_EPOCH, 0), false, Vec::new()));
         if entry.0 != stamp || !entry.1 {
-            match session_events(&file) {
+            match session_events(file) {
                 Some((events, done)) => {
                     entry.2 = events;
                     if done {
@@ -250,6 +312,16 @@ pub(crate) fn collect_from(
             }
         }
         out.extend(entry.2.iter().filter(|e| e.ts_ms >= cutoff_ms).cloned());
+    }
+    if !listed {
+        // Entries under the unreadable subtree never made `files` —
+        // serve their last-good events rather than dropping them.
+        for (path, (_, _, events)) in cache.iter() {
+            if live.contains(path) {
+                continue;
+            }
+            out.extend(events.iter().filter(|e| e.ts_ms >= cutoff_ms).cloned());
+        }
     }
     (out, complete)
 }
@@ -325,7 +397,7 @@ pub(crate) mod tests {
         bytes.extend_from_slice(&frame2);
         let (decoded, complete) = decode(&bytes, true);
         assert!(complete);
-        let mut route = None;
+        let mut route = RouteState::default();
         let mut events = Vec::new();
         for line in decoded.split(|b| *b == b'\n') {
             push_line(line, &mut route, &mut events);
@@ -346,7 +418,7 @@ pub(crate) mod tests {
 
     #[test]
     fn request_context_is_the_fallback_route() {
-        let mut route = None;
+        let mut route = RouteState::default();
         let mut events = Vec::new();
         push_line(context("deepseek-official", "deepseek-v4-pro").as_bytes(), &mut route, &mut events);
         push_line(
@@ -359,8 +431,41 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn request_header_wins_over_later_context() {
+        let mut route = RouteState::default();
+        let mut events = Vec::new();
+        for line in [
+            header("deepseek-account", "deepseek-flash"),
+            context("aihubmix", "deepseek-v4.1-flash-1017"),
+            message(1_760_000_000_000, 1.0, 1.0, 0.0),
+        ] {
+            push_line(line.as_bytes(), &mut route, &mut events);
+        }
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].provider, "deepseek-account");
+        assert_eq!(events[0].model, "deepseek-flash");
+    }
+
+    #[test]
+    fn context_routes_the_next_request_after_a_reply() {
+        let mut route = RouteState::default();
+        let mut events = Vec::new();
+        for line in [
+            header("deepseek-account", "deepseek-flash"),
+            message(1_760_000_000_000, 1.0, 1.0, 0.0),
+            context("aihubmix", "deepseek-v4.1-flash-1017"),
+            message(1_760_000_100_000, 2.0, 2.0, 0.0),
+        ] {
+            push_line(line.as_bytes(), &mut route, &mut events);
+        }
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].provider, "deepseek-account");
+        assert_eq!(events[1].provider, "aihubmix");
+    }
+
+    #[test]
     fn message_without_a_route_is_skipped() {
-        let mut route = None;
+        let mut route = RouteState::default();
         let mut events = Vec::new();
         push_line(
             message(1_760_000_000_000, 1.0, 1.0, 0.0).as_bytes(),
@@ -381,7 +486,7 @@ pub(crate) mod tests {
         bytes.extend_from_slice(&frame2[..frame2.len() - 4]);
         let (decoded, complete) = decode(&bytes, true);
         assert!(!complete);
-        let mut route = None;
+        let mut route = RouteState::default();
         let mut events = Vec::new();
         for line in decoded.split(|b| *b == b'\n') {
             push_line(line, &mut route, &mut events);
@@ -399,7 +504,7 @@ pub(crate) mod tests {
         .join("\n");
         let (decoded, complete) = decode(lines.as_bytes(), false);
         assert!(complete);
-        let mut route = None;
+        let mut route = RouteState::default();
         let mut events = Vec::new();
         for line in decoded.split(|b| *b == b'\n') {
             push_line(line, &mut route, &mut events);
@@ -435,6 +540,68 @@ pub(crate) mod tests {
             collect_from(&dir, SystemTime::UNIX_EPOCH, &mut cache);
         assert!(complete2 && events2.len() == 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sessions_path_as_a_file_is_a_listing_gap() {
+        let dir = dsh_fixture("filegap");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sessions"), b"not a dir").unwrap();
+        let (_, listed) = session_files(&dir.join("sessions"));
+        assert!(!listed);
+        let mut cache = SessionCache::new();
+        let (_, complete) = collect_from(&dir, SystemTime::UNIX_EPOCH, &mut cache);
+        assert!(!complete);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unlisted_subtree_serves_last_good_instead_of_vanishing() {
+        let dir = dsh_fixture("gap");
+        let sess = dir.join("sessions").join("proj").join("session-abc");
+        std::fs::create_dir_all(&sess).unwrap();
+        let file = sess.join("session.v4.jsonl.zstd");
+        std::fs::write(
+            &file,
+            zstd_file(&[
+                header("deepseek-account", "deepseek-flash"),
+                message(1_800_000_000_000, 10.0, 4.0, 0.0),
+            ]),
+        )
+        .unwrap();
+        let mut cache = SessionCache::new();
+        let (events, complete) = collect_from(&dir, SystemTime::UNIX_EPOCH, &mut cache);
+        assert!(complete && events.len() == 1);
+
+        // A listing gap: the file isn't in `files`, yet last-good
+        // events still serve and the cache entry survives.
+        let (events, complete) =
+            collect_files(Vec::new(), false, SystemTime::UNIX_EPOCH, &mut cache);
+        assert!(!complete);
+        assert_eq!(events.len(), 1);
+        assert!(cache.contains_key(&file));
+
+        // A complete listing that genuinely lacks the file prunes it.
+        let (events, complete) =
+            collect_files(Vec::new(), true, SystemTime::UNIX_EPOCH, &mut cache);
+        assert!(complete);
+        assert!(events.is_empty());
+        assert!(!cache.contains_key(&file));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_vanishing_after_listing_is_not_a_gap() {
+        let ghost = dsh_fixture("ghost")
+            .join("sessions")
+            .join("proj")
+            .join("session-abc")
+            .join("session.v4.jsonl.zstd");
+        let mut cache = SessionCache::new();
+        let (events, complete) =
+            collect_files(vec![ghost], true, SystemTime::UNIX_EPOCH, &mut cache);
+        assert!(complete);
+        assert!(events.is_empty());
     }
 
     #[test]
