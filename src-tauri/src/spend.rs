@@ -1726,10 +1726,10 @@ fn cost_for(
 /// (excluded, never a guessed $0). Fast-flagged requests scale by the
 /// supplement's multiplier.
 fn claude_cost(model: &str, t: &ClaudeTokens, ts: DateTime<Utc>) -> Option<f64> {
-    // Claude Code speaks the Anthropic Messages API, which Google doesn't
-    // serve Gemini over — a Gemini slug in these logs always came through
-    // a gateway (AIHubMix, like the Qwen rows), so price it on the gateway
-    // card. The rows still land on the Claude card, per user choice.
+    // Claude Code speaks the Anthropic Messages API — DeepSeek V4.1
+    // Flash and Gemini slugs in these logs always crossed a gateway
+    // (AIHubMix, like the Qwen rows), so price them on the gateway
+    // card; the rows move to the AihubMix card by the split below.
     let price_key = pricing::aihubmix_scoped(model).unwrap_or_else(|| model.to_string());
     let price = probe_lookup(&price_key).or_else(|| {
         claude_price(model).map(|(i, o, cr, cw)| pricing::Price::flat(i, o, cr, cw))
@@ -1875,6 +1875,31 @@ fn is_stepfun_model(m: &str) -> bool {
     m.starts_with("step-") || m.starts_with("stepaudio-")
 }
 
+/// Claude Code rows that AIHubMix billed. Qwen slugs mean the session
+/// ran against AIHubMix's Anthropic-compatible endpoint — always routed
+/// (that endpoint is the only way qwen slugs reach these logs). DeepSeek
+/// and Gemini rows move only when AIHubMix is actually configured:
+/// without a key the AihubMix card doesn't exist, and DeepSeek has its
+/// own Anthropic endpoint, so those rows would be wrongly moved and stay
+/// on Claude. Matching is by the last segment (gateways prefix slugs),
+/// case-insensitive.
+fn split_aihubmix_routed(all: &mut FileData, aihubmix_configured: bool) -> FileData {
+    split_models_by(all, |m| {
+        if m.to_ascii_lowercase().starts_with("qwen") {
+            return true;
+        }
+        if !aihubmix_configured {
+            return false;
+        }
+        let seg = m
+            .rsplit(['/', '\u{1}'])
+            .next()
+            .unwrap_or(m)
+            .to_ascii_lowercase();
+        seg.starts_with("deepseek") || seg.starts_with("gemini")
+    })
+}
+
 fn split_models_by(data: &mut FileData, matches: impl Fn(&str) -> bool) -> FileData {
     let mut out = FileData::default();
     data.days.retain(|(day, model), v| {
@@ -1950,10 +1975,11 @@ fn split_kimi_routed(all: &mut FileData) -> FileData {
 /// token counts and usually a precomputed costUSD, which we prefer over
 /// our own pricing table.
 ///
-/// Claude Code can also run against MiniMax's Anthropic-compatible endpoint
-/// (ANTHROPIC_BASE_URL); those sessions log MiniMax models into the same
-/// files. That usage is split out and returned separately — it belongs on
-/// the MiniMax card, not Claude's.
+/// Claude Code can also run against MiniMax's or AIHubMix's
+/// Anthropic-compatible endpoints (ANTHROPIC_BASE_URL); those sessions
+/// log MiniMax and qwen/deepseek/gemini models into the same files.
+/// That usage is split out and returned separately — it belongs on the
+/// MiniMax and AihubMix cards, not Claude's.
 fn claude(extra: FileData) -> (ProviderSpend, FileData, FileData, FileData, FileData) {
     let root = std::env::var("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
@@ -1983,30 +2009,33 @@ fn claude(extra: FileData) -> (ProviderSpend, FileData, FileData, FileData, File
     // the same model-based routing as natively-logged rows.
     merge_data(&mut all, extra);
     let minimax = split_models(&mut all, "MiniMax");
-    // Qwen-family models in Claude Code logs mean the session ran against
-    // AihubMix's Anthropic-compatible endpoint (the only way qwen slugs
-    // appear there) — those dollars belong on the AihubMix card.
-    let qwen_via_aihubmix = split_models(&mut all, "qwen");
+    // Qwen-family models in Claude Code logs mean the session ran
+    // against AihubMix's Anthropic-compatible endpoint — those dollars
+    // belong on the AihubMix card. DeepSeek/Gemini slugs join them once
+    // an AihubMix key exists (see split_aihubmix_routed).
+    let aihubmix_via_claude =
+        split_aihubmix_routed(&mut all, providers::aihubmix::configured());
     // Kimi slugs likewise mean Moonshot billed the session (Anthropic-
     // compatible endpoint or a router) — Kimi's card owns those dollars.
     let kimi_routed = split_kimi_routed(&mut all);
     // step-* models mean the session ran against StepFun's Step Plan
     // Anthropic-compatible endpoint — the StepFun card owns those rows.
     let stepfun = split_models_by(&mut all, is_stepfun_model);
-    (build_spend("claude", "Claude", all), minimax, qwen_via_aihubmix, kimi_routed, stepfun)
+    (build_spend("claude", "Claude", all), minimax, aihubmix_via_claude, kimi_routed, stepfun)
 }
 
 /// Spend for each discovered extra Claude account, scanned from that
 /// account's own config dir (each dir keeps its own projects/ logs, so the
-/// scopes never mix). MiniMax/qwen-routed rows split out the same way the
-/// default account's do and are handed back for the caller to merge into
-/// those cards.
+/// scopes never mix). MiniMax/AIHubMix-routed rows split out the same
+/// way the default account's do and are handed back for the caller to
+/// merge into those cards.
 fn claude_extra_accounts() -> (Vec<ProviderSpend>, FileData, FileData, FileData, FileData) {
     let mut spends = Vec::new();
     let mut minimax_extra = FileData::default();
-    let mut qwen_extra = FileData::default();
+    let mut aihubmix_extra = FileData::default();
     let mut kimi_extra = FileData::default();
     let mut stepfun_extra = FileData::default();
+    let aihubmix_configured = providers::aihubmix::configured();
     for acct in providers::claude::discover_extra_accounts() {
         let root = acct.dir.join("projects");
         let mut files = Vec::new();
@@ -2016,12 +2045,12 @@ fn claude_extra_accounts() -> (Vec<ProviderSpend>, FileData, FileData, FileData,
             merge_data(&mut all, claude_file(&file));
         }
         merge_data(&mut minimax_extra, split_models(&mut all, "MiniMax"));
-        merge_data(&mut qwen_extra, split_models(&mut all, "qwen"));
+        merge_data(&mut aihubmix_extra, split_aihubmix_routed(&mut all, aihubmix_configured));
         merge_data(&mut kimi_extra, split_kimi_routed(&mut all));
         merge_data(&mut stepfun_extra, split_models_by(&mut all, is_stepfun_model));
         spends.push(build_spend(acct.id, acct.name, all));
     }
-    (spends, minimax_extra, qwen_extra, kimi_extra, stepfun_extra)
+    (spends, minimax_extra, aihubmix_extra, kimi_extra, stepfun_extra)
 }
 
 /// One Claude session file. A restored checkpoint skips the 1 MB
@@ -3996,7 +4025,7 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
         let agy_t = s.spawn(|| spend_step("antigravity", antigravity));
         let qwen_t = s.spawn(|| spend_step("qwen", qwen));
 
-        let (claude_sp, extra_claude_spends, mut minimax_extra, qwen_via_claude, mut kimi_routed, mut stepfun_data) =
+        let (claude_sp, extra_claude_spends, mut minimax_extra, aihubmix_via_claude, mut kimi_routed, mut stepfun_data) =
             take_join(claude_t, "claude", (
                 build_spend("claude", "Claude", FileData::default()),
                 Vec::new(),
@@ -4027,7 +4056,7 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
                 FileData::default(),
             ),
         );
-        merge_data(&mut aihubmix_data, qwen_via_claude);
+        merge_data(&mut aihubmix_data, aihubmix_via_claude);
         merge_data(&mut stepfun_data, stepfun_via_opencode);
         merge_data(&mut aihubmix_data, pi_aihubmix);
         merge_data(&mut stepfun_data, pi_stepfun);
@@ -6275,6 +6304,66 @@ mod tests {
         let data = claude_run(std::slice::from_ref(&line));
         assert_eq!(data.days.values().map(|v| v.0).sum::<f64>(), 4.0);
         assert!(data.days.keys().all(|(_, m)| m == "gemini-4-argon"));
+    }
+
+    /// `deepseek-flash` is AIHubMix's alias for deepseek-v4.1-flash-1017 —
+    /// the gateway card with the official weekday peak windows, not the
+    /// flat catalog price for the alias.
+    #[test]
+    fn claude_deepseek_flash_prices_the_gateway_card_with_peak() {
+        let line_at = |ts: &str, model: &str| {
+            json!({"type": "assistant", "timestamp": ts,
+                "requestId": format!("req_{model}"),
+                "message": {"id": format!("msg_{model}"), "model": model,
+                    "usage": {"input_tokens": 1000000.0, "output_tokens": 1000000.0}}})
+            .to_string()
+        };
+        // Saturday — off-peak: $0.155 in + $0.62 out per MTok.
+        let off = claude_run(&[line_at("2026-10-17T09:00:00Z", "deepseek-flash")]);
+        let cost: f64 = off.days.values().map(|v| v.0).sum();
+        assert!((cost - 0.775).abs() < 1e-9, "{cost}");
+        // Friday 02:00 UTC — inside the 01:00–04:00 peak window: 2×.
+        let peak = claude_run(&[line_at("2026-10-16T02:00:00Z", "deepseek-flash")]);
+        let cost: f64 = peak.days.values().map(|v| v.0).sum();
+        assert!((cost - 1.55).abs() < 1e-9, "{cost}");
+        // The dated snapshot bills the same card.
+        let dated = claude_run(&[line_at("2026-10-17T09:00:00Z", "deepseek-v4.1-flash-1017")]);
+        let cost: f64 = dated.days.values().map(|v| v.0).sum();
+        assert!((cost - 0.775).abs() < 1e-9, "{cost}");
+    }
+
+    /// DeepSeek and Gemini rows move to AihubMix only when a key exists —
+    /// otherwise they stay on Claude (DeepSeek has its own Anthropic
+    /// endpoint). Qwen always moves; its only path here is the gateway.
+    #[test]
+    fn aihubmix_routed_rows_split_by_configuration() {
+        let build = || {
+            let mut all = FileData::default();
+            for m in ["claude-opus-5-5", "deepseek-flash", "gemini-4-argon", "qwen3.8-max"] {
+                all.days.insert((1, m.to_string()), (1.0, 1.0));
+                all.hours.insert((2, m.to_string()), (1.0, 1.0));
+            }
+            all.unpriced.insert("deepseek-flash".to_string(), 1);
+            all
+        };
+        let names = |d: &FileData| -> String {
+            let mut v: Vec<&str> = d.days.keys().map(|(_, m)| m.as_str()).collect();
+            v.sort();
+            v.join(",")
+        };
+        // Unconfigured: only qwen moves.
+        let mut all = build();
+        let moved = split_aihubmix_routed(&mut all, false);
+        assert_eq!(names(&moved), "qwen3.8-max");
+        assert!(all.days.keys().any(|(_, m)| m == "deepseek-flash"));
+        // Configured: deepseek, gemini, qwen move — days, hours and the
+        // unpriced tally alike; claude stays.
+        let mut all = build();
+        let moved = split_aihubmix_routed(&mut all, true);
+        assert_eq!(names(&moved), "deepseek-flash,gemini-4-argon,qwen3.8-max");
+        assert_eq!(moved.hours.len(), 3);
+        assert_eq!(moved.unpriced["deepseek-flash"], 1);
+        assert!(all.days.keys().all(|(_, m)| m == "claude-opus-5-5"));
     }
 
     /// A prefixed Argon spelling on a verified AIHubMix route still

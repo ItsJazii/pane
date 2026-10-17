@@ -250,11 +250,22 @@ pub fn dated_card(model: &str, ts_ms: i64) -> Option<Price> {
         .or_else(|| argon_list_card(model, ts_ms))
 }
 
-/// The AIHubMix spelling of any Argon slug — callers have already
-/// established the route is AIHubMix, so `google/gemini-4-argon` or a
-/// bare slug normalise to the gateway spelling that prices the flat
-/// $4/$20 card (and skips the dated Google intro overlay).
+/// The AIHubMix spelling of a model that only reaches the caller through
+/// the gateway — callers have already established the route is AIHubMix.
+/// Argon slugs normalise as before (`google/gemini-4-argon`, bare).
+/// `deepseek-flash` is AIHubMix's alias for deepseek-v4.1-flash-1017 on
+/// its Anthropic endpoint (same published card), and any V4.1 Flash
+/// spelling maps to the gateway slug — the public catalog prices the
+/// bare `deepseek-flash` alias flat with no peak logic, which is wrong.
+/// Everything else is not an AIHubMix route.
 pub fn aihubmix_scoped(model: &str) -> Option<String> {
+    let seg = model.rsplit(['/', '\u{1}']).next().unwrap_or(model);
+    if seg.eq_ignore_ascii_case("deepseek-flash") {
+        return Some("aihubmix/deepseek-v4.1-flash".into());
+    }
+    if v41_flash_slug(model) {
+        return Some(format!("aihubmix/{seg}"));
+    }
     argon_segment(model).map(|seg| format!("aihubmix/{seg}"))
 }
 
@@ -353,7 +364,7 @@ pub fn generation() -> u64 {
 /// fingerprinted below — an app update that reprices the same files would
 /// otherwise leave history at the old dollars until upstream happens to
 /// rewrite a catalog.
-const CORRECTIONS_REV: u32 = 20; // 19: Antigravity `-trial` ids (gemini-4-argon-trial) price like the base card; 20: Argon post-intro list card enforced over catalogs
+const CORRECTIONS_REV: u32 = 21; // 19: Antigravity `-trial` ids (gemini-4-argon-trial) price like the base card; 20: Argon post-intro list card enforced over catalogs; 21: Claude Code deepseek-flash / V4.1 Flash priced on AIHubMix's card
 
 /// The corrections revision on its own — the spend cache treats a changed
 /// revision as a hard discard (the *code* that prices changed), while a
@@ -1075,6 +1086,23 @@ fn builtin_price(canonical: &str) -> Option<Price> {
                 Some(Price::flat(0.15, 0.60, 0.003, 0.15))
             }
         }
+        // Dated V4.1-flash snapshots ("deepseek-v4.1-flash-1017" — what
+        // AIHubMix's Anthropic endpoint actually logs). Baked here, not
+        // left to resolve()'s date-trim: that retry uses the bare base,
+        // so an `aihubmix/` spelling would drop the gateway prefix and
+        // bill whichever reseller card the catalog iterates first.
+        // All-digit ≥4-char tail = a dated SKU, same card split.
+        b if (b.starts_with("deepseek-v4.1-flash-") || b.starts_with("deepseek-v4-1-flash-"))
+            && b.rsplit('-').next().is_some_and(|t| {
+                t.len() >= 4 && t.chars().all(|c| c.is_ascii_digit())
+            }) =>
+        {
+            if canonical.starts_with("aihubmix/") {
+                Some(Price::flat(0.155, 0.62, 0.0031, 0.155))
+            } else {
+                Some(Price::flat(0.15, 0.60, 0.003, 0.15))
+            }
+        }
         // AihubMix GLM-5.3 preview (aihubmix.com/model/coding-glm-5.3):
         // $0.060 in / $0.220 out per MTok. No cache rate is published, so
         // reads/writes bill at the input rate. Only this gateway SKU is
@@ -1613,6 +1641,30 @@ mod tests {
         );
         assert!(super::aihubmix_scoped("qwen3.8-max").is_none());
         assert!(super::aihubmix_scoped("google/qwen3.8-max").is_none());
+    }
+
+    #[test]
+    fn aihubmix_scoped_normalises_deepseek_flash_spellings() {
+        // AIHubMix's own alias for deepseek-v4.1-flash-1017 — the catalog
+        // card for the bare alias is flat with no peak logic, so it must
+        // map onto the real gateway SKU.
+        assert_eq!(
+            super::aihubmix_scoped("deepseek-flash").as_deref(),
+            Some("aihubmix/deepseek-v4.1-flash")
+        );
+        assert_eq!(
+            super::aihubmix_scoped("DeepSeek-Flash").as_deref(),
+            Some("aihubmix/deepseek-v4.1-flash")
+        );
+        // Dated snapshots keep their spelling — resolve() date-trims
+        // them onto the same card and peak_multiplier sees the family.
+        assert_eq!(
+            super::aihubmix_scoped("deepseek-v4.1-flash-1017").as_deref(),
+            Some("aihubmix/deepseek-v4.1-flash-1017")
+        );
+        // Other deepseek slugs are not AIHubMix routes.
+        assert!(super::aihubmix_scoped("deepseek-v4-flash").is_none());
+        assert!(super::aihubmix_scoped("deepseek-v4-pro").is_none());
     }
 
     #[test]
