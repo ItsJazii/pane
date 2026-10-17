@@ -47,31 +47,33 @@ const MAX_DECODED_BYTES: usize = 512 * 1024 * 1024;
 const SESSION_LINE_CAP: usize = 8 * 1024 * 1024;
 
 /// `session*.jsonl.zstd` / `session*.jsonl` under `root`, recursive —
-/// Harness nests sessions one project dir deep. The bool reports a
-/// complete listing: a read_dir/entry/file_type error (other than a
-/// missing dir, which is normal) means some subtree went unread, so
-/// callers must not treat an absent path as deleted.
-fn session_files(root: &Path) -> (Vec<PathBuf>, bool) {
+/// Harness nests sessions one project dir deep. The second value lists
+/// the roots whose enumeration failed: a read_dir error (other than a
+/// missing dir, which is normal) → that dir; an Err entry from the
+/// iterator → the dir being iterated; a file_type() error → that
+/// entry's path, since we can't tell dir from file. Callers must not
+/// treat an absent path under a failed root as deleted.
+fn session_files(root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut out = Vec::new();
-    let mut listed = true;
+    let mut failed = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(_) => {
-                listed = false;
+                failed.push(dir);
                 continue;
             }
         };
         for entry in entries {
             let Ok(e) = entry else {
-                listed = false;
+                failed.push(dir.clone());
                 continue;
             };
             let p = e.path();
             let Ok(ft) = e.file_type() else {
-                listed = false;
+                failed.push(p);
                 continue;
             };
             if ft.is_dir() {
@@ -92,7 +94,7 @@ fn session_files(root: &Path) -> (Vec<PathBuf>, bool) {
         }
     }
     out.sort();
-    (out, listed)
+    (out, failed)
 }
 
 /// Whether any Harness session file exists — enough for the keyless card.
@@ -245,31 +247,30 @@ pub(crate) fn collect_from(
     cutoff: SystemTime,
     cache: &mut SessionCache,
 ) -> (Vec<DshEvent>, bool) {
-    let (files, listed) = session_files(&home.join("sessions"));
-    collect_files(files, listed, cutoff, cache)
+    let (files, failed) = session_files(&home.join("sessions"));
+    collect_files(files, &failed, cutoff, cache)
 }
 
 /// The per-file half of `collect_from`, split out so a listing gap can
-/// be exercised without OS permission tricks. `listed: false` means the
-/// session tree didn't fully enumerate: absent paths are then NOT
-/// pruned from the cache (a missing entry may just live under the
-/// unreadable subtree) and their last-good events still serve.
+/// be exercised without OS permission tricks. `failed` lists the roots
+/// that didn't enumerate: cached paths under them are NOT pruned (a
+/// missing entry may just live under the unreadable subtree) and their
+/// last-good events still serve. Anything else absent from `files` is
+/// genuinely gone and drops as usual.
 fn collect_files(
     files: Vec<PathBuf>,
-    listed: bool,
+    failed: &[PathBuf],
     cutoff: SystemTime,
     cache: &mut SessionCache,
 ) -> (Vec<DshEvent>, bool) {
     let live: HashSet<&PathBuf> = files.iter().collect();
-    if listed {
-        cache.retain(|k, _| live.contains(k));
-    }
+    cache.retain(|k, _| live.contains(k) || failed.iter().any(|f| k.starts_with(f)));
     let cutoff_ms = cutoff
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
     let mut out = Vec::new();
-    let mut complete = listed;
+    let mut complete = failed.is_empty();
     for file in &files {
         let meta = match std::fs::metadata(file) {
             Ok(meta) => meta,
@@ -313,11 +314,11 @@ fn collect_files(
         }
         out.extend(entry.2.iter().filter(|e| e.ts_ms >= cutoff_ms).cloned());
     }
-    if !listed {
-        // Entries under the unreadable subtree never made `files` —
-        // serve their last-good events rather than dropping them.
+    if !failed.is_empty() {
+        // Entries under a failed subtree never made `files` — serve
+        // their last-good events rather than dropping them.
         for (path, (_, _, events)) in cache.iter() {
-            if live.contains(path) {
+            if live.contains(path) || !failed.iter().any(|f| path.starts_with(f)) {
                 continue;
             }
             out.extend(events.iter().filter(|e| e.ts_ms >= cutoff_ms).cloned());
@@ -547,8 +548,8 @@ pub(crate) mod tests {
         let dir = dsh_fixture("filegap");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("sessions"), b"not a dir").unwrap();
-        let (_, listed) = session_files(&dir.join("sessions"));
-        assert!(!listed);
+        let (_, failed) = session_files(&dir.join("sessions"));
+        assert!(!failed.is_empty());
         let mut cache = SessionCache::new();
         let (_, complete) = collect_from(&dir, SystemTime::UNIX_EPOCH, &mut cache);
         assert!(!complete);
@@ -573,20 +574,62 @@ pub(crate) mod tests {
         let (events, complete) = collect_from(&dir, SystemTime::UNIX_EPOCH, &mut cache);
         assert!(complete && events.len() == 1);
 
-        // A listing gap: the file isn't in `files`, yet last-good
-        // events still serve and the cache entry survives.
-        let (events, complete) =
-            collect_files(Vec::new(), false, SystemTime::UNIX_EPOCH, &mut cache);
+        // A listing gap over the file's subtree: the file isn't in
+        // `files`, yet last-good events still serve and the cache entry
+        // survives.
+        let (events, complete) = collect_files(
+            Vec::new(),
+            &[dir.join("sessions").join("proj")],
+            SystemTime::UNIX_EPOCH,
+            &mut cache,
+        );
         assert!(!complete);
         assert_eq!(events.len(), 1);
         assert!(cache.contains_key(&file));
 
         // A complete listing that genuinely lacks the file prunes it.
         let (events, complete) =
-            collect_files(Vec::new(), true, SystemTime::UNIX_EPOCH, &mut cache);
+            collect_files(Vec::new(), &[], SystemTime::UNIX_EPOCH, &mut cache);
         assert!(complete);
         assert!(events.is_empty());
         assert!(!cache.contains_key(&file));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deleted_session_outside_failed_subtree_is_pruned() {
+        let dir = dsh_fixture("prune");
+        let mut files = Vec::new();
+        for proj in ["projA", "projB"] {
+            let sess = dir.join("sessions").join(proj).join("session-x");
+            std::fs::create_dir_all(&sess).unwrap();
+            let file = sess.join("session.v4.jsonl.zstd");
+            std::fs::write(
+                &file,
+                zstd_file(&[
+                    header("deepseek-account", "deepseek-flash"),
+                    message(1_800_000_000_000, 10.0, 4.0, 0.0),
+                ]),
+            )
+            .unwrap();
+            files.push(file);
+        }
+        let mut cache = SessionCache::new();
+        let (events, complete) = collect_from(&dir, SystemTime::UNIX_EPOCH, &mut cache);
+        assert!(complete && events.len() == 2);
+
+        // projB's subtree failed to list; projA's listed fine and its
+        // now-absent session is a real deletion — pruned, no last-good.
+        let (events, complete) = collect_files(
+            Vec::new(),
+            &[dir.join("sessions").join("projB")],
+            SystemTime::UNIX_EPOCH,
+            &mut cache,
+        );
+        assert!(!complete);
+        assert_eq!(events.len(), 1);
+        assert!(!cache.contains_key(&files[0]));
+        assert!(cache.contains_key(&files[1]));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -599,7 +642,7 @@ pub(crate) mod tests {
             .join("session.v4.jsonl.zstd");
         let mut cache = SessionCache::new();
         let (events, complete) =
-            collect_files(vec![ghost], true, SystemTime::UNIX_EPOCH, &mut cache);
+            collect_files(vec![ghost], &[], SystemTime::UNIX_EPOCH, &mut cache);
         assert!(complete);
         assert!(events.is_empty());
     }
