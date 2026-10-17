@@ -1726,10 +1726,12 @@ fn cost_for(
 /// (excluded, never a guessed $0). Fast-flagged requests scale by the
 /// supplement's multiplier.
 fn claude_cost(model: &str, t: &ClaudeTokens, ts: DateTime<Utc>) -> Option<f64> {
-    // Claude Code speaks the Anthropic Messages API — DeepSeek V4.1
-    // Flash and Gemini slugs in these logs always crossed a gateway
-    // (AIHubMix, like the Qwen rows), so price them on the gateway
-    // card; the rows move to the AihubMix card by the split below.
+    // Claude Code speaks the Anthropic Messages API — Gemini slugs in
+    // these logs crossed a gateway (AIHubMix, like the Qwen rows), and
+    // `deepseek-flash` is AIHubMix's own alias, so price them on the
+    // gateway card (a V4.1 Flash spelling via DeepSeek's own endpoint
+    // reads ~3% high). split_aihubmix_routed moves the rows when an
+    // AihubMix key exists.
     let price_key = pricing::aihubmix_scoped(model).unwrap_or_else(|| model.to_string());
     let price = probe_lookup(&price_key).or_else(|| {
         claude_price(model).map(|(i, o, cr, cw)| pricing::Price::flat(i, o, cr, cw))
