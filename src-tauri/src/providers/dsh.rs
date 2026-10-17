@@ -161,10 +161,10 @@ fn push_line(bytes: &[u8], route: &mut RouteState, out: &mut Vec<DshEvent>) {
     let data = v.get("data");
     match v.get("type").and_then(Value::as_str) {
         Some("request/header") => {
-            route.header_seen = true;
             let cfg = data.and_then(|d| d.get("header")).and_then(|h| h.get("config"));
             if let Some(r) = route_from(cfg) {
                 route.route = Some(r);
+                route.header_seen = true;
             }
         }
         Some("request/context") => {
