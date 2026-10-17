@@ -26,6 +26,12 @@ fn find_api_key() -> Option<String> {
         .or_else(|| super::opencode::auth_entry_key("aihubmix"))
 }
 
+/// Whether an AihubMix key resolves — i.e. the card exists at all. Spend
+/// routing uses it to decide if Claude Code's gateway-served rows move.
+pub fn configured() -> bool {
+    find_api_key().is_some()
+}
+
 pub async fn snapshot() -> Snapshot {
     match fetch().await {
         Ok(s) => s,
