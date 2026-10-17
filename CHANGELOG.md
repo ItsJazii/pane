@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.4.61 — 2026-10-18
+
+### Added
+- **OpenCode 2 support (#277).** OpenCode 2 stopped writing the old
+  message table and keeps its logins in a new place, so the OpenCode
+  card showed "No data" for Today and Yesterday. Pane now reads both the
+  old and new formats (without counting a reply twice), finds your Go
+  key in OpenCode 2's own login store, and checks every OpenCode
+  database on the PC.
+- **DeepSeek Harness spend (#280).** Sessions from the DeepSeek Harness
+  desktop app now count on the DeepSeek card at DeepSeek's own prices,
+  including the weekday peak hours. Harness requests sent through
+  AIHubMix go to the AIHubMix card instead. If you use Harness without
+  saving a DeepSeek key in Pane, the DeepSeek card still appears, as
+  "Harness", showing just the spend.
+- **Gemini 4 Argon weekly quota on Antigravity (#274).** The Antigravity
+  card now shows the Argon Weekly limit.
+
+### Changed
+- **Claude Code through AIHubMix (#279).** When you run Claude Code
+  through AIHubMix with DeepSeek or Gemini models and have an AIHubMix
+  key in Pane, that spend now goes on the AIHubMix card instead of the
+  Claude card, at AIHubMix's prices. Claude Code's logs don't record
+  which service handled a request, so this is a best guess. Without an
+  AIHubMix key those rows stay on the Claude card. Saved spend is
+  recalculated once after updating.
+- **Much faster OpenCode spend scans (#278).** With OpenCode 2 open,
+  each refresh used to take about 10 seconds. Pane now reads only new or
+  changed replies and leaves their text inside OpenCode's database, so
+  a refresh takes a fraction of a second.
+- **Antigravity Gemini rows (#273).** Pane now asks Antigravity's main
+  service first and combines the quotas it gets from each service, so
+  the Gemini Session and Weekly rows no longer go missing.
+- **Gemini 4 Argon trial pricing (#276).** Antigravity's
+  `gemini-4-argon-trial` model is now priced the same as Gemini 4 Argon.
+
+### Fixed
+- **Claude card flipping to "Outdated" (#272).** When Anthropic said
+  "slow down, retry in 0 seconds", Pane gave up its 5-minute wait and
+  retried right away, so the card showed Outdated every other refresh.
+  It now keeps waiting the full 5 minutes.
+- **Droid expired login (#275).** When the Droid login expires, the card
+  keeps your last numbers without the "Outdated" badge, since it
+  recovers by itself the next time you open Droid.
+
 ## 0.4.60 — 2026-10-15
 
 ### Added
