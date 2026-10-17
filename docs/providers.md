@@ -502,9 +502,14 @@ Ground rules that apply to every provider:
   way MiniMax-routed sessions are. When an AihubMix key is configured,
   DeepSeek and Gemini rows move the same way (e.g. the `deepseek-flash`
   alias for deepseek-v4.1-flash, and Gemini 4 Argon). Claude Code logs
-  don't record which gateway served a request, so this assumes qwen
-  models reached Claude Code via AihubMix — sessions run through
-  Alibaba's own Anthropic-compatible proxy would land here too.
+  don't record which gateway served a request, so this is a best guess:
+  qwen rows are assumed to come via AihubMix (sessions run through
+  Alibaba's own Anthropic-compatible proxy would land here too), and so
+  are DeepSeek and Gemini rows once an AihubMix key is configured —
+  sessions run against DeepSeek's own Anthropic-compatible endpoint, or
+  another gateway that serves bare `gemini-*` slugs, would land here
+  too, including history from before the key was added. Without an
+  AihubMix key those rows stay on the Claude card.
   pi / oh-my-pi session rows carrying `provider: "aihubmix"` fold in
   the same way.
 
