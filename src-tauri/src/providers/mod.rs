@@ -8,6 +8,7 @@ pub mod cursor;
 pub mod deepseek;
 pub mod devin;
 pub mod droid;
+pub mod dsh;
 pub mod elevenlabs;
 pub mod grok;
 pub mod hermes;

@@ -364,7 +364,7 @@ pub fn generation() -> u64 {
 /// fingerprinted below — an app update that reprices the same files would
 /// otherwise leave history at the old dollars until upstream happens to
 /// rewrite a catalog.
-const CORRECTIONS_REV: u32 = 21; // 19: Antigravity `-trial` ids (gemini-4-argon-trial) price like the base card; 20: Argon post-intro list card enforced over catalogs; 21: Claude Code deepseek-flash / V4.1 Flash priced on AIHubMix's card
+const CORRECTIONS_REV: u32 = 22; // 19: Antigravity `-trial` ids (gemini-4-argon-trial) price like the base card; 20: Argon post-intro list card enforced over catalogs; 21: Claude Code deepseek-flash / V4.1 Flash priced on AIHubMix's card; 22: `deepseek/` spellings take the baked official card over models.dev's same-prefix reseller ids
 
 /// The corrections revision on its own — the spend cache treats a changed
 /// revision as a hard discard (the *code* that prices changed), while a
@@ -900,6 +900,21 @@ fn resolve(s: &Store, model: &str, depth: u8) -> Option<Price> {
     {
         return Some(p);
     }
+    // models.dev keys third-party listings under DeepSeek's own provider
+    // prefix (`deepseek/deepseek-v4.1-flash` is a reseller card, not the
+    // platform's — the official rows live under bare ids in the `deepseek`
+    // provider), so `deepseek/` V4.1-flash spellings take the baked
+    // official card before that catalog. Scoped to that one family: it's
+    // the only `deepseek/` slug whose builtin arm is the official card —
+    // the v4-pro/v4-flash arms are AihubMix's gateway rates, and a direct
+    // DeepSeek route must not bill those ahead of the catalogs. litellm's
+    // `deepseek/` entries — the real platform card when upstream carries
+    // them — still win above.
+    if canonical.starts_with("deepseek/") && v41_flash_slug(&canonical) {
+        if let Some(p) = builtin_price(&canonical) {
+            return Some(p);
+        }
+    }
     if let Some(p) = s.modelsdev.get(&canonical).filter(real) {
         return Some(*p);
     }
@@ -1407,6 +1422,33 @@ mod tests {
         assert!((p.cache_read - 0.05).abs() < 1e-9);
         let p = super::resolve(&store, "accounts/fireworks/models/deepseek-v4-pro-0813", 0).unwrap();
         assert!((p.input - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn deepseek_prefixed_builtin_shortcut_only_covers_v41_flash() {
+        let mut store = super::Store::default();
+        // models.dev carries `deepseek/`-prefixed reseller listings. For
+        // V4 pro the builtin arm is AihubMix's gateway card, so a direct
+        // DeepSeek route must NOT take it — the catalog wins.
+        store.modelsdev.insert(
+            "deepseek/deepseek-v4-pro".into(),
+            super::Price::flat(0.6, 1.2, 0.06, 0.6),
+        );
+        let p = super::resolve(&store, "deepseek/deepseek-v4-pro", 0).unwrap();
+        assert!((p.input - 0.6).abs() < 1e-9);
+        assert!((p.output - 1.2).abs() < 1e-9);
+        assert!((p.cache_read - 0.06).abs() < 1e-9);
+
+        // V4.1 Flash is the exception: its builtin arm IS the official
+        // card, so a same-prefix reseller listing can't preempt it.
+        store.modelsdev.insert(
+            "deepseek/deepseek-v4.1-flash".into(),
+            super::Price::flat(0.30, 1.20, 0.006, 0.30),
+        );
+        let p = super::resolve(&store, "deepseek/deepseek-v4.1-flash", 0).unwrap();
+        assert!((p.input - 0.15).abs() < 1e-9);
+        assert!((p.output - 0.60).abs() < 1e-9);
+        assert!((p.cache_read - 0.003).abs() < 1e-9);
     }
 
     #[test]

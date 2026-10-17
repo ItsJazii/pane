@@ -317,6 +317,18 @@ Ground rules that apply to every provider:
   balance Pane has seen locally (top-ups raise it; feeds the Almost Out
   notification). Saving a key in Settings turns that provider on if
   Customize had it off.
+- **DeepSeek local spend:** sessions of the DeepSeek Harness desktop
+  app are read from `~/.dsh/sessions/**` (`DSH_HOME` relocates the
+  home) — `session*.jsonl.zstd` (zstd-framed JSONL, possibly several
+  concatenated frames; a frame still being written stops the decode
+  early and is retried next scan) or plain `session*.jsonl`. Each
+  assistant turn bills the route its request logged — `deepseek-*`
+  providers (account sign-in and API key alike) price at DeepSeek's
+  official platform rates on the DeepSeek card, `aihubmix` routes land
+  on the AihubMix card at the gateway's own card, and other providers
+  are skipped. With no pasted key, a machine that has Harness sessions
+  still gets a DeepSeek card — plan chip "Harness" — whose only section
+  is that local spend.
 
 ## StepFun
 

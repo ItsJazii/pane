@@ -3495,6 +3495,83 @@ fn droid() -> ProviderSpend {
     build_spend("droid", "Droid", data)
 }
 
+/// DeepSeek Harness desktop sessions (~/.dsh/sessions, zstd JSONL) —
+/// providers::dsh decodes each turn with the route that served it.
+/// `deepseek-*` providers bill the platform account (DeepSeek card);
+/// `aihubmix` routes price on the gateway's own card and land on the
+/// AihubMix card like pi's rows. Returns (deepseek, aihubmix) buckets.
+fn deepseek_harness_priced(events: Vec<providers::dsh::DshEvent>) -> (FileData, FileData) {
+    let mut deepseek = FileData::default();
+    let mut aihubmix = FileData::default();
+    let mut skipped: HashMap<String, u64> = HashMap::new();
+    for ev in events {
+        let Some(ts) = DateTime::from_timestamp_millis(ev.ts_ms) else {
+            continue;
+        };
+        let tokens = ev.input + ev.output + ev.cache_read + ev.cache_write;
+        if tokens <= 0.0 {
+            continue;
+        }
+        let provider = ev.provider.to_ascii_lowercase();
+        let (bucket, price_key) = if provider.starts_with("deepseek") {
+            // Harness' deepseek-* routes bill the DeepSeek platform, so
+            // price on the provider-prefixed spelling: litellm's
+            // `deepseek/` entries are the platform card, and an absent
+            // one falls through to the baked official rates. The bare
+            // slug must not be looked up — a dozen `*/deepseek-*`
+            // reseller entries fuzzy-match it in nondeterministic order.
+            // `deepseek-flash` is the platform's own alias for the
+            // DeepSeek-V4.1-Flash SKU — the catalog prices the alias
+            // flat, so price the real card (which also carries the
+            // weekday peak windows).
+            let seg = ev.model.rsplit('/').next().unwrap_or(ev.model.as_str());
+            let base = if seg.eq_ignore_ascii_case("deepseek-flash") {
+                "deepseek-v4.1-flash"
+            } else {
+                seg
+            };
+            (&mut deepseek, format!("deepseek/{base}"))
+        } else if provider == "aihubmix" {
+            let key =
+                pricing::aihubmix_scoped(&ev.model).unwrap_or_else(|| ev.model.clone());
+            (&mut aihubmix, key)
+        } else {
+            *skipped.entry(provider).or_insert(0) += 1;
+            continue;
+        };
+        let u = pricing::Usage {
+            input: ev.input,
+            output: ev.output,
+            cache_read: ev.cache_read,
+            cache_write_5m: ev.cache_write,
+            cache_write_1h: 0.0,
+        };
+        match probe_lookup(&price_key) {
+            Some(p) => add_event(
+                bucket,
+                ts,
+                &ev.model,
+                cost_for(&price_key, &p, &u, 200_000.0, ts),
+                tokens,
+            ),
+            None => note_unpriced(bucket, ts, &ev.model, tokens),
+        }
+    }
+    if !skipped.is_empty() {
+        eprintln!("[pane] spend: dsh skipped non-deepseek routes {skipped:?}");
+    }
+    (deepseek, aihubmix)
+}
+
+fn deepseek_harness() -> (FileData, FileData) {
+    let (events, complete) =
+        providers::dsh::collect_usage_events(scan_cutoff(Local::now()));
+    if !complete {
+        note_scan_gap();
+    }
+    deepseek_harness_priced(events)
+}
+
 /// Antigravity keeps per-generation token counts in protobuf blobs inside
 /// the `~/.gemini/antigravity*/conversations/*.db` stores (decoded and
 /// cached read-only by providers::antigravity). Naming: the internal id
@@ -4024,6 +4101,7 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
         let grok_t = s.spawn(|| spend_step("grok", grok));
         let devin_t = s.spawn(|| spend_step("devin", devin));
         let droid_t = s.spawn(|| spend_step("droid", droid));
+        let dsh_t = s.spawn(|| spend_step("deepseek", deepseek_harness));
         let agy_t = s.spawn(|| spend_step("antigravity", antigravity));
         let qwen_t = s.spawn(|| spend_step("qwen", qwen));
 
@@ -4058,7 +4136,13 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
                 FileData::default(),
             ),
         );
+        let (deepseek_data, dsh_aihubmix) = take_join(
+            dsh_t,
+            "deepseek",
+            (FileData::default(), FileData::default()),
+        );
         merge_data(&mut aihubmix_data, aihubmix_via_claude);
+        merge_data(&mut aihubmix_data, dsh_aihubmix);
         merge_data(&mut stepfun_data, stepfun_via_opencode);
         merge_data(&mut aihubmix_data, pi_aihubmix);
         merge_data(&mut stepfun_data, pi_stepfun);
@@ -4076,6 +4160,7 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
             take_join(grok_t, "grok", build_spend("grok", "Grok", FileData::default())),
             opencode_sp,
             build_spend("aihubmix", "AihubMix", aihubmix_data),
+            build_spend("deepseek", "DeepSeek", deepseek_data),
             take_join(devin_t, "devin", build_spend("devin", "Devin", FileData::default())),
             take_join(
                 droid_t,
@@ -6332,6 +6417,64 @@ mod tests {
         let dated = claude_run(&[line_at("2026-10-17T09:00:00Z", "deepseek-v4.1-flash-1017")]);
         let cost: f64 = dated.days.values().map(|v| v.0).sum();
         assert!((cost - 0.775).abs() < 1e-9, "{cost}");
+    }
+
+    /// Harness `deepseek-*` routes bill the platform card (with the
+    /// official weekday peak windows); `aihubmix` routes go to the
+    /// gateway card's bucket; anything else is skipped.
+    #[test]
+    fn dsh_routes_split_and_price() {
+        let ev = |ts: &str, provider: &str, model: &str, cr: f64| providers::dsh::DshEvent {
+            ts_ms: DateTime::parse_from_rfc3339(ts).unwrap().timestamp_millis(),
+            provider: provider.to_string(),
+            model: model.to_string(),
+            input: 1_000_000.0,
+            output: 1_000_000.0,
+            cache_read: cr,
+            cache_write: 0.0,
+        };
+        let total = |d: &FileData| d.days.values().map(|v| v.0).sum::<f64>();
+
+        // Saturday — off-peak official card: $0.15 in + $0.60 out +
+        // $0.003 cache read per MTok = 0.753.
+        let (ds, mix) = deepseek_harness_priced(vec![ev(
+            "2026-10-17T09:00:00Z",
+            "deepseek-account",
+            "deepseek-flash",
+            1_000_000.0,
+        )]);
+        assert!((total(&ds) - 0.753).abs() < 1e-9, "{}", total(&ds));
+        assert!(mix.days.is_empty());
+
+        // Friday 02:00 UTC — peak window: 2x the card.
+        let (ds, _) = deepseek_harness_priced(vec![ev(
+            "2026-10-16T02:00:00Z",
+            "deepseek-official",
+            "deepseek-flash",
+            1_000_000.0,
+        )]);
+        assert!((total(&ds) - 1.506).abs() < 1e-9, "{}", total(&ds));
+
+        // An aihubmix route lands on the aihubmix bucket at the gateway
+        // card ($0.155 + $0.62) and keeps the logged display name.
+        let (ds, mix) = deepseek_harness_priced(vec![ev(
+            "2026-10-17T09:00:00Z",
+            "aihubmix",
+            "deepseek-v4.1-flash-1017",
+            0.0,
+        )]);
+        assert!(ds.days.is_empty());
+        assert!((total(&mix) - 0.775).abs() < 1e-9, "{}", total(&mix));
+        assert!(mix.days.keys().all(|(_, m)| m == "deepseek-v4.1-flash-1017"));
+
+        // A foreign provider contributes to neither bucket.
+        let (ds, mix) = deepseek_harness_priced(vec![ev(
+            "2026-10-17T09:00:00Z",
+            "openrouter",
+            "deepseek-flash",
+            0.0,
+        )]);
+        assert!(ds.days.is_empty() && mix.days.is_empty());
     }
 
     /// DeepSeek and Gemini rows move to AihubMix only when a key exists —
