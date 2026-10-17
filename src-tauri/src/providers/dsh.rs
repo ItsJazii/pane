@@ -264,11 +264,17 @@ fn collect_files(
     cache: &mut SessionCache,
 ) -> (Vec<DshEvent>, bool) {
     let live: HashSet<&PathBuf> = files.iter().collect();
-    cache.retain(|k, _| live.contains(k) || failed.iter().any(|f| k.starts_with(f)));
     let cutoff_ms = cutoff
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
+    // Last-good under a failed root is only worth keeping while it still
+    // has billable events — an all-stale entry would never serve again.
+    cache.retain(|k, v| {
+        live.contains(k)
+            || (failed.iter().any(|f| k.starts_with(f))
+                && v.2.iter().any(|e| e.ts_ms >= cutoff_ms))
+    });
     let mut out = Vec::new();
     let mut complete = failed.is_empty();
     for file in &files {
@@ -291,7 +297,10 @@ fn collect_files(
         };
         let stamp: FileStamp = (meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len());
         if stamp.0 < cutoff {
-            continue; // nothing newer than its last write can be inside
+            // Nothing newer than the cutoff can be inside — drop the
+            // entry instead of holding stale sessions forever.
+            cache.remove(file);
+            continue;
         }
         let entry = cache
             .entry(file.clone())
@@ -630,6 +639,49 @@ pub(crate) mod tests {
         assert_eq!(events.len(), 1);
         assert!(!cache.contains_key(&files[0]));
         assert!(cache.contains_key(&files[1]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn aged_out_files_drop_their_cache_entry() {
+        let dir = dsh_fixture("aged");
+        let sess = dir.join("sessions").join("proj").join("session-abc");
+        std::fs::create_dir_all(&sess).unwrap();
+        let file = sess.join("session.v4.jsonl.zstd");
+        std::fs::write(
+            &file,
+            zstd_file(&[
+                header("deepseek-account", "deepseek-flash"),
+                message(1_800_000_000_000, 10.0, 4.0, 0.0),
+            ]),
+        )
+        .unwrap();
+        let mut cache = SessionCache::new();
+        let (events, complete) = collect_from(&dir, SystemTime::UNIX_EPOCH, &mut cache);
+        assert!(complete && events.len() == 1 && cache.contains_key(&file));
+
+        // Untouched since before the cutoff: nothing billable inside,
+        // so the entry drops instead of sitting in the cache forever.
+        let late = SystemTime::now() + std::time::Duration::from_secs(86400);
+        let (events, complete) = collect_files(vec![file.clone()], &[], late, &mut cache);
+        assert!(complete);
+        assert!(events.is_empty());
+        assert!(!cache.contains_key(&file));
+
+        // Same for last-good under a failed root once every event ages
+        // past the cutoff — nothing left worth serving.
+        let (_, complete) = collect_from(&dir, SystemTime::UNIX_EPOCH, &mut cache);
+        assert!(complete && cache.contains_key(&file));
+        let late = SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_800_000_000_001);
+        let (events, complete) = collect_files(
+            Vec::new(),
+            &[dir.join("sessions").join("proj")],
+            late,
+            &mut cache,
+        );
+        assert!(!complete);
+        assert!(events.is_empty());
+        assert!(!cache.contains_key(&file));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
