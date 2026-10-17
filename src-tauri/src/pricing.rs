@@ -364,7 +364,7 @@ pub fn generation() -> u64 {
 /// fingerprinted below — an app update that reprices the same files would
 /// otherwise leave history at the old dollars until upstream happens to
 /// rewrite a catalog.
-const CORRECTIONS_REV: u32 = 21; // 19: Antigravity `-trial` ids (gemini-4-argon-trial) price like the base card; 20: Argon post-intro list card enforced over catalogs; 21: Claude Code deepseek-flash / V4.1 Flash priced on AIHubMix's card
+const CORRECTIONS_REV: u32 = 22; // 19: Antigravity `-trial` ids (gemini-4-argon-trial) price like the base card; 20: Argon post-intro list card enforced over catalogs; 21: Claude Code deepseek-flash / V4.1 Flash priced on AIHubMix's card; 22: `deepseek/` spellings take the baked official card over models.dev's same-prefix reseller ids
 
 /// The corrections revision on its own — the spend cache treats a changed
 /// revision as a hard discard (the *code* that prices changed), while a
@@ -899,6 +899,17 @@ fn resolve(s: &Store, model: &str, depth: u8) -> Option<Price> {
         .map(|(_, p)| *p)
     {
         return Some(p);
+    }
+    // models.dev keys third-party listings under DeepSeek's own provider
+    // prefix (`deepseek/deepseek-v4.1-flash` is a reseller card, not the
+    // platform's — the official rows live under bare ids in the `deepseek`
+    // provider), so `deepseek/` spellings take the baked official card
+    // before that catalog. litellm's `deepseek/` entries — the real
+    // platform card when upstream carries them — still win above.
+    if canonical.starts_with("deepseek/") {
+        if let Some(p) = builtin_price(&canonical) {
+            return Some(p);
+        }
     }
     if let Some(p) = s.modelsdev.get(&canonical).filter(real) {
         return Some(*p);
