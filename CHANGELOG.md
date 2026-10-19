@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.4.62 — 2026-10-19
+
+### Added
+- **Devin desktop app spend (#288).** The new Devin desktop app keeps
+  its own session history, separate from the Devin CLI, so none of its
+  usage was counted. The Devin card now reads both. A reply that shows
+  up in both histories is counted once.
+- **Droid renews its own login (#287).** Pane now renews an expired
+  Droid login itself, so the Droid card keeps working even if you don't
+  open Droid for days. It only does this while Droid isn't running,
+  keeps a backup of Droid's login file (`auth.v2.keyring.pane-bak`), and
+  stops trying if the saved login is rejected. Signing in to Droid again
+  fixes that.
+- **MiniMax M3.1 Flash on AIHubMix (#290).** Requests through AIHubMix
+  from omp/pi, DeepSeek Harness and Hermes are now priced at AIHubMix's
+  $0.165 / $0.66 per million tokens ($0.0165 cached) instead of showing
+  $0. Claude Code rows keep MiniMax's own price, because its logs don't
+  record which service was used. Saved spend is recalculated once after
+  updating.
+
+### Changed
+- **Antigravity Gemini rows match `agy /usage` (#286).** Pane now asks
+  Antigravity's daily service first and identifies itself as the `agy`
+  CLI, which is the only way to get the same Gemini Session and Weekly
+  numbers `agy /usage` shows. The other service only fills in rows the
+  daily one didn't send, and its separate Gemini quota is never mixed in.
+- **Light mode bars (#289).** Empty bars, the hover-tip bars and the
+  Today / Yesterday / 30 Days tabs now have a visible grey track in
+  light mode instead of blending into the card.
+
+### Fixed
+- **Claude card stuck on "Outdated" (#284).** Anthropic now sometimes
+  answers "rate limited" with a 403 instead of a 429. Pane treated that
+  as a login problem, retried every minute and told you to sign in
+  again, which kept the limit going. It now waits as long as Anthropic
+  asks (up to an hour), and the badge says "rate limited".
+- **Claude Fable weekly limit (#285).** The separate Fable weekly row
+  now says "Fable weekly" instead of "Model weekly". Stars, pins, hidden
+  rows and custom order for the old name carry over.
+
 ## 0.4.61 — 2026-10-18
 
 ### Added
