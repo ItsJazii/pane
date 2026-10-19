@@ -292,9 +292,11 @@ Ground rules that apply to every provider:
 - **Calls:** the local language-server RPC when the IDE runs (an answer
   missing any of the four windows is topped up from Cloud Code);
   otherwise Google's Cloud Code quota API with Google's own token
-  refresh — prod `cloudcode-pa.googleapis.com` first, then
-  `daily-cloudcode-pa.googleapis.com`, answers merged per bucket since
-  the hosts disagree on which quota groups they serve.
+  refresh — `daily-cloudcode-pa.googleapis.com` first (the host agy's
+  own /usage reads; it only serves the Gemini group to the `…/cli/…`
+  User-Agent agy sends), then `cloudcode-pa.googleapis.com` only to fill
+  windows daily lacked since prod's Gemini group is a different pool.
+  Answers merge per bucket, first host wins.
 - **Shows:** Gemini + Claude pool windows, plan. `Argon Weekly` also
   appears while the Antigravity IDE's language server runs — the Cloud
   Code hosts don't serve that bucket.
