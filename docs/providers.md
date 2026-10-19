@@ -191,12 +191,14 @@ Ground rules that apply to every provider:
 ## Devin (Devin CLI)
 
 - **Reads:** `%APPDATA%\devin\credentials.toml`;
-  `%APPDATA%\devin\cli\sessions.db` (read live, read-only — the WAL is
-  followed in place, never copied to Temp) for local spend.
+  `%APPDATA%\devin\cli\sessions.db` and the Devin Desktop (Devin Next)
+  store `%APPDATA%\devin\cli-next\sessions.db` (both read live,
+  read-only — the WAL is followed in place, never copied to Temp) for
+  local spend.
 - **Calls:** Devin's `GetUserStatus` RPC.
 - **Shows:** weekly/daily quota, extra balance, plan; local spend from
-  Devin CLI sessions (cloud Devin sessions bill ACUs and keep no local
-  logs, so they can't be priced).
+  Devin CLI and Devin Next sessions (cloud Devin sessions bill ACUs and
+  keep no local logs, so they can't be priced).
 
 ## Droid (Factory)
 
