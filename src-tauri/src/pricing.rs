@@ -269,6 +269,24 @@ pub fn aihubmix_scoped(model: &str) -> Option<String> {
     argon_segment(model).map(|seg| format!("aihubmix/{seg}"))
 }
 
+/// The slug to price a row that was billed by AIHubMix — ONLY for
+/// callers that already know the row crossed the gateway (the pi/omp
+/// and DeepSeek Harness `aihubmix` routes). Everything aihubmix_scoped
+/// covers, plus its own M3.1-Flash card: `minimax-m3.1-flash` in any
+/// casing resolves to `aihubmix/minimax-m3.1-flash`. Do not use on
+/// Claude rows — Claude Code logs the same MiniMax-M3.1-Flash string
+/// for MiniMax's own endpoint, which models.dev prices correctly.
+pub fn aihubmix_gateway_slug(model: &str) -> String {
+    if let Some(s) = aihubmix_scoped(model) {
+        return s;
+    }
+    let seg = model.rsplit(['/', '\u{1}']).next().unwrap_or(model);
+    if seg.eq_ignore_ascii_case("minimax-m3.1-flash") {
+        return "aihubmix/minimax-m3.1-flash".to_string();
+    }
+    model.to_string()
+}
+
 /// Milliseconds of [start_ms, end_ms) inside V4.1 Flash peak windows —
 /// Hermes rows aggregate whole sessions, so a boundary-crossing session
 /// splits its cost by this share. The changeover clamps the interval:
@@ -364,7 +382,7 @@ pub fn generation() -> u64 {
 /// fingerprinted below — an app update that reprices the same files would
 /// otherwise leave history at the old dollars until upstream happens to
 /// rewrite a catalog.
-const CORRECTIONS_REV: u32 = 22; // 19: Antigravity `-trial` ids (gemini-4-argon-trial) price like the base card; 20: Argon post-intro list card enforced over catalogs; 21: Claude Code deepseek-flash / V4.1 Flash priced on AIHubMix's card; 22: `deepseek/` spellings take the baked official card over models.dev's same-prefix reseller ids
+const CORRECTIONS_REV: u32 = 23; // 19: Antigravity `-trial` ids (gemini-4-argon-trial) price like the base card; 20: Argon post-intro list card enforced over catalogs; 21: Claude Code deepseek-flash / V4.1 Flash priced on AIHubMix's card; 22: `deepseek/` spellings take the baked official card over models.dev's same-prefix reseller ids; 23: AIHubMix MiniMax M3.1 Flash card
 
 /// The corrections revision on its own — the spend cache treats a changed
 /// revision as a hard discard (the *code* that prices changed), while a
@@ -1066,6 +1084,12 @@ fn builtin_price(canonical: &str) -> Option<Price> {
         "aihubmix/qwen3.8-max-2026-09-02" => {
             return Some(Price::flat(1.69, 5.07, 0.169, 2.1125));
         }
+        // AihubMix MiniMax M3.1 Flash (aihubmix.com/model/minimax-m3.1-flash):
+        // $0.165 in / $0.66 out / $0.0165 cache read; no published cache
+        // write → billed at the input rate like the other AihubMix arms.
+        "aihubmix/minimax-m3.1-flash" => {
+            return Some(Price::flat(0.165, 0.66, 0.0165, 0.165));
+        }
         _ => {}
     }
     let bare = canonical.rsplit('/').next().unwrap_or(canonical);
@@ -1683,6 +1707,36 @@ mod tests {
         );
         assert!(super::aihubmix_scoped("qwen3.8-max").is_none());
         assert!(super::aihubmix_scoped("google/qwen3.8-max").is_none());
+    }
+
+    #[test]
+    fn aihubmix_minimax_m31_flash_card_and_slug() {
+        let store = super::Store::default();
+        let p = super::resolve(&store, "aihubmix/minimax-m3.1-flash", 0).unwrap();
+        assert!((p.input - 0.165).abs() < 1e-9);
+        assert!((p.output - 0.66).abs() < 1e-9);
+        assert!((p.cache_read - 0.0165).abs() < 1e-9);
+        // No published cache-write rate → billed at input like the other
+        // AIHubMix arms.
+        assert!((p.cache_write - 0.165).abs() < 1e-9);
+        for model in [
+            "minimax-m3.1-flash",
+            "MiniMax-M3.1-Flash",
+            "aihubmix/minimax-m3.1-flash",
+        ] {
+            assert_eq!(
+                super::aihubmix_gateway_slug(model),
+                "aihubmix/minimax-m3.1-flash",
+                "{model}"
+            );
+        }
+        assert_eq!(
+            super::aihubmix_gateway_slug("deepseek-flash"),
+            "aihubmix/deepseek-v4.1-flash"
+        );
+        assert_eq!(super::aihubmix_gateway_slug("glm-5.3-flash"), "glm-5.3-flash");
+        // Claude's path stays untouched: the scoped helper never maps it.
+        assert!(super::aihubmix_scoped("MiniMax-M3.1-Flash").is_none());
     }
 
     #[test]

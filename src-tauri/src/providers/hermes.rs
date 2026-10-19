@@ -199,7 +199,8 @@ pub fn price_lookup_slug(model: &str, provider: &str, base_url: &str) -> String 
         }
         // Gemini 4 Argon bills AIHubMix's flat $4/$20 card, not Google's
         // dated intro rate the bare slug would take.
-        if let Some(scoped) = crate::pricing::aihubmix_scoped(bare) {
+        let scoped = crate::pricing::aihubmix_gateway_slug(bare);
+        if scoped != bare {
             return scoped;
         }
         return match bare {
@@ -466,6 +467,18 @@ mod tests {
         assert_eq!(
             price_lookup_slug("qwen3.8-flash", "custom", "https://example.com/v1"),
             "qwen3.8-flash"
+        );
+        assert_eq!(
+            price_lookup_slug("MiniMax-M3.1-Flash", "aihubmix", ""),
+            "aihubmix/minimax-m3.1-flash"
+        );
+        assert_eq!(
+            price_lookup_slug("minimax-m3.1-flash", "custom", "https://aihubmix.com/v1"),
+            "aihubmix/minimax-m3.1-flash"
+        );
+        assert_eq!(
+            price_lookup_slug("MiniMax-M3.1-Flash", "minimax", ""),
+            "MiniMax-M3.1-Flash"
         );
         assert_eq!(
             price_lookup_slug("qwen3.8-max-0902", "custom", "https://aihubmix.com/v1/"),
