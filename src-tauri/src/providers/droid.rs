@@ -319,6 +319,14 @@ fn token_exp_s(token: &str) -> Option<i64> {
     jwt_payload(token)?.get("exp")?.as_i64()
 }
 
+/// The access token still has more than REFRESH_AHEAD_S to live — or no
+/// `exp` claim at all (can't be proven stale). Pure for tests.
+fn still_fresh(access: &str, now_s: i64) -> bool {
+    token_exp_s(access)
+        .map(|exp| exp > now_s + REFRESH_AHEAD_S)
+        .unwrap_or(true)
+}
+
 struct DroidLogin {
     access_token: String,
     account_id: Option<String>,
@@ -466,6 +474,12 @@ static REFRESH_BACKOFF: Mutex<RefreshBackoff> = Mutex::new(RefreshBackoff {
     transient_until_ms: 0,
     rejected_fp: None,
 });
+
+/// One refresh at a time process-wide: overlapping callers would stage
+/// the same `<live>.pane-tmp` (the second clobbering the first's) and
+/// send the SAME refresh token to WorkOS — the loser eats invalid_grant
+/// and the winner's commit can lose its tmp, burning the rotated pair.
+static REFRESH_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn backoff_allows(b: &RefreshBackoff, fp: &str, now_ms: i64) -> bool {
     now_ms >= b.transient_until_ms && b.rejected_fp.as_deref() != Some(fp)
@@ -730,6 +744,22 @@ fn commit_refresh(
 /// pair actually landed in the auth file; every failure path returns
 /// None (and records the right backoff) without logging token material.
 async fn try_refresh(home: &Path) -> Option<String> {
+    let _gate = REFRESH_GATE.lock().await;
+    // Another caller may have landed a refresh while we queued — and so
+    // may the user running droid. Re-read: a no-longer-expiring token
+    // means there's nothing to do, and reusing the file's refresh_token
+    // would burn it.
+    let current = read_auth_file(home)
+        .ok()
+        .flatten()?
+        .doc
+        .get("access_token")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    if still_fresh(&current, chrono::Utc::now().timestamp()) {
+        return Some(current);
+    }
     let prep = prepare_refresh(home, droid_running(), chrono::Utc::now().timestamp_millis())?;
     match workos_refresh(&prep.refresh_token, &prep.client_id).await {
         RefreshOutcome::Rotated { access, refresh } => {
@@ -1504,6 +1534,17 @@ mod tests {
         assert_eq!(workos_client_id(&other), WORKOS_CLIENT_ID);
         let none = unsigned_jwt(json!({"sub": "u-1"}));
         assert_eq!(workos_client_id(&none), WORKOS_CLIENT_ID);
+    }
+
+    #[test]
+    fn still_fresh_gates_on_the_refresh_window() {
+        let now = 1_800_000_000i64;
+        assert!(still_fresh(&unsigned_jwt(json!({"exp": now + 3_600})), now));
+        // Inside the 5-minute lookahead → refresh.
+        assert!(!still_fresh(&unsigned_jwt(json!({"exp": now + 60})), now));
+        assert!(!still_fresh(&unsigned_jwt(json!({"exp": now - 60})), now));
+        // No exp claim can't be proven stale → fresh.
+        assert!(still_fresh(&unsigned_jwt(json!({"sub": "u-1"})), now));
     }
 
     #[test]
