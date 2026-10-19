@@ -1,5 +1,6 @@
 use super::{http_no_redirect, Metric, Snapshot};
 use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -127,6 +128,186 @@ mod tests {
 
     fn now_s() -> i64 {
         chrono::Utc::now().timestamp()
+    }
+
+    #[test]
+    fn cli_and_cli_next_stores_merge_independently() {
+        let dir = std::env::temp_dir().join(format!(
+            "pane-devin-stores-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cli_db = dir.join("cli.db");
+        let next_db = dir.join("next.db");
+        let c1 = create_db(&cli_db, "2026-05-30T00:00:00Z");
+        c1.execute("INSERT INTO sessions VALUES ('s1', 'model-a')", [])
+            .unwrap();
+        insert_message(&c1, "s1", &assistant_msg("m1", 10, 4), now_s() - 3600);
+        let c2 = create_db(&next_db, "2026-10-17T17:29:51Z");
+        c2.execute("INSERT INTO sessions VALUES ('s2', 'model-b')", [])
+            .unwrap();
+        insert_message(&c2, "s2", &assistant_msg("m2", 20, 8), now_s() - 3600);
+
+        let mut states = HashMap::new();
+        let stores: Vec<(&'static str, PathBuf, Option<PathBuf>)> = vec![
+            ("cli", cli_db.clone(), None),
+            ("cli-next", next_db.clone(), None),
+        ];
+        let events = collect_stores(&stores, &mut states, 1000);
+        assert_eq!(events.len(), 2);
+        // Only cli-next grew → only its events advance (per-store state).
+        // The row carries padding so the file length actually changes —
+        // collect_with's stamp check keys on (mtime, len).
+        let big = format!(
+            "{{\"role\":\"assistant\",\"message_id\":\"m3\",\"metadata\":{{\"metrics\":{{\"input_tokens\":5,\"output_tokens\":1,\"cache_read_tokens\":0,\"cache_creation_tokens\":0}}}},\"pad\":\"{}\"}}",
+            "x".repeat(8192)
+        );
+        insert_message(&c2, "s2", &big, now_s() - 1800);
+        let events = collect_stores(&stores, &mut states, 1000);
+        assert_eq!(events.len(), 3);
+        drop(c1);
+        drop(c2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_message_in_both_stores_counts_once() {
+        let dir = std::env::temp_dir().join(format!(
+            "pane-devin-stores-dedupe-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cli_db = dir.join("cli.db");
+        let next_db = dir.join("next.db");
+        // Devin Next importing a CLI session: identical (session, mid).
+        for (db, birth) in [(cli_db.clone(), "2026-05-30T00:00:00Z"), (next_db.clone(), "2026-10-17T17:29:51Z")] {
+            let conn = create_db(&db, birth);
+            conn.execute("INSERT INTO sessions VALUES ('s1', 'model-a')", [])
+                .unwrap();
+            insert_message(&conn, "s1", &assistant_msg("m1", 10, 4), now_s() - 3600);
+        }
+        let mut states = HashMap::new();
+        let stores: Vec<(&'static str, PathBuf, Option<PathBuf>)> = vec![
+            ("cli", cli_db, None),
+            ("cli-next", next_db, None),
+        ];
+        let events = collect_stores(&stores, &mut states, 1000);
+        assert_eq!(events.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Assistant row carrying no message_id/request_id → StoredEvent.mid "".
+    fn idless_msg(input: u32, output: u32) -> String {
+        format!(
+            "{{\"role\":\"assistant\",\"metadata\":{{\"metrics\":{{\"input_tokens\":{input},\"output_tokens\":{output},\"cache_read_tokens\":0,\"cache_creation_tokens\":0}}}}}}"
+        )
+    }
+
+    #[test]
+    fn identical_idless_rows_dedupe_across_stores_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "pane-devin-stores-idless-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cli_db = dir.join("cli.db");
+        let next_db = dir.join("next.db");
+        // The SAME id-less row (session, ts, model, counters) imported
+        // into both stores → counted once (cli wins).
+        for (db, birth) in [
+            (cli_db.clone(), "2026-05-30T00:00:00Z"),
+            (next_db.clone(), "2026-10-17T17:29:51Z"),
+        ] {
+            let conn = create_db(&db, birth);
+            conn.execute("INSERT INTO sessions VALUES ('s1', 'model-a')", [])
+                .unwrap();
+            insert_message(&conn, "s1", &idless_msg(10, 4), 1_791_000_000);
+        }
+        let mut states = HashMap::new();
+        let stores: Vec<(&'static str, PathBuf, Option<PathBuf>)> = vec![
+            ("cli", cli_db, None),
+            ("cli-next", next_db, None),
+        ];
+        let events = collect_stores(&stores, &mut states, 1000);
+        assert_eq!(events.len(), 1);
+
+        // But two identical id-less rows in ONE store are distinct
+        // messages — both must count.
+        let only = std::env::temp_dir().join(format!(
+            "pane-devin-stores-idless-one-{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&only);
+        let conn = create_db(&only, "2026-05-30T00:00:00Z");
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'model-a')", [])
+            .unwrap();
+        insert_message(&conn, "s1", &idless_msg(10, 4), 1_791_000_000);
+        insert_message(&conn, "s1", &idless_msg(10, 4), 1_791_000_000);
+        drop(conn);
+        let mut states = HashMap::new();
+        let stores: Vec<(&'static str, PathBuf, Option<PathBuf>)> = vec![("cli", only, None)];
+        let events = collect_stores(&stores, &mut states, 1000);
+        assert_eq!(events.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cross-store id-less dedupe is per OCCURRENCE: store A holding one
+    /// copy of R drops only the first of B's two identical copies.
+    #[test]
+    fn idless_dedupe_counts_occurrences_not_presence() {
+        let dir = std::env::temp_dir().join(format!(
+            "pane-devin-stores-idless-occ-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let a_db = dir.join("cli.db");
+        let b_db = dir.join("next.db");
+        let a = create_db(&a_db, "2026-05-30T00:00:00Z");
+        a.execute("INSERT INTO sessions VALUES ('s1', 'model-a')", [])
+            .unwrap();
+        insert_message(&a, "s1", &idless_msg(10, 4), 1_791_000_000);
+        let b = create_db(&b_db, "2026-10-17T17:29:51Z");
+        b.execute("INSERT INTO sessions VALUES ('s1', 'model-a')", [])
+            .unwrap();
+        insert_message(&b, "s1", &idless_msg(10, 4), 1_791_000_000);
+        insert_message(&b, "s1", &idless_msg(10, 4), 1_791_000_000);
+        let mut states = HashMap::new();
+        let stores: Vec<(&'static str, PathBuf, Option<PathBuf>)> = vec![
+            ("cli", a_db, None),
+            ("cli-next", b_db, None),
+        ];
+        let events = collect_stores(&stores, &mut states, 1000);
+        assert_eq!(events.len(), 2); // A's 1 + B's 1 kept (B's 2nd dropped)
+        drop(a);
+        drop(b);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_second_store_behaves_like_today() {
+        let dir = std::env::temp_dir().join(format!(
+            "pane-devin-stores-single-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cli_db = dir.join("cli.db");
+        let conn = create_db(&cli_db, "2026-05-30T00:00:00Z");
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'model-a')", [])
+            .unwrap();
+        insert_message(&conn, "s1", &assistant_msg("m1", 10, 4), now_s() - 3600);
+        drop(conn);
+        let mut states = HashMap::new();
+        let stores: Vec<(&'static str, PathBuf, Option<PathBuf>)> =
+            vec![("cli", cli_db, None)];
+        let events = collect_stores(&stores, &mut states, 1000);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].input, 10.0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -641,7 +822,7 @@ async fn fetch() -> Result<Snapshot, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Local spend events — the Devin CLI's sessions.db
+// Local spend events — the Devin CLI's and Devin Desktop's sessions.db
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -654,9 +835,20 @@ pub struct UsageEvent {
     pub cache_write: f64,
 }
 
-fn sessions_db_path() -> Option<PathBuf> {
-    let appdata = std::env::var("APPDATA").ok()?;
-    Some(PathBuf::from(appdata).join("devin").join("cli").join("sessions.db"))
+/// Every Devin session store on the PC: the CLI's `devin\cli\sessions.db`
+/// and the Devin Desktop (Devin Next) app's `devin\cli-next\sessions.db`
+/// — identical schema, independent rowid lineages. Names key per-store
+/// state and cache files; "cli" stays first so any future CLI-imported
+/// session wins cross-store dedupe.
+fn sessions_db_paths() -> Vec<(&'static str, PathBuf)> {
+    let Ok(appdata) = std::env::var("APPDATA") else {
+        return Vec::new();
+    };
+    let devin = PathBuf::from(appdata).join("devin");
+    vec![
+        ("cli", devin.join("cli").join("sessions.db")),
+        ("cli-next", devin.join("cli-next").join("sessions.db")),
+    ]
 }
 
 /// (mtime, size) of one file; a fixed sentinel when it doesn't exist.
@@ -719,11 +911,18 @@ struct DevinState {
     cache: DevinCache,
 }
 
-/// None until the on-disk cache has been loaded (first collect this run).
-static STATE: Mutex<Option<DevinState>> = Mutex::new(None);
+/// None until the on-disk caches have been loaded (first collect this
+/// run). One DevinState per store — each store's rowid high-water,
+/// identity reset, and stamps advance independently.
+static STATE: Mutex<Option<HashMap<&'static str, DevinState>>> = Mutex::new(None);
 
-fn cache_path() -> PathBuf {
-    super::config_dir().join("devin_spend_cache.json")
+/// `cli` keeps the existing cache file exactly as before; the Devin
+/// Desktop (cli-next) store gets its own.
+fn cache_path(store: &str) -> PathBuf {
+    super::config_dir().join(match store {
+        "cli-next" => "devin_next_spend_cache.json",
+        _ => "devin_spend_cache.json",
+    })
 }
 
 /// None when the file is missing, unparseable, or from another version.
@@ -1026,28 +1225,90 @@ fn refresh_cache_with_limit(
 pub fn collect_usage_events() -> Vec<UsageEvent> {
     super::sweep_temp_sqlite_prefix("pane-devin-");
 
-    let Some(db_path) = sessions_db_path() else { return Vec::new() };
-    if !db_path.exists() {
+    let stores: Vec<(&'static str, PathBuf, Option<PathBuf>)> = sessions_db_paths()
+        .into_iter()
+        .filter(|(_, p)| p.exists())
+        .map(|(name, p)| (name, p, Some(cache_path(name))))
+        .collect();
+    if stores.is_empty() {
         return Vec::new();
     }
-
     let Ok(mut guard) = STATE.lock() else { return Vec::new() };
-    let cache_file = cache_path();
-    if guard.is_none() {
-        // First collect this run: seed from disk (empty when missing or
-        // stale) with sentinel stamps so we always refresh once — the
-        // WAL almost certainly moved while Pane wasn't running.
-        *guard = Some(DevinState {
+    collect_stores(&stores, guard.get_or_insert_with(HashMap::new), MAX_MESSAGE_ROWS)
+}
+
+/// One pass over `stores`: each store runs its own incremental collect
+/// (a missing store contributes nothing), then the in-window events
+/// merge into one list. Rows dedupe across stores by (session_id, mid)
+/// when mid is non-empty — first store wins — in case Devin Next ever
+/// imports CLI sessions. `cache_file` None skips persisting (tests).
+fn collect_stores(
+    stores: &[(&'static str, PathBuf, Option<PathBuf>)],
+    states: &mut HashMap<&'static str, DevinState>,
+    limit: usize,
+) -> Vec<UsageEvent> {
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+    // Id-less events (mid == "") can't dedupe on a message id, so an
+    // imported copy would count twice. They dedupe ACROSS stores on a
+    // full-row fingerprint, per OCCURRENCE: prior stores having k copies
+    // of a row drop the current store's first k copies and keep the rest.
+    // But never within one store (two distinct id-less messages can
+    // legitimately share identical numbers), so the current store's
+    // counts merge into the map only after it finishes.
+    let mut seen_idless: HashMap<(String, i64, String, u64, u64, u64, u64), usize> =
+        HashMap::new();
+    let mut out = Vec::new();
+    for (name, db_path, cache_file) in stores {
+        // First collect this run per store: seed from disk (empty when
+        // missing or stale) with sentinel stamps so we always refresh
+        // once — the WAL almost certainly moved while Pane wasn't running.
+        let state = states.entry(*name).or_insert_with(|| DevinState {
             db_stamp: (std::time::UNIX_EPOCH, 0),
             wal_stamp: (std::time::UNIX_EPOCH, 0),
-            cache: load_cache(&cache_file).unwrap_or(DevinCache {
-                version: DEVIN_CACHE_VERSION,
-                ..Default::default()
-            }),
+            cache: cache_file
+                .as_deref()
+                .and_then(load_cache)
+                .unwrap_or_else(|| DevinCache {
+                    version: DEVIN_CACHE_VERSION,
+                    ..Default::default()
+                }),
         });
+        let mut store_idless: HashMap<(String, i64, String, u64, u64, u64, u64), usize> =
+            HashMap::new();
+        for e in collect_with(db_path, state, cache_file.as_deref(), limit) {
+            if e.mid.is_empty() {
+                let fp = (
+                    e.session_id.clone(),
+                    e.ts_ms,
+                    e.model.clone(),
+                    e.input.to_bits(),
+                    e.output.to_bits(),
+                    e.cache_read.to_bits(),
+                    e.cache_write.to_bits(),
+                );
+                // Prior stores' first-k copies are imports — drop just
+                // enough occurrences to absorb them.
+                let imported = match seen_idless.get_mut(&fp) {
+                    Some(n) if *n > 0 => {
+                        *n -= 1;
+                        true
+                    }
+                    _ => false,
+                };
+                *store_idless.entry(fp).or_insert(0) += 1;
+                if imported {
+                    continue;
+                }
+            } else if !seen.insert((e.session_id.clone(), e.mid.clone())) {
+                continue;
+            }
+            out.push(e.to_usage());
+        }
+        for (fp, n) in store_idless {
+            *seen_idless.entry(fp).or_insert(0) += n;
+        }
     }
-    let Some(state) = guard.as_mut() else { return Vec::new() };
-    collect_with(&db_path, state, Some(&cache_file), MAX_MESSAGE_ROWS)
+    out
 }
 
 /// One collect against `db_path` with `state`. Stamps are recorded only
@@ -1059,11 +1320,11 @@ fn collect_with(
     state: &mut DevinState,
     cache_file: Option<&std::path::Path>,
     limit: usize,
-) -> Vec<UsageEvent> {
+) -> Vec<StoredEvent> {
     let db_stamp = file_stamp(db_path);
     let wal_stamp = file_stamp(&db_path.with_extension("db-wal"));
     if state.db_stamp == db_stamp && state.wal_stamp == wal_stamp {
-        return events_in_spend_window(&state.cache.events);
+        return stored_in_spend_window(&state.cache.events);
     }
     match refresh_cache_with_limit(db_path, &mut state.cache, limit) {
         Ok(outcome) => {
@@ -1076,20 +1337,16 @@ fn collect_with(
                     save_cache(path, &state.cache);
                 }
             }
-            events_in_spend_window(&state.cache.events)
+            stored_in_spend_window(&state.cache.events)
         }
         // Busy/locked db: keep showing the last good events instead of a
         // sudden empty Devin row; the next refresh retries. Stamps and
         // last_rowid stay put so the retry re-attempts the same read.
-        Err(_) => events_in_spend_window(&state.cache.events),
+        Err(_) => stored_in_spend_window(&state.cache.events),
     }
 }
 
-fn events_in_spend_window(events: &[StoredEvent]) -> Vec<UsageEvent> {
+fn stored_in_spend_window(events: &[StoredEvent]) -> Vec<StoredEvent> {
     let cutoff_ms = chrono::Utc::now().timestamp_millis() - 32 * 86_400 * 1_000;
-    events
-        .iter()
-        .filter(|e| e.ts_ms >= cutoff_ms)
-        .map(StoredEvent::to_usage)
-        .collect()
+    events.iter().filter(|e| e.ts_ms >= cutoff_ms).cloned().collect()
 }
