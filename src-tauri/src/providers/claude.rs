@@ -189,6 +189,33 @@ pub async fn snapshot_at(dir: PathBuf, id: String, name: String) -> Snapshot {
     }
 }
 
+/// Non-success /usage response → error string. Anthropic now also
+/// signals its rate limit as HTTP 403 carrying a `rate_limit_error`
+/// body (Retry-After ~1h) instead of 429 — that spelling must read as
+/// "rate limited" (the fetch guard's backoff + the UI's cooldown note
+/// both key on it) without the substring "HTTP 403", which the UI reads
+/// as a relogin prompt. 429 keeps its own historic strings.
+fn usage_error(status: reqwest::StatusCode, retry_after: Option<u64>, body: &str) -> String {
+    if status.as_u16() == 429 {
+        return match retry_after {
+            Some(secs) => format!("usage endpoint: HTTP 429 (retry_after_s={secs})"),
+            None => format!("usage endpoint: HTTP {status}"),
+        };
+    }
+    let rate_limited = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v.get("error")?.get("type")?.as_str().map(|t| t == "rate_limit_error"))
+        .unwrap_or(false);
+    match (rate_limited, retry_after) {
+        (true, Some(secs)) => format!(
+            "usage endpoint: rate limited (status {}, retry_after_s={secs})",
+            status.as_u16()
+        ),
+        (true, None) => format!("usage endpoint: rate limited (status {})", status.as_u16()),
+        (false, _) => format!("usage endpoint: HTTP {status}"),
+    }
+}
+
 async fn fetch(dir: &std::path::Path, id: &str, name: &str) -> Result<Snapshot, String> {
     let path = dir.join(".credentials.json");
     if !path.exists() {
@@ -214,22 +241,24 @@ async fn fetch(dir: &std::path::Path, id: &str, name: &str) -> Result<Snapshot, 
         .await
         .map_err(|e| format!("usage request: {e}"))?;
     if !resp.status().is_success() {
-        // Anthropic's 429s state how long the cooldown runs (a plan change
-        // can trigger a ~25-minute one); carry it so the fetch guard can
-        // bench for exactly that long instead of knocking every 5 minutes.
-        if resp.status().as_u16() == 429 {
-            if let Some(secs) = resp
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
-            {
-                return Err(format!(
-                    "usage endpoint: HTTP 429 (retry_after_s={secs})"
-                ));
-            }
-        }
-        return Err(format!("usage endpoint: HTTP {}", resp.status()));
+        // Anthropic's cooldowns state how long they run (a plan change
+        // can trigger a ~25-minute one); carry Retry-After so the fetch
+        // guard can bench for exactly that long instead of knocking
+        // every 5 minutes. 429s need no body — usage_error keys off the
+        // status alone — and other bodies are bounded before the
+        // rate_limit_error check.
+        let status = resp.status();
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok());
+        let body = if status.as_u16() == 429 {
+            String::new()
+        } else {
+            super::bounded_text(resp, 16 * 1024).await
+        };
+        return Err(usage_error(status, retry_after, &body));
     }
     let usage: Value = resp.json().await.map_err(|e| format!("usage parse: {e}"))?;
 
@@ -776,7 +805,7 @@ fn backup_credentials(path: &std::path::Path) {
 mod tests {
     use super::{
         banked_resets, cloud_credits, identity_from, parse_reset_credit_id, push_weekly_scoped,
-        scoped_id_charset,
+        scoped_id_charset, usage_error,
     };
     use serde_json::json;
 
@@ -793,6 +822,45 @@ mod tests {
         push_weekly_scoped(&mut metrics, &usage);
         assert_eq!(metrics.len(), 1);
         assert_eq!(metrics[0].label, "Fable weekly");
+    }
+
+    /// Anthropic's usage endpoint answers its hourly rate limit as a
+    /// 403 carrying a rate_limit_error body + Retry-After — the string
+    /// must read as a rate limit to the fetch guard, without "HTTP 403"
+    /// (the UI's relogin regex).
+    #[test]
+    fn usage_error_reads_the_403_rate_limit_body() {
+        let body = r#"{"error":{"type":"rate_limit_error","message":"Rate limited. Please try again later."}}"#;
+        let err = usage_error(reqwest::StatusCode::FORBIDDEN, Some(3600), body);
+        assert!(err.contains("rate limited"));
+        assert!(err.contains("retry_after_s=3600"));
+        assert!(!err.contains("HTTP 403"));
+        assert_eq!(
+            usage_error(reqwest::StatusCode::FORBIDDEN, None, body),
+            "usage endpoint: rate limited (status 403)"
+        );
+        // Other bodies still read as plain HTTP errors.
+        assert_eq!(
+            usage_error(reqwest::StatusCode::FORBIDDEN, None, ""),
+            "usage endpoint: HTTP 403 Forbidden"
+        );
+        assert_eq!(
+            usage_error(
+                reqwest::StatusCode::FORBIDDEN,
+                None,
+                r#"{"error":{"type":"permission_error"}}"#
+            ),
+            "usage endpoint: HTTP 403 Forbidden"
+        );
+        // 429 keeps its own strings.
+        assert_eq!(
+            usage_error(reqwest::StatusCode::TOO_MANY_REQUESTS, Some(120), ""),
+            "usage endpoint: HTTP 429 (retry_after_s=120)"
+        );
+        assert_eq!(
+            usage_error(reqwest::StatusCode::TOO_MANY_REQUESTS, None, ""),
+            "usage endpoint: HTTP 429 Too Many Requests"
+        );
     }
 
     #[test]
