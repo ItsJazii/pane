@@ -1492,7 +1492,7 @@ fn card_is_disabled(id: &str, disabled: &[String]) -> bool {
 /// clear the bench. Returns the bench duration and the honored
 /// Retry-After (ms) for the note text.
 fn bench_for_error(err: &str) -> (i64, Option<i64>) {
-    let rate_limited = err.contains("429");
+    let rate_limited = err.contains("429") || err.contains("rate limited");
     let retry_after_ms = err
         .split("retry_after_s=")
         .nth(1)
@@ -1547,7 +1547,7 @@ where
     let mut map = fail_state().lock().unwrap();
     if snap.status == "error" {
         let err = snap.error.clone().unwrap_or_default();
-        let rate_limited = err.contains("429");
+        let rate_limited = err.contains("429") || err.contains("rate limited");
         let (bench_ms, retry_after_ms) = bench_for_error(&err);
         map.insert(
             id.to_string(),
@@ -3681,6 +3681,22 @@ mod tests {
         assert_eq!(
             bench_for_error("usage endpoint: HTTP 429 Too Many Requests"),
             (300_000, None)
+        );
+        // Anthropic's usage endpoint signals its hourly limit as a 403
+        // with a rate_limit_error body — the error string reads "rate
+        // limited", so it must bench like a 429, not as a plain error
+        // (and honor the vendor's Retry-After).
+        assert_eq!(
+            bench_for_error("usage endpoint: rate limited (status 403, retry_after_s=3600)"),
+            (3_600_000, Some(3_600_000))
+        );
+        assert_eq!(
+            bench_for_error("usage endpoint: rate limited (status 403)"),
+            (300_000, None)
+        );
+        assert_eq!(
+            bench_for_error("usage endpoint: HTTP 403 Forbidden"),
+            (60_000, None)
         );
     }
 
