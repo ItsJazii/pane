@@ -826,6 +826,19 @@ select:focus-visible {
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.07);
 }
 
+:root[data-theme="light"] .bar,
+:root[data-theme="light"] .tip-bar {
+  background: rgba(0, 0, 0, 0.1);
+}
+
+:root[data-theme="light"] .tabs {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+:root[data-theme="light"] .tab.active {
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.12);
+}
+
 .customize-block {
   background: var(--card);
   border: 1px solid var(--border);
