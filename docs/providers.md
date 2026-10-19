@@ -201,20 +201,25 @@ Ground rules that apply to every provider:
 ## Droid (Factory)
 
 - **Reads:** `%USERPROFILE%\.factory\auth.v2.keyring` (or
-  `auth.v2.file` + `auth.v2.key` when the keyring is off) — strictly
-  read-only, never written and never refreshed; CLI login only, no
-  API-key option. The file is one line of `iv:tag:ciphertext`
+  `auth.v2.file` + `auth.v2.key` when the keyring is off) — CLI login
+  only, no API-key option. The file is one line of `iv:tag:ciphertext`
   AES-256-GCM; the key lives in the Windows Credential Manager entry
-  `Factory CLI/auth-encryption-key`. Decrypted in memory only; the
-  refresh token is never used. The access token lasts ~24 h — Droid
-  renews it when you run `droid`. While it's expired the card quietly
-  keeps the last good numbers (no Outdated badge) for up to 24 h, then
-  shows the "open Droid" message; the numbers update the next time
-  Droid is opened.
+  `Factory CLI/auth-encryption-key`. Decrypted in memory only. The
+  access token lasts ~24 h; when it's expired (or about to be) Pane
+  renews the login itself — see Calls — but only while no `droid`
+  process runs and no fresh `auth.v2.write.lock` is held, since the
+  refresh token rotates on use and a running CLI still holds the old
+  pair. If a refresh can't safely land, the card quietly keeps the last
+  good numbers (no Outdated badge) for up to 24 h, then shows the "open
+  Droid" message; the numbers update the next time Droid is opened.
 - **Calls:** `api.factory.ai` `/api/billing/limits` (and
   `/api/app/auth/me` for the plan name; the legacy
   `/api/organization/subscription/usage` when the account isn't on
-  token rate limits).
+  token rate limits). Expired logins are renewed via WorkOS
+  (`api.workos.com/user_management/authenticate`, the same refresh-token
+  grant the CLI runs, with the client id from the token's own JWT claim);
+  the new pair is re-encrypted and written back into the same auth file
+  under a `.pane-bak` backup — again only when Droid isn't running.
 - **Shows:** Session/Weekly/Monthly windows (Core pool rows only when
   they carry usage), extra-usage balance, plan tier.
 - **Spend:** reads per-session token totals from

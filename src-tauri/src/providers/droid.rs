@@ -5,10 +5,14 @@
 //! key base64'd inside a Windows generic credential
 //! (`Factory CLI/auth-encryption-key`). When the keyring is off it falls
 //! back to `auth.v2.file` + a plain `auth.v2.key` holding the same
-//! base64 key. Everything is read-only — Pane never writes the files,
-//! never calls any refresh endpoint, and never uses the refresh token.
-//! The access token expires ~24 h after Droid last refreshed it; then
-//! the card goes stale until the user runs `droid` again.
+//! base64 key. When the login is expired (or within five minutes of it)
+//! Pane renews it itself through WorkOS — the same rotating refresh the
+//! CLI does — and writes the new pair back into the same encrypted file,
+//! keeping a `.pane-bak`. All of it gated on Droid not running: no
+//! `droid.exe` process and no fresh `auth.v2.write.lock`, because a
+//! refresh token rotates on use and a CLI holding the old one would be
+//! signed out. When a refresh can't safely land the card goes stale
+//! until the user runs `droid` again (~24 h access-token life).
 
 use super::{http_no_redirect, Metric, Snapshot};
 use base64::Engine;
@@ -25,6 +29,20 @@ const LEGACY_USAGE_URL: &str =
     "https://api.factory.ai/api/organization/subscription/usage?useCache=true";
 const MAX_BODY: usize = 1 << 20; // 1 MiB — far above any quota response
 const AUTH_FILE_CAP: u64 = 64 * 1024;
+
+/// Refresh lands the same rotating call the Droid CLI makes: WorkOS
+/// `user_management/authenticate` with a form-encoded refresh grant.
+/// The client id normally comes from the access token's own JWT claim;
+/// this is the production fallback the CLI ships with.
+const WORKOS_AUTHENTICATE_URL: &str = "https://api.workos.com/user_management/authenticate";
+const WORKOS_CLIENT_ID: &str = "client_01HNM792M5G5G1A2THWPXKFMXB";
+/// Refresh a token this close to expiry instead of letting it lapse.
+const REFRESH_AHEAD_S: i64 = 300;
+/// Any failed refresh pauses further attempts for this long.
+const TRANSIENT_BACKOFF_MS: i64 = 30 * 60_000;
+/// Droid holds `auth.v2.write.lock` while writing; a crashed droid can
+/// leave it behind, so only a lock this fresh still counts as held.
+const WRITE_LOCK_STALE_S: u64 = 120;
 
 const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 86_400_000;
@@ -167,8 +185,8 @@ fn aes_gcm_decrypt(
     }
 }
 
-/// Same one-shot GCM plumbing for the test-side encryptor.
-#[cfg(test)]
+/// Same one-shot GCM plumbing for writing the refreshed pair back —
+/// Droid's file format, so the write needs the same seal as the read.
 fn aes_gcm_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
     use windows::Win32::Security::Cryptography::*;
     unsafe {
@@ -236,6 +254,12 @@ unsafe fn set_gcm_mode(alg: windows::Win32::Security::Cryptography::BCRYPT_ALG_H
 /// One `iv:tag:ciphertext` line (each part base64) → decrypted bytes.
 fn decrypt_auth_file(path: &std::path::Path, key: &[u8]) -> Result<Vec<u8>, String> {
     let line = super::read_small_text(path, AUTH_FILE_CAP, "Droid login")?;
+    decrypt_auth_line(&line, key)
+}
+
+/// The same decode without the file read — the refresh path holds the
+/// raw line already for its pre-commit "unchanged" check.
+fn decrypt_auth_line(line: &str, key: &[u8]) -> Result<Vec<u8>, String> {
     let parts: Vec<&str> = line.trim().split(':').collect();
     if parts.len() != 3 {
         return Err("malformed".into());
@@ -290,9 +314,61 @@ fn token_expired(token: &str, now_s: i64) -> bool {
         .is_some_and(|exp| exp <= now_s)
 }
 
+/// The token's own `exp` claim in seconds — absent when the JWT has none.
+fn token_exp_s(token: &str) -> Option<i64> {
+    jwt_payload(token)?.get("exp")?.as_i64()
+}
+
 struct DroidLogin {
     access_token: String,
     account_id: Option<String>,
+}
+
+/// Everything the refresh path needs about the on-disk login: which file
+/// was read (keyring vs keyfile variant), its key, the raw `iv:tag:ct`
+/// line and (mtime, len) stamp taken at read time — the pre-commit
+/// "unchanged" check compares against them — and the decrypted doc.
+struct AuthFile {
+    path: PathBuf,
+    key: Vec<u8>,
+    line: String,
+    stamp: FileStamp,
+    doc: Value,
+}
+
+/// Open whichever auth file exists and decrypt it. `Ok(None)` = nothing
+/// to read (not signed in); `Err` = something exists but could not be
+/// opened.
+fn read_auth_file(home: &Path) -> Result<Option<AuthFile>, String> {
+    let keyring = home.join("auth.v2.keyring");
+    let file = home.join("auth.v2.file");
+    let (path, key) = if keyring.is_file() {
+        let key = super::read_windows_credential(CRED_TARGET)
+            .and_then(|blob| key_from_credential_blob(&blob))
+            .ok_or_else(|| UNREADABLE_MSG.to_string())?;
+        (keyring, key)
+    } else if file.is_file() {
+        let raw = super::read_small_text(&home.join("auth.v2.key"), 4096, "Droid login key")?;
+        let key = base64::engine::general_purpose::STANDARD
+            .decode(raw.trim())
+            .ok()
+            .filter(|k| k.len() == 32)
+            .ok_or_else(|| UNREADABLE_MSG.to_string())?;
+        (file, key)
+    } else {
+        return Ok(None);
+    };
+    let stamp = file_stamp(&path);
+    let line = super::read_small_text(&path, AUTH_FILE_CAP, "Droid login")?;
+    let plain = decrypt_auth_line(&line, &key)?;
+    let doc: Value = serde_json::from_slice(&plain).map_err(|_| UNREADABLE_MSG.to_string())?;
+    Ok(Some(AuthFile {
+        path,
+        key,
+        line,
+        stamp,
+        doc,
+    }))
 }
 
 /// Decrypt the CLI sign-in. `Ok(None)` = nothing to read (not signed
@@ -301,27 +377,10 @@ fn read_login() -> Result<Option<DroidLogin>, String> {
     let Some(home) = factory_home() else {
         return Ok(None);
     };
-    let keyring = home.join("auth.v2.keyring");
-    let file = home.join("auth.v2.file");
-    let plain = if keyring.is_file() {
-        let key = super::read_windows_credential(CRED_TARGET)
-            .and_then(|blob| key_from_credential_blob(&blob))
-            .ok_or_else(|| UNREADABLE_MSG.to_string())?;
-        Some(decrypt_auth_file(&keyring, &key)?)
-    } else if file.is_file() {
-        let raw = super::read_small_text(&home.join("auth.v2.key"), 4096, "Droid login key")?;
-        let key = base64::engine::general_purpose::STANDARD
-            .decode(raw.trim())
-            .ok()
-            .filter(|k| k.len() == 32)
-            .ok_or_else(|| UNREADABLE_MSG.to_string())?;
-        Some(decrypt_auth_file(&file, &key)?)
-    } else {
-        None
+    let Some(auth) = read_auth_file(&home)? else {
+        return Ok(None);
     };
-    let Some(plain) = plain else { return Ok(None) };
-    let json: Value = serde_json::from_slice(&plain).map_err(|_| UNREADABLE_MSG.to_string())?;
-    let token = find_token(&json)
+    let token = find_token(&auth.doc)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| UNREADABLE_MSG.to_string())?;
     let account_id = jwt_account_id(&token);
@@ -329,6 +388,372 @@ fn read_login() -> Result<Option<DroidLogin>, String> {
         access_token: token,
         account_id,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Login refresh — the same rotating WorkOS grant the CLI runs. Every
+// precondition is offline and checked twice (before the call and right
+// before the write): a refresh token burns on use, so landing one while
+// a `droid` process still caches the old pair would sign the user out.
+// ---------------------------------------------------------------------------
+
+/// Whether any enumerated image name is `droid.exe` (case-insensitive).
+/// Pure so tests can feed name lists without a process table.
+fn droid_running_in<'a>(mut names: impl Iterator<Item = &'a str>) -> bool {
+    names.any(|n| n.eq_ignore_ascii_case("droid.exe"))
+}
+
+/// Names of every running process image via ToolHelp. `None` = the
+/// enumeration failed — callers must fail closed (treat droid as
+/// running) rather than risk rotating a token a live CLI still holds.
+fn process_names() -> Option<Vec<String>> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::*;
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
+        let mut names = Vec::new();
+        let mut entry = PROCESSENTRY32W::default();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        if Process32FirstW(snapshot, &mut entry).is_ok() {
+            loop {
+                let end = entry
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                names.push(String::from_utf16_lossy(&entry.szExeFile[..end]));
+                if Process32NextW(snapshot, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snapshot);
+        Some(names)
+    }
+}
+
+fn droid_running() -> bool {
+    process_names()
+        .map(|names| droid_running_in(names.iter().map(String::as_str)))
+        .unwrap_or(true)
+}
+
+/// `auth.v2.write.lock` mtime → does it block a write? Absent = free; a
+/// crashed droid's stale lock (older than WRITE_LOCK_STALE_S) = free; a
+/// future-dated mtime counts as held.
+fn write_lock_blocks(mtime: Option<SystemTime>, now: SystemTime) -> bool {
+    match mtime {
+        None => false,
+        Some(t) => now
+            .duration_since(t)
+            .map(|d| d.as_secs() < WRITE_LOCK_STALE_S)
+            .unwrap_or(true),
+    }
+}
+
+/// Failed-refresh backoff, process-wide. A transient failure (network,
+/// 5xx, a lost write) pauses all attempts for TRANSIENT_BACKOFF_MS; a
+/// permanent rejection (WorkOS 400/401, or an `invalid_grant` body —
+/// and a consumed token we couldn't land) bars only that refresh token's
+/// fingerprint forever. The CLI does the same, and a re-login rotates
+/// the token, so the new fingerprint clears it naturally.
+struct RefreshBackoff {
+    transient_until_ms: i64,
+    rejected_fp: Option<String>,
+}
+
+static REFRESH_BACKOFF: Mutex<RefreshBackoff> = Mutex::new(RefreshBackoff {
+    transient_until_ms: 0,
+    rejected_fp: None,
+});
+
+fn backoff_allows(b: &RefreshBackoff, fp: &str, now_ms: i64) -> bool {
+    now_ms >= b.transient_until_ms && b.rejected_fp.as_deref() != Some(fp)
+}
+
+fn backoff_record(b: &mut RefreshBackoff, permanent_fp: Option<&str>, now_ms: i64) {
+    match permanent_fp {
+        Some(fp) => b.rejected_fp = Some(fp.to_string()),
+        None => b.transient_until_ms = now_ms + TRANSIENT_BACKOFF_MS,
+    }
+}
+
+fn backoff_note(permanent_fp: Option<&str>) {
+    if let Ok(mut g) = REFRESH_BACKOFF.lock() {
+        backoff_record(&mut g, permanent_fp, chrono::Utc::now().timestamp_millis());
+    }
+}
+
+/// WorkOS audience for the refresh grant: the access token's `client_id`
+/// claim when it looks like one, else the CLI's baked-in production id.
+fn workos_client_id(access: &str) -> String {
+    jwt_payload(access)
+        .and_then(|c| c.get("client_id").and_then(Value::as_str).map(str::to_string))
+        .filter(|id| id.starts_with("client_"))
+        .unwrap_or_else(|| WORKOS_CLIENT_ID.to_string())
+}
+
+/// Clone of the decrypted doc with only the token pair swapped —
+/// active_organization_id, whoami, and any unknown keys untouched. None
+/// when the doc has no top-level refresh_token to replace.
+fn refreshed_doc(old: &Value, access: &str, refresh: &str) -> Option<Value> {
+    let mut doc = old.clone();
+    let obj = doc.as_object_mut()?;
+    if old.get("refresh_token").and_then(Value::as_str).is_none() {
+        return None;
+    }
+    obj.insert("access_token".into(), Value::String(access.into()));
+    obj.insert("refresh_token".into(), Value::String(refresh.into()));
+    Some(doc)
+}
+
+/// The doc re-encrypted into Droid's one-line `iv:tag:ct` format with a
+/// fresh 16-byte IV (no trailing newline, matching the file's shape).
+fn encrypt_auth_line(key: &[u8], doc: &Value) -> Result<String, String> {
+    let plaintext = serde_json::to_vec(doc).map_err(|_| "serialize".to_string())?;
+    let mut iv = [0u8; 16];
+    getrandom::getrandom(&mut iv).map_err(|_| "entropy".to_string())?;
+    let (ct, tag) = aes_gcm_encrypt(key, &iv, &plaintext)?;
+    let enc = base64::engine::general_purpose::STANDARD;
+    Ok(format!("{}:{}:{}", enc.encode(iv), enc.encode(tag), enc.encode(ct)))
+}
+
+enum RefreshOutcome {
+    /// WorkOS rotated the pair — both tokens are non-empty strings.
+    Rotated { access: String, refresh: String },
+    /// Network error, 5xx, unparseable — nothing was consumed.
+    Transient,
+    /// 400/401 or an `invalid_grant` body — this refresh token is dead.
+    Rejected,
+}
+
+/// The refresh grant itself. Never logs token material.
+async fn workos_refresh(refresh_token: &str, client_id: &str) -> RefreshOutcome {
+    let resp = super::http()
+        .post(WORKOS_AUTHENTICATE_URL)
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", client_id),
+        ])
+        .send()
+        .await;
+    let Ok(resp) = resp else {
+        return RefreshOutcome::Transient;
+    };
+    let success = resp.status().is_success();
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+    if !success {
+        return if matches!(status, 400 | 401) || body.contains("invalid_grant") {
+            RefreshOutcome::Rejected
+        } else {
+            RefreshOutcome::Transient
+        };
+    }
+    let Ok(v) = serde_json::from_str::<Value>(&body) else {
+        return RefreshOutcome::Transient;
+    };
+    let pick = |k: &str| {
+        v.get(k)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    match (pick("access_token"), pick("refresh_token")) {
+        (Some(access), Some(refresh)) => RefreshOutcome::Rotated { access, refresh },
+        _ => RefreshOutcome::Transient,
+    }
+}
+
+fn is_regular_file(path: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .ok()
+        .is_some_and(|m| m.is_file() && !m.file_type().is_symlink())
+}
+
+/// Proof the refreshed file can replace the live one BEFORE the rotating
+/// call: any leftover or planted file at the predictable tmp path is
+/// removed outright (a symlink or hardlink redirect is never written
+/// through), a fresh tmp is created with create_new and owner-locked, and
+/// it stays staged until commit so nothing can be planted in the gap.
+/// Drop removes the tmp when the refresh never lands. Same staging model
+/// as claude.rs's credential write-back.
+struct StagedTmp(PathBuf);
+
+impl StagedTmp {
+    fn write(&self, contents: &str) -> std::io::Result<()> {
+        std::fs::write(&self.0, contents)
+    }
+    fn commit(self, live: &Path) -> std::io::Result<()> {
+        std::fs::rename(&self.0, live)?;
+        std::mem::forget(self);
+        Ok(())
+    }
+}
+
+impl Drop for StagedTmp {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn stage_auth_tmp(live: &Path) -> Option<StagedTmp> {
+    if !is_regular_file(live) {
+        return None;
+    }
+    let mut tmp_os = live.as_os_str().to_os_string();
+    tmp_os.push(".pane-tmp");
+    let tmp = PathBuf::from(tmp_os);
+    if std::fs::symlink_metadata(&tmp).is_ok() && std::fs::remove_file(&tmp).is_err() {
+        return None;
+    }
+    if std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp).is_err() {
+        return None;
+    }
+    if super::onenewapi::store::restrict_owner_only(&tmp).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return None;
+    }
+    Some(StagedTmp(tmp))
+}
+
+/// Keep a copy of the CLI's own file before touching it, so a bad write
+/// can never cost the user their login. A planted symlink at the backup
+/// path is unlinked first — never write through it.
+fn backup_auth_file(live: &Path) {
+    let mut bak_os = live.as_os_str().to_os_string();
+    bak_os.push(".pane-bak");
+    let bak = PathBuf::from(bak_os);
+    if std::fs::symlink_metadata(&bak)
+        .ok()
+        .is_some_and(|m| m.file_type().is_symlink())
+    {
+        let _ = std::fs::remove_file(&bak);
+    }
+    let _ = std::fs::copy(live, &bak);
+}
+
+/// Everything decided before the WorkOS call: droid not running, no fresh
+/// write lock, a doc carrying both top-level tokens, backoff permitting,
+/// and the staged tmp already created. `None` = do not even call out.
+struct PreparedRefresh {
+    auth: AuthFile,
+    staged: StagedTmp,
+    refresh_token: String,
+    client_id: String,
+    fp: String,
+}
+
+fn prepare_refresh(home: &Path, droid_is_running: bool, now_ms: i64) -> Option<PreparedRefresh> {
+    if droid_is_running {
+        return None;
+    }
+    let lock = home.join("auth.v2.write.lock");
+    let lock_mtime = match std::fs::metadata(&lock) {
+        Ok(m) => Some(m.modified().unwrap_or_else(|_| SystemTime::now())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => Some(SystemTime::now()), // can't stat → treat as held
+    };
+    if write_lock_blocks(lock_mtime, SystemTime::now()) {
+        return None;
+    }
+    let auth = read_auth_file(home).ok().flatten()?;
+    let refresh = auth
+        .doc
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    let access = auth
+        .doc
+        .get("access_token")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    let fp = super::key_fingerprint(&refresh);
+    {
+        let guard = REFRESH_BACKOFF.lock().ok()?;
+        if !backoff_allows(&guard, &fp, now_ms) {
+            return None;
+        }
+    }
+    let client_id = workos_client_id(&access);
+    let staged = stage_auth_tmp(&auth.path)?;
+    Some(PreparedRefresh {
+        auth,
+        staged,
+        refresh_token: refresh,
+        client_id,
+        fp,
+    })
+}
+
+/// Land the rotated pair: replace only the two token fields, re-encrypt
+/// into the staged tmp, verify the read-back round-trips to the exact
+/// doc, then — only if droid still isn't running and the live file is
+/// unchanged since the read (stamp AND raw line) — back it up and rename
+/// over it. Any abort leaves the tmp to Drop and the live file alone.
+fn commit_refresh(
+    prep: PreparedRefresh,
+    access: &str,
+    refresh: &str,
+    droid_is_running: bool,
+) -> Option<String> {
+    let new_doc = refreshed_doc(&prep.auth.doc, access, refresh)?;
+    let line = encrypt_auth_line(&prep.auth.key, &new_doc).ok()?;
+    prep.staged.write(&line).ok()?;
+    let verified = decrypt_auth_file(&prep.staged.0, &prep.auth.key)
+        .ok()
+        .and_then(|p| serde_json::from_slice::<Value>(&p).ok())
+        .is_some_and(|v| v == new_doc);
+    if !verified {
+        return None;
+    }
+    if droid_is_running {
+        return None;
+    }
+    let unchanged = file_stamp(&prep.auth.path) == prep.auth.stamp
+        && super::read_small_text(&prep.auth.path, AUTH_FILE_CAP, "Droid login")
+            .ok()
+            .as_deref()
+            == Some(prep.auth.line.as_str());
+    if !unchanged {
+        return None;
+    }
+    backup_auth_file(&prep.auth.path);
+    prep.staged.commit(&prep.auth.path).ok()?;
+    Some(access.to_string())
+}
+
+/// The refresh itself. `Some(new access token)` only when the rotated
+/// pair actually landed in the auth file; every failure path returns
+/// None (and records the right backoff) without logging token material.
+async fn try_refresh(home: &Path) -> Option<String> {
+    let prep = prepare_refresh(home, droid_running(), chrono::Utc::now().timestamp_millis())?;
+    match workos_refresh(&prep.refresh_token, &prep.client_id).await {
+        RefreshOutcome::Rotated { access, refresh } => {
+            let fp = prep.fp.clone();
+            match commit_refresh(prep, &access, &refresh, droid_running()) {
+                Some(t) => Some(t),
+                // The call succeeded, so the old refresh token is already
+                // burned server-side — bar its fingerprint so the next
+                // scan doesn't hammer a dead grant.
+                None => {
+                    backoff_note(Some(fp.as_str()));
+                    None
+                }
+            }
+        }
+        RefreshOutcome::Rejected => {
+            backoff_note(Some(prep.fp.as_str()));
+            None
+        }
+        RefreshOutcome::Transient => {
+            backoff_note(None);
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -542,14 +967,23 @@ async fn fetch() -> Result<Snapshot, String> {
             "Sign in to Droid (run `droid`) and try again.",
         ));
     };
-    if token_expired(&login.access_token, chrono::Utc::now().timestamp()) {
-        return Err(EXPIRED_MSG.into());
+    let now_s = chrono::Utc::now().timestamp();
+    let expired = token_expired(&login.access_token, now_s);
+    let mut access = login.access_token;
+    if expired || token_exp_s(&access).is_some_and(|e| e <= now_s + REFRESH_AHEAD_S) {
+        match try_refresh(&home).await {
+            Some(t) => access = t,
+            // Genuinely expired and unrenewable → the quiet-expired path
+            // (#275); merely near expiry can keep using the old token.
+            None if expired => return Err(EXPIRED_MSG.into()),
+            None => {}
+        }
     }
 
     let client = http_no_redirect();
     let (limits, me) = tokio::join!(
-        get_json(&client, LIMITS_URL, &login.access_token, "limits"),
-        get_json(&client, ME_URL, &login.access_token, "account"),
+        get_json(&client, LIMITS_URL, &access, "limits"),
+        get_json(&client, ME_URL, &access, "account"),
     );
     let limits = limits?;
     let plan = me.ok().as_ref().and_then(plan_label);
@@ -558,7 +992,7 @@ async fn fetch() -> Result<Snapshot, String> {
     let metrics = match billing_metrics(&limits, now_ms) {
         Some(m) if !m.is_empty() => m,
         _ => {
-            let doc = get_json(&client, LEGACY_USAGE_URL, &login.access_token, "usage").await?;
+            let doc = get_json(&client, LEGACY_USAGE_URL, &access, "usage").await?;
             let metrics = legacy_metrics(&doc, now_ms);
             if metrics.is_empty() {
                 return Err("Droid usage format not recognised".into());
@@ -1002,6 +1436,190 @@ mod tests {
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(v).unwrap())
         };
         format!("{}.{}.x", seg(&json!({"alg": "none"})), seg(&claims))
+    }
+
+    // --- login refresh ---------------------------------------------------
+
+    /// Serializes the tests that point FACTORY_HOME_OVERRIDE at a fixture
+    /// dir — same pattern as dsh.rs's ENV_LOCK.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn factory_fixture(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("pane-droid-refresh-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The decrypted doc shaped like the real file (4 top-level keys),
+    /// written through the keyfile variant so no Credential Manager is
+    /// involved. Returns the live file path and its raw line.
+    fn write_factory_login(dir: &Path, doc: &Value) -> (PathBuf, String) {
+        std::fs::write(dir.join("auth.v2.key"), B64.encode(TEST_KEY)).unwrap();
+        let line = auth_line(TEST_KEY, TEST_IV, &serde_json::to_string(doc).unwrap());
+        let live = write_auth(dir, "auth.v2.file", &line);
+        (live, line)
+    }
+
+    #[test]
+    fn refreshed_doc_swaps_only_the_token_pair() {
+        let old = json!({
+            "access_token": "at-old", "refresh_token": "rt-old",
+            "active_organization_id": "org-7",
+            "whoami": {"id": "u-1", "email": "a@b.c"},
+            "some_future_key": {"nested": [1, 2]},
+        });
+        let new = refreshed_doc(&old, "at-new", "rt-new").unwrap();
+        assert_eq!(new["access_token"], "at-new");
+        assert_eq!(new["refresh_token"], "rt-new");
+        assert_eq!(new["active_organization_id"], "org-7");
+        assert_eq!(new["whoami"], json!({"id": "u-1", "email": "a@b.c"}));
+        assert_eq!(new["some_future_key"], json!({"nested": [1, 2]}));
+        // No top-level refresh_token → nothing to rotate.
+        assert!(refreshed_doc(&json!({"access_token": "a"}), "x", "y").is_none());
+    }
+
+    #[test]
+    fn encrypt_auth_line_round_trips_through_the_reader() {
+        let doc = json!({"access_token": "a", "refresh_token": "r"});
+        let line = encrypt_auth_line(TEST_KEY, &doc).unwrap();
+        assert!(!line.ends_with('\n'));
+        let parts: Vec<&str> = line.split(':').collect();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(B64.decode(parts[0]).unwrap().len(), 16); // IV
+        assert_eq!(B64.decode(parts[1]).unwrap().len(), 16); // tag
+        let dir = std::env::temp_dir().join(format!("pane-droid-enc-{}", std::process::id()));
+        let path = write_auth(&dir, "auth.v2.file", &line);
+        let plain = decrypt_auth_file(&path, TEST_KEY).unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&plain).unwrap(), doc);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn workos_client_id_prefers_the_token_claim() {
+        let with = unsigned_jwt(json!({"client_id": "client_01TESTXYZ"}));
+        assert_eq!(workos_client_id(&with), "client_01TESTXYZ");
+        let other = unsigned_jwt(json!({"client_id": "not-a-client-id"}));
+        assert_eq!(workos_client_id(&other), WORKOS_CLIENT_ID);
+        let none = unsigned_jwt(json!({"sub": "u-1"}));
+        assert_eq!(workos_client_id(&none), WORKOS_CLIENT_ID);
+    }
+
+    #[test]
+    fn droid_running_in_matches_only_the_exact_image() {
+        assert!(droid_running_in(["explorer.exe", "Droid.EXE"].into_iter()));
+        assert!(!droid_running_in(["droidx.exe", "pane.exe"].into_iter()));
+        assert!(!droid_running_in(std::iter::empty()));
+    }
+
+    #[test]
+    fn write_lock_blocks_only_while_fresh() {
+        let now = SystemTime::now();
+        assert!(!write_lock_blocks(None, now));
+        assert!(write_lock_blocks(
+            Some(now - std::time::Duration::from_secs(30)),
+            now
+        ));
+        assert!(!write_lock_blocks(
+            Some(now - std::time::Duration::from_secs(300)),
+            now
+        ));
+    }
+
+    #[test]
+    fn refresh_backoff_permanent_is_per_token_and_transient_thirty_min() {
+        let mut b = RefreshBackoff { transient_until_ms: 0, rejected_fp: None };
+        let now = 1_000_000i64;
+        assert!(backoff_allows(&b, "fp-a", now));
+        // Permanent rejection: same fingerprint never retried, but a new
+        // refresh token (droid re-login) proceeds right away.
+        backoff_record(&mut b, Some("fp-a"), now);
+        assert!(!backoff_allows(&b, "fp-a", now + 24 * 3_600_000));
+        assert!(backoff_allows(&b, "fp-b", now));
+        // Transient failure: everything waits 30 min.
+        let mut t = RefreshBackoff { transient_until_ms: 0, rejected_fp: None };
+        backoff_record(&mut t, None, now);
+        assert!(!backoff_allows(&t, "fp-a", now + 29 * 60_000));
+        assert!(backoff_allows(&t, "fp-a", now + 31 * 60_000));
+    }
+
+    /// Whole write-back path minus the HTTP call: prepare off a real
+    /// fixture dir, then commit with the stubbed rotated pair.
+    #[test]
+    fn refresh_commit_writes_the_pair_and_keeps_a_backup() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = factory_fixture("commit");
+        let old_access = unsigned_jwt(json!({
+            "exp": 1_700_000_000i64, "id": "acct-1",
+            "client_id": "client_01TEST000000000000000000"
+        }));
+        let old_doc = json!({
+            "access_token": old_access, "refresh_token": "rt-old",
+            "active_organization_id": "org-7",
+            "whoami": {"id": "u-1", "email": "a@b.c"},
+        });
+        let (live, old_line) = write_factory_login(&home, &old_doc);
+        let prev = std::env::var("FACTORY_HOME_OVERRIDE").ok();
+        std::env::set_var("FACTORY_HOME_OVERRIDE", &home);
+
+        let prep = prepare_refresh(&home, false, 1_000_000).unwrap();
+        assert_eq!(prep.client_id, "client_01TEST000000000000000000");
+        let new_access = unsigned_jwt(json!({"exp": 4_000_000_000i64, "id": "acct-1"}));
+        let got = commit_refresh(prep, &new_access, "rt-new", false);
+        assert_eq!(got.as_deref(), Some(new_access.as_str()));
+
+        // The real read path now sees the rotated pair.
+        let login = read_login().unwrap().unwrap();
+        assert_eq!(login.access_token, new_access);
+        // `.pane-bak` holds the old line; no tmp is left behind.
+        assert_eq!(
+            std::fs::read_to_string(home.join("auth.v2.file.pane-bak")).unwrap(),
+            old_line
+        );
+        assert!(!home.join("auth.v2.file.pane-tmp").exists());
+        // Other keys survived untouched.
+        let plain = decrypt_auth_file(&live, TEST_KEY).unwrap();
+        let doc: Value = serde_json::from_slice(&plain).unwrap();
+        assert_eq!(doc["refresh_token"], "rt-new");
+        assert_eq!(doc["active_organization_id"], "org-7");
+        assert_eq!(doc["whoami"], json!({"id": "u-1", "email": "a@b.c"}));
+
+        match prev {
+            Some(v) => std::env::set_var("FACTORY_HOME_OVERRIDE", v),
+            None => std::env::remove_var("FACTORY_HOME_OVERRIDE"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A droid write between read and commit must abort the commit and
+    /// leave whatever it wrote alone.
+    #[test]
+    fn refresh_commit_aborts_when_the_live_file_changed() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = factory_fixture("race");
+        let old_doc = json!({
+            "access_token": "at-old", "refresh_token": "rt-old",
+            "active_organization_id": "org-7",
+            "whoami": {"id": "u-1"},
+        });
+        let (live, _old_line) = write_factory_login(&home, &old_doc);
+        let prev = std::env::var("FACTORY_HOME_OVERRIDE").ok();
+        std::env::set_var("FACTORY_HOME_OVERRIDE", &home);
+
+        let prep = prepare_refresh(&home, false, 1_000_000).unwrap();
+        std::fs::write(&live, "droid:wrote:this").unwrap();
+        let got = commit_refresh(prep, "at-new", "rt-new", false);
+        assert!(got.is_none());
+        // Live file untouched; the staged tmp is gone.
+        assert_eq!(std::fs::read_to_string(&live).unwrap(), "droid:wrote:this");
+        assert!(!home.join("auth.v2.file.pane-tmp").exists());
+
+        match prev {
+            Some(v) => std::env::set_var("FACTORY_HOME_OVERRIDE", v),
+            None => std::env::remove_var("FACTORY_HOME_OVERRIDE"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
