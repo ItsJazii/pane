@@ -198,6 +198,62 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Assistant row carrying no message_id/request_id → StoredEvent.mid "".
+    fn idless_msg(input: u32, output: u32) -> String {
+        format!(
+            "{{\"role\":\"assistant\",\"metadata\":{{\"metrics\":{{\"input_tokens\":{input},\"output_tokens\":{output},\"cache_read_tokens\":0,\"cache_creation_tokens\":0}}}}}}"
+        )
+    }
+
+    #[test]
+    fn identical_idless_rows_dedupe_across_stores_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "pane-devin-stores-idless-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cli_db = dir.join("cli.db");
+        let next_db = dir.join("next.db");
+        // The SAME id-less row (session, ts, model, counters) imported
+        // into both stores → counted once (cli wins).
+        for (db, birth) in [
+            (cli_db.clone(), "2026-05-30T00:00:00Z"),
+            (next_db.clone(), "2026-10-17T17:29:51Z"),
+        ] {
+            let conn = create_db(&db, birth);
+            conn.execute("INSERT INTO sessions VALUES ('s1', 'model-a')", [])
+                .unwrap();
+            insert_message(&conn, "s1", &idless_msg(10, 4), 1_791_000_000);
+        }
+        let mut states = HashMap::new();
+        let stores: Vec<(&'static str, PathBuf, Option<PathBuf>)> = vec![
+            ("cli", cli_db, None),
+            ("cli-next", next_db, None),
+        ];
+        let events = collect_stores(&stores, &mut states, 1000);
+        assert_eq!(events.len(), 1);
+
+        // But two identical id-less rows in ONE store are distinct
+        // messages — both must count.
+        let only = std::env::temp_dir().join(format!(
+            "pane-devin-stores-idless-one-{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&only);
+        let conn = create_db(&only, "2026-05-30T00:00:00Z");
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'model-a')", [])
+            .unwrap();
+        insert_message(&conn, "s1", &idless_msg(10, 4), 1_791_000_000);
+        insert_message(&conn, "s1", &idless_msg(10, 4), 1_791_000_000);
+        drop(conn);
+        let mut states = HashMap::new();
+        let stores: Vec<(&'static str, PathBuf, Option<PathBuf>)> = vec![("cli", only, None)];
+        let events = collect_stores(&stores, &mut states, 1000);
+        assert_eq!(events.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn missing_second_store_behaves_like_today() {
         let dir = std::env::temp_dir().join(format!(
@@ -1159,6 +1215,12 @@ fn collect_stores(
     limit: usize,
 ) -> Vec<UsageEvent> {
     let mut seen: HashSet<(String, String)> = HashSet::new();
+    // Id-less events (mid == "") can't dedupe on a message id, so an
+    // imported copy would count twice. They dedupe ACROSS stores on a
+    // full-row fingerprint — but never within one store (two distinct
+    // id-less messages can legitimately share identical numbers), so the
+    // current store's fingerprints join the set only after it finishes.
+    let mut seen_idless: HashSet<(String, i64, String, u64, u64, u64, u64)> = HashSet::new();
     let mut out = Vec::new();
     for (name, db_path, cache_file) in stores {
         // First collect this run per store: seed from disk (empty when
@@ -1175,12 +1237,28 @@ fn collect_stores(
                     ..Default::default()
                 }),
         });
+        let mut store_idless = Vec::new();
         for e in collect_with(db_path, state, cache_file.as_deref(), limit) {
-            if !e.mid.is_empty() && !seen.insert((e.session_id.clone(), e.mid.clone())) {
+            if e.mid.is_empty() {
+                let fp = (
+                    e.session_id.clone(),
+                    e.ts_ms,
+                    e.model.clone(),
+                    e.input.to_bits(),
+                    e.output.to_bits(),
+                    e.cache_read.to_bits(),
+                    e.cache_write.to_bits(),
+                );
+                if seen_idless.contains(&fp) {
+                    continue;
+                }
+                store_idless.push(fp);
+            } else if !seen.insert((e.session_id.clone(), e.mid.clone())) {
                 continue;
             }
             out.push(e.to_usage());
         }
+        seen_idless.extend(store_idless);
     }
     out
 }
