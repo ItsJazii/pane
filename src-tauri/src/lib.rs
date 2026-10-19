@@ -5530,6 +5530,7 @@ mod tests {
             "Weekly",
             "Sonnet weekly",
             "Opus weekly",
+            "Fable weekly",
             "Usage",
             "Balance",
             "Credits",

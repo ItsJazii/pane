@@ -807,6 +807,30 @@ function ensureLayout(): void {
     }
   }
 
+  // Claude's per-model weekly now names Fable; before it landed in the
+  // catch-all "Model weekly" (Fable is the only model that ever reached
+  // that fallback, so the rename is safe). Same shape as MINIMAX_RENAMES.
+  const CLAUDE_RENAMES: Record<string, string> = { "Model weekly": "Fable weekly" };
+  for (const [pid, L] of Object.entries(layout.providers)) {
+    if (providerFamily(pid) !== "claude") continue;
+    for (const list of [L.metricOrder, L.hidden, L.starred, L.onDemand]) {
+      for (const [oldLabel, newLabel] of Object.entries(CLAUDE_RENAMES)) {
+        const at = list.indexOf(oldLabel);
+        if (at < 0) continue;
+        if (list.includes(newLabel)) list.splice(at, 1);
+        else list[at] = newLabel;
+        changed = true;
+      }
+    }
+  }
+  if (config.pinned && providerFamily(config.pinned.provider) === "claude") {
+    const to = CLAUDE_RENAMES[config.pinned.label];
+    if (to) {
+      config.pinned = { ...config.pinned, label: to };
+      void patchConfig({ pinned: config.pinned }).catch(() => {});
+    }
+  }
+
   // The per-credit "Reset credit"/"Reset credit N" rows collapsed into a
   // single "Rate Limit Resets" row. Same shape as CURSOR_RENAMES: the
   // first match is renamed in place (stars/order carry over), later
