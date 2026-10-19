@@ -4,10 +4,12 @@
 //!    the answer is missing any of the four quota windows it is topped up
 //!    from Cloud Code.
 //! 2. Fall back to Google's Cloud Code API with the OAuth token Antigravity
-//!    keeps in Windows Credential Manager (`gemini:antigravity`). Prod
-//!    `cloudcode-pa` is tried first, then `daily-cloudcode-pa`; each host's
-//!    buckets merge into one list (first host wins per bucketId) because
-//!    the hosts disagree on which quota groups they serve.
+//!    keeps in Windows Credential Manager (`gemini:antigravity`). Daily
+//!    `daily-cloudcode-pa` — the host agy's own /usage reads — is tried
+//!    first: it only serves the Gemini group to a CLI User-Agent, and
+//!    prod's Gemini group is a different, wrong pool, so prod is only
+//!    asked to fill windows daily lacked. Buckets merge first-host-wins
+//!    per bucketId.
 //! 3. Report honestly when neither works.
 
 use std::time::Duration;
@@ -21,11 +23,15 @@ const NAME: &str = "Antigravity";
 
 const LS_SERVICE: &str = "exa.language_server_pb.LanguageServerService";
 const CLOUD_BASES: [&str; 2] = [
-    // Prod first: daily now answers retrieveUserQuotaSummary with only
-    // the Claude/GPT pool, while prod still returns both groups.
-    "https://cloudcode-pa.googleapis.com",
+    // Daily first: it's the host agy's own /usage reads, and it only
+    // serves the Gemini group to a CLI User-Agent (see CLOUD_UA). Prod's
+    // Gemini group is a different, wrong pool — it only fills gaps.
     "https://daily-cloudcode-pa.googleapis.com",
+    "https://cloudcode-pa.googleapis.com",
 ];
+/// The User-Agent agy 1.4.2 sends (`antigravity/cli/1.4.2 (...)`): the
+/// `/cli/` segment is what makes daily include the Gemini group at all.
+const CLOUD_UA: &str = "antigravity/cli/1.4.2";
 // Installed-app OAuth client — intentionally public, same values the IDE ships.
 const GOOGLE_CLIENT_ID: &str =
     "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
@@ -386,7 +392,7 @@ async fn cloud_post(base: &str, access_token: &str, path: &str) -> Result<Option
         .header("Accept", "application/json")
         .header("Content-Type", "application/json")
         .header("Authorization", format!("Bearer {access_token}"))
-        .header("User-Agent", "antigravity")
+        .header("User-Agent", CLOUD_UA)
         .json(&json!({}))
         .send()
         .await;
@@ -412,26 +418,65 @@ async fn cloud_call(access_token: &str, path: &str) -> Result<Option<Value>, boo
     if denied { Err(true) } else { Ok(None) }
 }
 
-/// retrieveUserQuotaSummary on every base until all four quota windows are
-/// covered — daily currently omits the Gemini group, prod serves both.
-/// A host's 401/403 doesn't end the search; it only fails the call when
-/// no host produced a usable doc at all.
+/// retrieveUserQuotaSummary: daily is required — it's the host agy's own
+/// /usage reads and the only one whose Gemini group matches what the app
+/// shows. Prod is asked only to fill windows daily lacked, and even then
+/// only its Claude/GPT (3p) buckets are kept — its Gemini group is a
+/// different pool, so Gemini rows come from daily or not at all. Daily
+/// unreachable/unparseable returns an empty doc set rather than silently
+/// mixing pools — the caller's last-good restore then shows the previous
+/// numbers. A 401/403 from daily fails the call so the token-refresh
+/// path runs.
 async fn cloud_quota_docs(access_token: &str) -> Result<Vec<Value>, bool> {
-    let mut docs = Vec::new();
-    let mut denied = false;
-    for base in CLOUD_BASES {
-        match cloud_post(base, access_token, "/v1internal:retrieveUserQuotaSummary").await {
-            Ok(Some(doc)) => {
-                docs.push(doc);
-                if has_all_windows(&parse_quota_buckets_all(&docs)) {
-                    break;
+    quota_docs_with(|base| {
+        cloud_post(base, access_token, "/v1internal:retrieveUserQuotaSummary")
+    })
+    .await
+}
+
+/// The daily-then-gap-fill logic, generic over the fetcher so tests can
+/// drive it without HTTP. `fetch` takes a CLOUD_BASES base URL.
+async fn quota_docs_with<F, Fut>(fetch: F) -> Result<Vec<Value>, bool>
+where
+    F: Fn(&'static str) -> Fut,
+    Fut: std::future::Future<Output = Result<Option<Value>, bool>>,
+{
+    let [daily, prod] = CLOUD_BASES;
+    match fetch(daily).await {
+        // Bad token — the caller's refresh path owns it.
+        Err(denied) => Err(denied),
+        Ok(Some(doc)) => {
+            let mut docs = vec![doc];
+            if !has_all_windows(&parse_quota_buckets_all(&docs)) {
+                if let Ok(Some(prod_doc)) = fetch(prod).await {
+                    docs.push(without_gemini_buckets(prod_doc));
                 }
             }
-            Err(true) => denied = true,
-            _ => continue,
+            Ok(docs)
+        }
+        // Prod's Gemini numbers are the wrong pool — serve nothing and
+        // let last-good restore keep the previous numbers.
+        Ok(None) => Ok(Vec::new()),
+    }
+}
+
+/// Prod's Gemini group is a different pool than daily's — drop every
+/// bucket whose id starts with "gemini" so prod can only ever fill the
+/// Claude/GPT (3p) windows. The groups/buckets shape is preserved.
+fn without_gemini_buckets(doc: Value) -> Value {
+    let mut doc = doc;
+    if let Some(groups) = doc.get_mut("groups").and_then(Value::as_array_mut) {
+        for group in groups {
+            if let Some(buckets) = group.get_mut("buckets").and_then(Value::as_array_mut) {
+                buckets.retain(|b| {
+                    !b.get("bucketId")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| id.starts_with("gemini"))
+                });
+            }
         }
     }
-    if docs.is_empty() && denied { Err(true) } else { Ok(docs) }
+    doc
 }
 
 async fn cloud_snapshot(access_token: &str) -> Result<Option<Snapshot>, bool> {
@@ -1557,9 +1602,9 @@ mod tests {
             .collect::<Vec<_>>()}]})
     }
 
-    /// daily-cloudcode answers with only the Claude/GPT pool while prod
-    /// serves both — merged docs must yield all four rows, and a bucketId
-    /// present in an earlier doc keeps that doc's values.
+    /// daily is fetched first; prod only fills the bucketIds daily
+    /// lacked — merged docs must yield all four rows, and a bucketId
+    /// present in daily's doc keeps daily's values.
     #[test]
     fn quota_docs_merge_groups_across_hosts() {
         let daily = quota_doc(&[("3p-5h", 0.9), ("3p-weekly", 0.8)]);
@@ -1582,6 +1627,112 @@ mod tests {
             // Claude rows came from the first doc (daily), not prod's 0.1s.
             assert!((u - want).abs() < 1e-9);
         }
+    }
+
+    /// Daily serves the real Gemini group to the CLI UA — prod must not
+    /// even be asked, and daily's values (incl. its reset) are what parse.
+    #[test]
+    fn quota_docs_daily_serves_everything_prod_never_asked() {
+        let daily = json!({"groups": [{"buckets": [
+            {"bucketId": "gemini-5h", "remainingFraction": 0.9719874,
+             "resetTime": "2026-10-18T06:24:39Z"},
+            {"bucketId": "gemini-weekly", "remainingFraction": 0.99299693},
+            {"bucketId": "3p-5h", "remainingFraction": 0.9},
+            {"bucketId": "3p-weekly", "remainingFraction": 0.8},
+        ]}]});
+        let calls = std::cell::Cell::new(0);
+        let docs = tauri::async_runtime::block_on(quota_docs_with(|base| {
+            calls.set(calls.get() + 1);
+            // Prod would answer — the point is it's never asked.
+            assert_eq!(base, CLOUD_BASES[0]);
+            let doc = daily.clone();
+            async move { Ok(Some(doc)) }
+        }))
+        .unwrap();
+        assert_eq!(calls.get(), 1);
+        let metrics = parse_quota_buckets_all(&docs);
+        assert!(has_all_windows(&metrics));
+        let session = metrics.iter().find(|m| m.label == "Session").unwrap();
+        assert!((session.used_percent.unwrap() - 2.80126).abs() < 1e-4);
+        assert_eq!(
+            session.resets_at,
+            parse_iso_ms(Some(&json!("2026-10-18T06:24:39Z")))
+        );
+        let weekly = metrics.iter().find(|m| m.label == "Weekly").unwrap();
+        assert!((weekly.used_percent.unwrap() - 0.700307).abs() < 1e-4);
+    }
+
+    /// Daily lacking the Gemini group → prod is still asked, but its
+    /// Gemini buckets are stripped (wrong pool): no Session/Weekly rows
+    /// appear, and the 3p rows keep daily's values.
+    #[test]
+    fn quota_docs_prod_only_fills_daily_gaps() {
+        let daily = quota_doc(&[("3p-5h", 0.9), ("3p-weekly", 0.8)]);
+        let prod = quota_doc(&[
+            ("gemini-5h", 0.7),
+            ("gemini-weekly", 0.6),
+            ("3p-5h", 0.1),
+            ("3p-weekly", 0.1),
+        ]);
+        let calls = std::cell::RefCell::new(Vec::new());
+        let docs = tauri::async_runtime::block_on(quota_docs_with(|base| {
+            calls.borrow_mut().push(base);
+            let doc = if base == CLOUD_BASES[0] { daily.clone() } else { prod.clone() };
+            async move { Ok(Some(doc)) }
+        }))
+        .unwrap();
+        assert_eq!(*calls.borrow(), vec![CLOUD_BASES[0], CLOUD_BASES[1]]);
+        let metrics = parse_quota_buckets_all(&docs);
+        let labels: Vec<&str> = metrics.iter().map(|m| m.label.as_str()).collect();
+        assert_eq!(labels, ["Claude", "Claude Weekly"]);
+        let used = |label: &str| {
+            metrics.iter().find(|m| m.label == label).unwrap().used_percent.unwrap()
+        };
+        assert!((used("Claude") - 10.0).abs() < 1e-9); // daily's 0.9
+        assert!((used("Claude Weekly") - 20.0).abs() < 1e-9); // daily's 0.8
+    }
+
+    /// gemini-* ids (incl. gemini-argon-…) are dropped; 3p buckets kept.
+    #[test]
+    fn without_gemini_buckets_strips_only_gemini_ids() {
+        let doc = quota_doc(&[
+            ("gemini-5h", 0.7),
+            ("gemini-weekly", 0.6),
+            ("gemini-argon-wtu-weekly", 0.75),
+            ("3p-5h", 0.9),
+            ("3p-weekly", 0.8),
+        ]);
+        let stripped = without_gemini_buckets(doc);
+        let ids: Vec<&str> = stripped["groups"][0]["buckets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["bucketId"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["3p-5h", "3p-weekly"]);
+    }
+
+    /// Daily unreachable/unparseable → empty docs WITHOUT asking prod:
+    /// its Gemini pool is the wrong one, so the no-metrics → Unavailable
+    /// path (last-good restore) beats silently mixing pools.
+    #[test]
+    fn quota_docs_daily_outage_returns_empty_without_prod() {
+        let calls = std::cell::Cell::new(0);
+        let docs = tauri::async_runtime::block_on(quota_docs_with(|_| {
+            calls.set(calls.get() + 1);
+            async move { Ok(None) }
+        }))
+        .unwrap();
+        assert!(docs.is_empty());
+        assert_eq!(calls.get(), 1); // daily only
+    }
+
+    /// Daily 401/403 → Err(true) so the token-refresh path runs.
+    #[test]
+    fn quota_docs_daily_denied_fails_for_refresh() {
+        let res =
+            tauri::async_runtime::block_on(quota_docs_with(|_| async move { Err(true) }));
+        assert_eq!(res, Err(true));
     }
 
     #[test]
