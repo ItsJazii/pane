@@ -809,10 +809,21 @@ function ensureLayout(): void {
 
   // Claude's per-model weekly now names Fable; before it landed in the
   // catch-all "Model weekly" (Fable is the only model that ever reached
-  // that fallback, so the rename is safe). Same shape as MINIMAX_RENAMES.
+  // that fallback, so the rename is safe). Same shape as MINIMAX_RENAMES,
+  // but gated on the card's CURRENT snapshot actually showing "Fable
+  // weekly" and no "Model weekly": a cached pre-upgrade snapshot still
+  // displays the old label, and its settings must not move until the
+  // live fetch replaces it; likewise a "Model weekly" belonging to some
+  // other unknown family keeps its rows.
   const CLAUDE_RENAMES: Record<string, string> = { "Model weekly": "Fable weekly" };
+  const claudeShowsFable = (pid: string): boolean => {
+    const snap = lastSnapshots.find((s) => s.id === pid);
+    if (!snap) return false;
+    const labels = snap.metrics.map((m) => m.label);
+    return labels.includes("Fable weekly") && !labels.includes("Model weekly");
+  };
   for (const [pid, L] of Object.entries(layout.providers)) {
-    if (providerFamily(pid) !== "claude") continue;
+    if (providerFamily(pid) !== "claude" || !claudeShowsFable(pid)) continue;
     for (const list of [L.metricOrder, L.hidden, L.starred, L.onDemand]) {
       for (const [oldLabel, newLabel] of Object.entries(CLAUDE_RENAMES)) {
         const at = list.indexOf(oldLabel);
@@ -823,7 +834,11 @@ function ensureLayout(): void {
       }
     }
   }
-  if (config.pinned && providerFamily(config.pinned.provider) === "claude") {
+  if (
+    config.pinned &&
+    providerFamily(config.pinned.provider) === "claude" &&
+    claudeShowsFable(config.pinned.provider)
+  ) {
     const to = CLAUDE_RENAMES[config.pinned.label];
     if (to) {
       config.pinned = { ...config.pinned, label: to };
