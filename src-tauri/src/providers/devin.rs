@@ -254,6 +254,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Cross-store id-less dedupe is per OCCURRENCE: store A holding one
+    /// copy of R drops only the first of B's two identical copies.
+    #[test]
+    fn idless_dedupe_counts_occurrences_not_presence() {
+        let dir = std::env::temp_dir().join(format!(
+            "pane-devin-stores-idless-occ-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let a_db = dir.join("cli.db");
+        let b_db = dir.join("next.db");
+        let a = create_db(&a_db, "2026-05-30T00:00:00Z");
+        a.execute("INSERT INTO sessions VALUES ('s1', 'model-a')", [])
+            .unwrap();
+        insert_message(&a, "s1", &idless_msg(10, 4), 1_791_000_000);
+        let b = create_db(&b_db, "2026-10-17T17:29:51Z");
+        b.execute("INSERT INTO sessions VALUES ('s1', 'model-a')", [])
+            .unwrap();
+        insert_message(&b, "s1", &idless_msg(10, 4), 1_791_000_000);
+        insert_message(&b, "s1", &idless_msg(10, 4), 1_791_000_000);
+        let mut states = HashMap::new();
+        let stores: Vec<(&'static str, PathBuf, Option<PathBuf>)> = vec![
+            ("cli", a_db, None),
+            ("cli-next", b_db, None),
+        ];
+        let events = collect_stores(&stores, &mut states, 1000);
+        assert_eq!(events.len(), 2); // A's 1 + B's 1 kept (B's 2nd dropped)
+        drop(a);
+        drop(b);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn missing_second_store_behaves_like_today() {
         let dir = std::env::temp_dir().join(format!(
@@ -1217,10 +1250,13 @@ fn collect_stores(
     let mut seen: HashSet<(String, String)> = HashSet::new();
     // Id-less events (mid == "") can't dedupe on a message id, so an
     // imported copy would count twice. They dedupe ACROSS stores on a
-    // full-row fingerprint — but never within one store (two distinct
-    // id-less messages can legitimately share identical numbers), so the
-    // current store's fingerprints join the set only after it finishes.
-    let mut seen_idless: HashSet<(String, i64, String, u64, u64, u64, u64)> = HashSet::new();
+    // full-row fingerprint, per OCCURRENCE: prior stores having k copies
+    // of a row drop the current store's first k copies and keep the rest.
+    // But never within one store (two distinct id-less messages can
+    // legitimately share identical numbers), so the current store's
+    // counts merge into the map only after it finishes.
+    let mut seen_idless: HashMap<(String, i64, String, u64, u64, u64, u64), usize> =
+        HashMap::new();
     let mut out = Vec::new();
     for (name, db_path, cache_file) in stores {
         // First collect this run per store: seed from disk (empty when
@@ -1237,7 +1273,8 @@ fn collect_stores(
                     ..Default::default()
                 }),
         });
-        let mut store_idless = Vec::new();
+        let mut store_idless: HashMap<(String, i64, String, u64, u64, u64, u64), usize> =
+            HashMap::new();
         for e in collect_with(db_path, state, cache_file.as_deref(), limit) {
             if e.mid.is_empty() {
                 let fp = (
@@ -1249,16 +1286,27 @@ fn collect_stores(
                     e.cache_read.to_bits(),
                     e.cache_write.to_bits(),
                 );
-                if seen_idless.contains(&fp) {
+                // Prior stores' first-k copies are imports — drop just
+                // enough occurrences to absorb them.
+                let imported = match seen_idless.get_mut(&fp) {
+                    Some(n) if *n > 0 => {
+                        *n -= 1;
+                        true
+                    }
+                    _ => false,
+                };
+                *store_idless.entry(fp).or_insert(0) += 1;
+                if imported {
                     continue;
                 }
-                store_idless.push(fp);
             } else if !seen.insert((e.session_id.clone(), e.mid.clone())) {
                 continue;
             }
             out.push(e.to_usage());
         }
-        seen_idless.extend(store_idless);
+        for (fp, n) in store_idless {
+            *seen_idless.entry(fp).or_insert(0) += n;
+        }
     }
     out
 }
