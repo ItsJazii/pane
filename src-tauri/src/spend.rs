@@ -3170,8 +3170,7 @@ fn pi_line(seen: &mut HashSet<String>, line: &str, data: &mut FileData) {
     }
     // AIHubMix bills Gemini 4 Argon at its own $4/$20 card, never the
     // dated Google intro rate — scope the lookup so the routes don't mix.
-    let scoped_slug = (card == "aihubmix")
-        .then(|| pricing::aihubmix_scoped(model).unwrap_or_else(|| model.to_string()));
+    let scoped_slug = (card == "aihubmix").then(|| pricing::aihubmix_gateway_slug(model));
     let lookup_slug = scoped_slug.as_deref().unwrap_or(model);
     let cost_model = scoped_slug.as_deref().unwrap_or(&tagged);
     match probe_lookup(lookup_slug) {
@@ -3532,8 +3531,7 @@ fn deepseek_harness_priced(events: Vec<providers::dsh::DshEvent>) -> (FileData, 
             };
             (&mut deepseek, format!("deepseek/{base}"))
         } else if provider == "aihubmix" {
-            let key =
-                pricing::aihubmix_scoped(&ev.model).unwrap_or_else(|| ev.model.clone());
+            let key = pricing::aihubmix_gateway_slug(&ev.model);
             (&mut aihubmix, key)
         } else {
             *skipped.entry(provider).or_insert(0) += 1;
@@ -6466,6 +6464,18 @@ mod tests {
         assert!(ds.days.is_empty());
         assert!((total(&mix) - 0.775).abs() < 1e-9, "{}", total(&mix));
         assert!(mix.days.keys().all(|(_, m)| m == "deepseek-v4.1-flash-1017"));
+
+        // AIHubMix's M3.1-Flash on the aihubmix route prices the gateway
+        // card ($0.165 in + $0.66 out per MTok) and keeps the logged name.
+        let (ds, mix) = deepseek_harness_priced(vec![ev(
+            "2026-10-17T09:00:00Z",
+            "aihubmix",
+            "MiniMax-M3.1-Flash",
+            0.0,
+        )]);
+        assert!(ds.days.is_empty());
+        assert!((total(&mix) - 0.825).abs() < 1e-9, "{}", total(&mix));
+        assert!(mix.days.keys().all(|(_, m)| m == "MiniMax-M3.1-Flash"));
 
         // A foreign provider contributes to neither bucket.
         let (ds, mix) = deepseek_harness_priced(vec![ev(
