@@ -242,14 +242,20 @@ async fn fetch(dir: &std::path::Path, id: &str, name: &str) -> Result<Snapshot, 
         // Anthropic's cooldowns state how long they run (a plan change
         // can trigger a ~25-minute one); carry Retry-After so the fetch
         // guard can bench for exactly that long instead of knocking
-        // every 5 minutes.
+        // every 5 minutes. 429s need no body — usage_error keys off the
+        // status alone — and other bodies are bounded before the
+        // rate_limit_error check.
         let status = resp.status();
         let retry_after = resp
             .headers()
             .get("retry-after")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<u64>().ok());
-        let body = resp.text().await.unwrap_or_default();
+        let body = if status.as_u16() == 429 {
+            String::new()
+        } else {
+            super::bounded_text(resp, 16 * 1024).await
+        };
         return Err(usage_error(status, retry_after, &body));
     }
     let usage: Value = resp.json().await.map_err(|e| format!("usage parse: {e}"))?;
