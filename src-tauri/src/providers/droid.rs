@@ -415,14 +415,19 @@ fn droid_running_in<'a>(mut names: impl Iterator<Item = &'a str>) -> bool {
 /// enumeration failed — callers must fail closed (treat droid as
 /// running) rather than risk rotating a token a live CLI still holds.
 fn process_names() -> Option<Vec<String>> {
-    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Foundation::{CloseHandle, ERROR_NO_MORE_FILES};
     use windows::Win32::System::Diagnostics::ToolHelp::*;
     unsafe {
         let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
         let mut names = Vec::new();
         let mut entry = PROCESSENTRY32W::default();
         entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
-        if Process32FirstW(snapshot, &mut entry).is_ok() {
+        // Anything short of a complete scan fails closed: a partial list
+        // could miss the droid.exe that must veto the refresh.
+        let complete = (|| -> bool {
+            if Process32FirstW(snapshot, &mut entry).is_err() {
+                return false;
+            }
             loop {
                 let end = entry
                     .szExeFile
@@ -430,13 +435,16 @@ fn process_names() -> Option<Vec<String>> {
                     .position(|&c| c == 0)
                     .unwrap_or(entry.szExeFile.len());
                 names.push(String::from_utf16_lossy(&entry.szExeFile[..end]));
-                if Process32NextW(snapshot, &mut entry).is_err() {
-                    break;
+                match Process32NextW(snapshot, &mut entry) {
+                    Ok(()) => continue,
+                    Err(e) if e.code() == ERROR_NO_MORE_FILES.to_hresult() => break,
+                    Err(_) => return false,
                 }
             }
-        }
+            true
+        })();
         let _ = CloseHandle(snapshot);
-        Some(names)
+        complete.then_some(names)
     }
 }
 
@@ -535,15 +543,18 @@ fn encrypt_auth_line(key: &[u8], doc: &Value) -> Result<String, String> {
 enum RefreshOutcome {
     /// WorkOS rotated the pair — both tokens are non-empty strings.
     Rotated { access: String, refresh: String },
-    /// Network error, 5xx, unparseable — nothing was consumed.
+    /// Network error or a non-success, non-400/401 status (incl. a 3xx
+    /// the no-redirect client surfaces) — nothing was provably consumed.
     Transient,
-    /// 400/401 or an `invalid_grant` body — this refresh token is dead.
+    /// This refresh token is dead or may be: 400/401, an `invalid_grant`
+    /// body, or a 2xx response that doesn't parse / lacks either token
+    /// (WorkOS may have already consumed the grant — bar the fingerprint).
     Rejected,
 }
 
 /// The refresh grant itself. Never logs token material.
 async fn workos_refresh(refresh_token: &str, client_id: &str) -> RefreshOutcome {
-    let resp = super::http()
+    let resp = super::http_no_redirect()
         .post(WORKOS_AUTHENTICATE_URL)
         .form(&[
             ("grant_type", "refresh_token"),
@@ -566,7 +577,7 @@ async fn workos_refresh(refresh_token: &str, client_id: &str) -> RefreshOutcome 
         };
     }
     let Ok(v) = serde_json::from_str::<Value>(&body) else {
-        return RefreshOutcome::Transient;
+        return RefreshOutcome::Rejected;
     };
     let pick = |k: &str| {
         v.get(k)
@@ -576,7 +587,7 @@ async fn workos_refresh(refresh_token: &str, client_id: &str) -> RefreshOutcome 
     };
     match (pick("access_token"), pick("refresh_token")) {
         (Some(access), Some(refresh)) => RefreshOutcome::Rotated { access, refresh },
-        _ => RefreshOutcome::Transient,
+        _ => RefreshOutcome::Rejected,
     }
 }
 
@@ -633,19 +644,23 @@ fn stage_auth_tmp(live: &Path) -> Option<StagedTmp> {
 }
 
 /// Keep a copy of the CLI's own file before touching it, so a bad write
-/// can never cost the user their login. A planted symlink at the backup
-/// path is unlinked first — never write through it.
+/// can never cost the user their login. Any existing backup — stale or a
+/// planted symlink — is removed first (never write through it), and the
+/// fresh copy is owner-locked; if that fails the backup is deleted — a
+/// permissive copy of the credential must never be left behind.
 fn backup_auth_file(live: &Path) {
     let mut bak_os = live.as_os_str().to_os_string();
     bak_os.push(".pane-bak");
     let bak = PathBuf::from(bak_os);
-    if std::fs::symlink_metadata(&bak)
-        .ok()
-        .is_some_and(|m| m.file_type().is_symlink())
-    {
+    if std::fs::symlink_metadata(&bak).is_ok() {
         let _ = std::fs::remove_file(&bak);
     }
-    let _ = std::fs::copy(live, &bak);
+    if std::fs::copy(live, &bak).is_err() {
+        return;
+    }
+    if super::onenewapi::store::restrict_owner_only(&bak).is_err() {
+        let _ = std::fs::remove_file(&bak);
+    }
 }
 
 /// Everything decided before the WorkOS call: droid not running, no fresh
@@ -1601,6 +1616,9 @@ mod tests {
             "whoami": {"id": "u-1", "email": "a@b.c"},
         });
         let (live, old_line) = write_factory_login(&home, &old_doc);
+        // A pre-existing backup (stale or planted) is replaced, never
+        // appended to or written through.
+        std::fs::write(home.join("auth.v2.file.pane-bak"), "stale").unwrap();
         let prev = std::env::var("FACTORY_HOME_OVERRIDE").ok();
         std::env::set_var("FACTORY_HOME_OVERRIDE", &home);
 
