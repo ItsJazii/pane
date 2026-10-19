@@ -295,7 +295,8 @@ Ground rules that apply to every provider:
   refresh — `daily-cloudcode-pa.googleapis.com` first (the host agy's
   own /usage reads; it only serves the Gemini group to the `…/cli/…`
   User-Agent agy sends), then `cloudcode-pa.googleapis.com` only to fill
-  windows daily lacked since prod's Gemini group is a different pool.
+  Claude/GPT windows daily lacked — prod's Gemini group is a different
+  pool, so Gemini rows come from daily or not at all.
   Answers merge per bucket, first host wins.
 - **Shows:** Gemini + Claude pool windows, plan. `Argon Weekly` also
   appears while the Antigravity IDE's language server runs — the Cloud

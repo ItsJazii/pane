@@ -420,12 +420,13 @@ async fn cloud_call(access_token: &str, path: &str) -> Result<Option<Value>, boo
 
 /// retrieveUserQuotaSummary: daily is required — it's the host agy's own
 /// /usage reads and the only one whose Gemini group matches what the app
-/// shows. Prod is asked only to fill windows daily lacked (its Gemini
-/// group is a different pool, so first-doc-wins merging keeps daily's
-/// numbers authoritative). Daily unreachable/unparseable returns an
-/// empty doc set rather than silently mixing pools — the caller's
-/// last-good restore then shows the previous numbers. A 401/403 from
-/// daily fails the call so the token-refresh path runs.
+/// shows. Prod is asked only to fill windows daily lacked, and even then
+/// only its Claude/GPT (3p) buckets are kept — its Gemini group is a
+/// different pool, so Gemini rows come from daily or not at all. Daily
+/// unreachable/unparseable returns an empty doc set rather than silently
+/// mixing pools — the caller's last-good restore then shows the previous
+/// numbers. A 401/403 from daily fails the call so the token-refresh
+/// path runs.
 async fn cloud_quota_docs(access_token: &str) -> Result<Vec<Value>, bool> {
     quota_docs_with(|base| {
         cloud_post(base, access_token, "/v1internal:retrieveUserQuotaSummary")
@@ -448,7 +449,7 @@ where
             let mut docs = vec![doc];
             if !has_all_windows(&parse_quota_buckets_all(&docs)) {
                 if let Ok(Some(prod_doc)) = fetch(prod).await {
-                    docs.push(prod_doc);
+                    docs.push(without_gemini_buckets(prod_doc));
                 }
             }
             Ok(docs)
@@ -457,6 +458,25 @@ where
         // let last-good restore keep the previous numbers.
         Ok(None) => Ok(Vec::new()),
     }
+}
+
+/// Prod's Gemini group is a different pool than daily's — drop every
+/// bucket whose id starts with "gemini" so prod can only ever fill the
+/// Claude/GPT (3p) windows. The groups/buckets shape is preserved.
+fn without_gemini_buckets(doc: Value) -> Value {
+    let mut doc = doc;
+    if let Some(groups) = doc.get_mut("groups").and_then(Value::as_array_mut) {
+        for group in groups {
+            if let Some(buckets) = group.get_mut("buckets").and_then(Value::as_array_mut) {
+                buckets.retain(|b| {
+                    !b.get("bucketId")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| id.starts_with("gemini"))
+                });
+            }
+        }
+    }
+    doc
 }
 
 async fn cloud_snapshot(access_token: &str) -> Result<Option<Snapshot>, bool> {
@@ -1642,8 +1662,9 @@ mod tests {
         assert!((weekly.used_percent.unwrap() - 0.700307).abs() < 1e-4);
     }
 
-    /// Daily lacking the Gemini group → prod is fetched and fills just
-    /// those rows; daily's values win for bucketIds both hosts serve.
+    /// Daily lacking the Gemini group → prod is still asked, but its
+    /// Gemini buckets are stripped (wrong pool): no Session/Weekly rows
+    /// appear, and the 3p rows keep daily's values.
     #[test]
     fn quota_docs_prod_only_fills_daily_gaps() {
         let daily = quota_doc(&[("3p-5h", 0.9), ("3p-weekly", 0.8)]);
@@ -1662,14 +1683,33 @@ mod tests {
         .unwrap();
         assert_eq!(*calls.borrow(), vec![CLOUD_BASES[0], CLOUD_BASES[1]]);
         let metrics = parse_quota_buckets_all(&docs);
-        assert!(has_all_windows(&metrics));
+        let labels: Vec<&str> = metrics.iter().map(|m| m.label.as_str()).collect();
+        assert_eq!(labels, ["Claude", "Claude Weekly"]);
         let used = |label: &str| {
             metrics.iter().find(|m| m.label == label).unwrap().used_percent.unwrap()
         };
-        assert!((used("Session") - 30.0).abs() < 1e-9); // prod's 0.7
-        assert!((used("Weekly") - 40.0).abs() < 1e-9); // prod's 0.6
-        assert!((used("Claude") - 10.0).abs() < 1e-9); // daily's 0.9 wins
-        assert!((used("Claude Weekly") - 20.0).abs() < 1e-9); // daily's 0.8 wins
+        assert!((used("Claude") - 10.0).abs() < 1e-9); // daily's 0.9
+        assert!((used("Claude Weekly") - 20.0).abs() < 1e-9); // daily's 0.8
+    }
+
+    /// gemini-* ids (incl. gemini-argon-…) are dropped; 3p buckets kept.
+    #[test]
+    fn without_gemini_buckets_strips_only_gemini_ids() {
+        let doc = quota_doc(&[
+            ("gemini-5h", 0.7),
+            ("gemini-weekly", 0.6),
+            ("gemini-argon-wtu-weekly", 0.75),
+            ("3p-5h", 0.9),
+            ("3p-weekly", 0.8),
+        ]);
+        let stripped = without_gemini_buckets(doc);
+        let ids: Vec<&str> = stripped["groups"][0]["buckets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["bucketId"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["3p-5h", "3p-weekly"]);
     }
 
     /// Daily unreachable/unparseable → empty docs WITHOUT asking prod:
