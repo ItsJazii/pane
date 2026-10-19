@@ -12,6 +12,8 @@ const NAME: &str = "Claude";
 // "surface"; with it the same token reports real grants.
 const CLAUDE_CLI_UA: &str = "claude-cli/2.1.280 (external, cli)";
 const MAX_CRED_BYTES: u64 = 64 * 1024;
+const HOUR: i64 = 3_600_000;
+const DAY: i64 = 86_400_000;
 
 fn default_dir() -> PathBuf {
     std::env::var("CLAUDE_CONFIG_DIR")
@@ -260,8 +262,6 @@ async fn fetch(dir: &std::path::Path, id: &str, name: &str) -> Result<Snapshot, 
     }
     let usage: Value = resp.json().await.map_err(|e| format!("usage parse: {e}"))?;
 
-    const HOUR: i64 = 3_600_000;
-    const DAY: i64 = 86_400_000;
     let mut metrics = Vec::new();
     push_window(&mut metrics, usage.get("five_hour"), "Session", 5 * HOUR);
     push_window(&mut metrics, usage.get("seven_day"), "Weekly", 7 * DAY);
@@ -270,35 +270,7 @@ async fn fetch(dir: &std::path::Path, id: &str, name: &str) -> Result<Snapshot, 
 
     // Newer per-model weeklies (Fable era) live in a `limits` array instead of
     // legacy `seven_day_<model>` keys. Add any we don't already show.
-    for entry in usage.get("limits").and_then(Value::as_array).unwrap_or(&vec![]) {
-        if entry.get("kind").and_then(Value::as_str) != Some("weekly_scoped") {
-            continue;
-        }
-        let Some(name) = entry.pointer("/scope/model/display_name").and_then(Value::as_str) else {
-            continue;
-        };
-        let Some(percent) = entry.get("percent").and_then(Value::as_f64) else { continue };
-        // Server display names are arbitrary text that can reach the
-        // telemetry boundary via starred metrics — map them onto the fixed
-        // family vocabulary the legacy seven_day_<model> labels already use.
-        let lower = name.to_ascii_lowercase();
-        let family = if lower.contains("opus") {
-            "Opus"
-        } else if lower.contains("sonnet") {
-            "Sonnet"
-        } else if lower.contains("haiku") {
-            "Haiku"
-        } else {
-            "Model"
-        };
-        let label = format!("{family} weekly");
-        if metrics.iter().any(|m| m.label == label) {
-            continue;
-        }
-        let resets_at = parse_reset(entry.get("resets_at"));
-        metrics
-            .push(Metric::progress(&label, percent, None).with_reset(resets_at, Some(7 * DAY)));
-    }
+    push_weekly_scoped(&mut metrics, &usage);
 
     // Extra Usage: pay-as-you-go overage spend, in cents. Bounded meter when
     // a monthly cap is set, plain dollars when uncapped, absent when unused.
@@ -467,6 +439,42 @@ fn push_window(metrics: &mut Vec<Metric>, node: Option<&Value>, label: &str, per
     let Some(used) = node.get("utilization").and_then(Value::as_f64) else { return };
     let resets_at = parse_reset(node.get("resets_at"));
     metrics.push(Metric::progress(label, used, None).with_reset(resets_at, Some(period_ms)));
+}
+
+/// Newer per-model weeklies (Fable era) live in a `limits` array instead of
+/// legacy `seven_day_<model>` keys. Adds any whose label isn't shown yet.
+fn push_weekly_scoped(metrics: &mut Vec<Metric>, usage: &Value) {
+    for entry in usage.get("limits").and_then(Value::as_array).unwrap_or(&vec![]) {
+        if entry.get("kind").and_then(Value::as_str) != Some("weekly_scoped") {
+            continue;
+        }
+        let Some(name) = entry.pointer("/scope/model/display_name").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(percent) = entry.get("percent").and_then(Value::as_f64) else { continue };
+        // Server display names are arbitrary text that can reach the
+        // telemetry boundary via starred metrics — map them onto the fixed
+        // family vocabulary the legacy seven_day_<model> labels already use.
+        let lower = name.to_ascii_lowercase();
+        let family = if lower.contains("opus") {
+            "Opus"
+        } else if lower.contains("sonnet") {
+            "Sonnet"
+        } else if lower.contains("haiku") {
+            "Haiku"
+        } else if lower.contains("fable") {
+            "Fable"
+        } else {
+            "Model"
+        };
+        let label = format!("{family} weekly");
+        if metrics.iter().any(|m| m.label == label) {
+            continue;
+        }
+        let resets_at = parse_reset(entry.get("resets_at"));
+        metrics
+            .push(Metric::progress(&label, percent, None).with_reset(resets_at, Some(7 * DAY)));
+    }
 }
 
 /// Cloud session credits — the included dollar credit for Claude Code
@@ -796,10 +804,25 @@ fn backup_credentials(path: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::{
-        banked_resets, cloud_credits, identity_from, parse_reset_credit_id, scoped_id_charset,
-        usage_error,
+        banked_resets, cloud_credits, identity_from, parse_reset_credit_id, push_weekly_scoped,
+        scoped_id_charset, usage_error,
     };
     use serde_json::json;
+
+    /// Fable 5.1's weekly_scoped limits entry must read as its own
+    /// "Fable weekly" row, not the catch-all "Model weekly" (#283).
+    #[test]
+    fn fable_weekly_scoped_limit_gets_a_fable_label() {
+        let usage = json!({"limits": [
+            {"kind": "weekly_scoped", "percent": 12.5,
+             "resets_at": "2026-10-25T00:00:00Z",
+             "scope": {"model": {"display_name": "Fable 5.1"}}},
+        ]});
+        let mut metrics = Vec::new();
+        push_weekly_scoped(&mut metrics, &usage);
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].label, "Fable weekly");
+    }
 
     /// Anthropic's usage endpoint answers its hourly rate limit as a
     /// 403 carrying a rate_limit_error body + Retry-After — the string
