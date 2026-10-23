@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Kimi K3.1 Pro and K3.1 Pro Highspeed pricing.** Moonshot's new
+  models now price at their published API rates: K3.1 Pro $2 in / $10
+  out per million tokens ($0.20 cached), Highspeed $4 / $20 ($0.20
+  cached). Before this they showed tokens but $0. Saved spend is
+  recalculated once after updating.
+
 ## 0.4.62 — 2026-10-19
 
 ### Added
