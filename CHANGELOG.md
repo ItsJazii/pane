@@ -9,6 +9,12 @@
   cached). Before this they showed tokens but $0. Saved spend is
   recalculated once after updating.
 
+### Fixed
+- **Kimi's new plan names.** Kimi renamed its plans to Go, Plus, Pro,
+  Max and Ultra. If Pane ever falls back to its own plan list, a "Pro"
+  plan now shows as Pro instead of Allegretto. Legacy plans (Moderato,
+  Allegretto, Allegro, Vivace) keep their names.
+
 ## 0.4.62 — 2026-10-19
 
 ### Added

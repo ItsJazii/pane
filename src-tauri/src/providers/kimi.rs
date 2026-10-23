@@ -540,11 +540,14 @@ fn plan_from_doc(doc: &Value, weekly_limit: Option<f64>) -> Option<String> {
     }
 }
 
-/// Display names match https://www.kimi.ai/membership/pricing
-/// (Moderato / Allegretto / Allegro / Vivace). `LEVEL_*` codes shifted
-/// when Allegro and Vivace launched (issue #156): INTERMEDIATE used to
-/// print as Moderato. Older codes (Adagio / Andante) are mapped if the
-/// API still sends them.
+/// Display names match https://www.kimi.ai/membership/pricing — now
+/// Plus / Pro / Max / Ultra internationally (Go / Plus / Pro / Max /
+/// Ultra in China); Moderato / Allegretto / Allegro / Vivace survive as
+/// legacy names for existing subscribers. `LEVEL_*` codes shifted when
+/// Allegro and Vivace launched (issue #156): INTERMEDIATE used to print
+/// as Moderato. Older codes (Adagio / Andante) are mapped if the API
+/// still sends them; new-plan codes (PLUS, PRO, MAX, ULTRA, GO) fall
+/// through to title_case, which already spells them correctly.
 fn map_membership_level(raw: &str) -> Option<String> {
     let upper = raw.trim().to_ascii_uppercase();
     let key = upper.strip_prefix("LEVEL_").unwrap_or(&upper);
@@ -552,7 +555,7 @@ fn map_membership_level(raw: &str) -> Option<String> {
         "FREE" | "ADAGIO" | "BASIC" => "Adagio".into(),
         "ANDANTE" | "BEGINNER" | "INTRO" => "Andante".into(),
         "MODERATO" | "STANDARD" => "Moderato".into(),
-        "INTERMEDIATE" | "ALLEGRETTO" | "ALLEGROTTO" | "PROFESSIONAL" | "PRO" => {
+        "INTERMEDIATE" | "ALLEGRETTO" | "ALLEGROTTO" | "PROFESSIONAL" => {
             "Allegretto".into()
         }
         "ADVANCED" | "ALLEGRO" => "Allegro".into(),
@@ -726,7 +729,13 @@ mod tests {
             ("LEVEL_ALLEGRO", "Allegro"),
             ("LEVEL_PREMIUM", "Vivace"),
             ("VIVACE", "Vivace"),
-            ("PRO", "Allegretto"),
+            ("PRO", "Pro"),
+            ("LEVEL_PRO", "Pro"),
+            ("PLUS", "Plus"),
+            ("LEVEL_PLUS", "Plus"),
+            ("MAX", "Max"),
+            ("ULTRA", "Ultra"),
+            ("GO", "Go"),
         ];
         for (raw, name) in cases {
             assert_eq!(map_membership_level(raw).as_deref(), Some(name), "{raw}");
