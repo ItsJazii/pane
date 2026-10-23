@@ -430,7 +430,10 @@ Ground rules that apply to every provider:
   Older codes still map if the API sends them (`LEVEL_FREE` /
   `LEVEL_BASIC` → Adagio, `LEVEL_ANDANTE` → Andante). Weekly request
   caps 1024 / 2048 / 7168 are a fallback only, when the API omits the
-  level.
+  level. Kimi's new plans (Go, Plus, Pro, Max, Ultra) show by the name
+  the account API sends; legacy subscribers keep their old names, and
+  the new plans carry no Weekly limit, so that row simply doesn't
+  appear.
   Those two windows are the same clocks as Kimi's website "5-hour Code"
   and "7-day Code" rows; the coding usage API currently reports remaining
   as whole percents (`limit`/`remaining` of 100), so usage under 1% can
