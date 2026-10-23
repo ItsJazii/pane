@@ -382,7 +382,7 @@ pub fn generation() -> u64 {
 /// fingerprinted below — an app update that reprices the same files would
 /// otherwise leave history at the old dollars until upstream happens to
 /// rewrite a catalog.
-const CORRECTIONS_REV: u32 = 23; // 19: Antigravity `-trial` ids (gemini-4-argon-trial) price like the base card; 20: Argon post-intro list card enforced over catalogs; 21: Claude Code deepseek-flash / V4.1 Flash priced on AIHubMix's card; 22: `deepseek/` spellings take the baked official card over models.dev's same-prefix reseller ids; 23: AIHubMix MiniMax M3.1 Flash card
+const CORRECTIONS_REV: u32 = 24; // 19: Antigravity `-trial` ids (gemini-4-argon-trial) price like the base card; 20: Argon post-intro list card enforced over catalogs; 21: Claude Code deepseek-flash / V4.1 Flash priced on AIHubMix's card; 22: `deepseek/` spellings take the baked official card over models.dev's same-prefix reseller ids; 23: AIHubMix MiniMax M3.1 Flash card; 24: Moonshot Kimi K3.1 Pro + Highspeed cards
 
 /// The corrections revision on its own — the spend cache treats a changed
 /// revision as a hard discard (the *code* that prices changed), while a
@@ -1010,6 +1010,15 @@ fn kimi_vendor_price(canonical: &str) -> Option<Price> {
     let bare = kimi_vendor_tail(canonical)?.to_ascii_lowercase();
     match bare.as_str() {
 
+        // platform.kimi.ai/docs/pricing/chat — K3.1 Pro $2 in / $10 out /
+        // $0.20 cache hit, Highspeed $4 / $20 / $0.20; cache writes take
+        // the published 5-min (default TTL) rate — the input rate, same
+        // convention as the K3 arm. Kimi Code plan logs spell these
+        // `k3.1-pro` / `kimi-code/k3.1-pro`.
+        "k3.1-pro" | "kimi-k3.1-pro" => Some(Price::flat(2.0, 10.0, 0.2, 2.0)),
+        "k3.1-pro-highspeed" | "kimi-k3.1-pro-highspeed" => {
+            Some(Price::flat(4.0, 20.0, 0.2, 4.0))
+        }
         // platform.kimi.ai/docs/pricing/chat-k3 — k3-256k is the same API
         // rate card (the 2× figure on the membership page is plan *quota*,
         // not dollars).
@@ -1823,6 +1832,49 @@ mod tests {
                 "{slug}"
             );
         }
+    }
+
+    #[test]
+    fn kimi_k31_pro_and_highspeed_price_every_spelling() {
+        // Vendor-documented rates (platform.kimi.ai): Pro $2/$10/$0.20,
+        // Highspeed $4/$20/$0.20 — resolvable however each tool spells it.
+        for slug in [
+            "kimi-k3.1-pro",
+            "k3.1-pro",
+            "kimi-code/k3.1-pro",
+            "moonshot-ai/kimi-k3.1-pro",
+            "moonshotai/kimi-k3.1-pro",
+            "kimi-oauth/k3.1-pro",
+            "k3.1-pro-max",
+            "kimi-k3.1-pro-high",
+        ] {
+            let p = super::lookup(slug).unwrap_or_else(|| panic!("{slug} did not price"));
+            assert_eq!(
+                (p.input, p.output, p.cache_read, p.cache_write),
+                (2.0, 10.0, 0.2, 2.0),
+                "{slug}"
+            );
+        }
+        for slug in [
+            "kimi-k3.1-pro-highspeed",
+            "k3.1-pro-highspeed",
+            "kimi-code/k3.1-pro-highspeed",
+            "moonshot-ai/kimi-k3.1-pro-highspeed",
+        ] {
+            let p = super::lookup(slug).unwrap_or_else(|| panic!("{slug} did not price"));
+            assert_eq!(
+                (p.input, p.output, p.cache_read, p.cache_write),
+                (4.0, 20.0, 0.2, 4.0),
+                "{slug}"
+            );
+        }
+        // K3 unchanged.
+        for slug in ["k3", "kimi-k3"] {
+            let p = super::lookup(slug).unwrap_or_else(|| panic!("{slug} did not price"));
+            assert_eq!((p.input, p.output, p.cache_read), (3.0, 15.0, 0.3), "{slug}");
+        }
+        // A foreign gateway's k3.1-pro must not steal Moonshot's card.
+        assert!(super::kimi_vendor_price("openrouter/k3.1-pro").is_none());
     }
 
     #[test]
