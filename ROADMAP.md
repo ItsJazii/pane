@@ -1,6 +1,6 @@
 # Roadmap — full Mac parity (and beyond)
 
-**Status (v0.4.62, 2026-10-19): every wave below is shipped, and the
+**Status (v0.4.63, 2026-10-24): every wave below is shipped, and the
 post-launch releases keep going.** Pane has full feature parity with the
 macOS original plus 25 providers (Droid/Factory with local spend
 landed; Antigravity gained local spend), multi-site One/New API key
