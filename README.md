@@ -40,16 +40,7 @@ broader AI-workflow companion from there.
 Every release binary is built and published by GitHub Actions straight
 from the tagged source — public build logs, verifiable provenance.
 
-### winget (recommended)
-
-```
-winget install Pane.Pane
-```
-
-Pane is in [Microsoft's official winget community repo](https://github.com/microsoft/winget-pkgs/tree/master/manifests/p/Pane/Pane) —
-reviewed, hash-verified, no SmartScreen prompt.
-
-### One-liner (PowerShell)
+### One-liner (PowerShell, recommended)
 
 ```powershell
 irm https://trypane.xyz/install.ps1 | iex
@@ -67,8 +58,16 @@ iwr https://trypane.xyz/install.ps1 -OutFile install.ps1
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-(Or skip the script question entirely: `winget install Pane.Pane` above
-is hash-verified by Microsoft's pipeline.)
+### winget
+
+```
+winget install Pane.Pane
+```
+
+Pane is in [Microsoft's official winget community repo](https://github.com/microsoft/winget-pkgs/tree/master/manifests/p/Pane/Pane) —
+reviewed, hash-verified, no SmartScreen prompt.
+
+> **Note (October 2026):** WinGet versions 0.8.0 and later of `Pane.Pane` are not official Pane builds - see [#297](https://github.com/ItsJazii/pane/issues/297). Until that's fixed, use the one-liner above.
 
 ### Installer (.exe)
 

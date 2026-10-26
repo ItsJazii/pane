@@ -43,16 +43,7 @@ Pane собирает всё в системном трее, обновляет 
 непосредственно из исходного кода с соответствующим тегом. Журналы сборки
 открыты, а происхождение файлов можно проверить.
 
-### winget (рекомендуется)
-
-```
-winget install Pane.Pane
-```
-
-Pane доступен в [официальном репозитории сообщества winget от Microsoft](https://github.com/microsoft/winget-pkgs/tree/master/manifests/p/Pane/Pane):
-пакет прошёл проверку, хеш проверяется, предупреждение SmartScreen не появляется.
-
-### Одна команда (PowerShell)
+### Одна команда (PowerShell, рекомендуется)
 
 ```powershell
 irm https://trypane.xyz/install.ps1 | iex
@@ -71,8 +62,16 @@ iwr https://trypane.xyz/install.ps1 -OutFile install.ps1
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-(Можно обойтись без скрипта: у команды `winget install Pane.Pane` выше
-хеш проверяется средствами Microsoft.)
+### winget
+
+```
+winget install Pane.Pane
+```
+
+Pane доступен в [официальном репозитории сообщества winget от Microsoft](https://github.com/microsoft/winget-pkgs/tree/master/manifests/p/Pane/Pane):
+пакет прошёл проверку, хеш проверяется, предупреждение SmartScreen не появляется.
+
+> **Примечание (октябрь 2026):** версии 0.8.0 и выше пакета `Pane.Pane` в WinGet не являются официальными сборками Pane — см. [#297](https://github.com/ItsJazii/pane/issues/297). Пока проблема не решена, используйте команду выше.
 
 ### Установщик (.exe)
 
