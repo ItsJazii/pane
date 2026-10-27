@@ -313,12 +313,6 @@ async fn fetch(dir: &std::path::Path, id: &str, name: &str) -> Result<Snapshot, 
     Ok(Snapshot::ok(id, name, plan, metrics))
 }
 
-/// Read the OAuth pair in dir's `.credentials.json`, refreshing it when
-/// stale — the exact flow fetch() ran, shared with redeem_credit.
-/// Refresh rotates the CLI's tokens, so the new pair is staged and
-/// written back BEFORE it can be used; a pair that can't replace the
-/// live file is never returned (that would sign the CLI out).
-/// Returns (access token, subscriptionType).
 /// True when the credentials file now on disk holds a DIFFERENT refresh
 /// token than the one just used — i.e. another app rotated the pair while
 /// our request was in flight and the disk copy may be fresh. Missing or
@@ -330,6 +324,15 @@ fn rotated_since(used_refresh: &str, doc: &Value) -> bool {
         .is_some_and(|on_disk| !on_disk.is_empty() && on_disk != used_refresh)
 }
 
+const ROTATED_MSG: &str =
+    "Claude sign-in was rotated by another app — run `claude` in a terminal once and Pane recovers automatically";
+
+/// Read the OAuth pair in dir's `.credentials.json`, refreshing it when
+/// stale — the exact flow fetch() ran, shared with redeem_credit.
+/// Refresh rotates the CLI's tokens, so the new pair is staged and
+/// written back BEFORE it can be used; a pair that can't replace the
+/// live file is never returned (that would sign the CLI out).
+/// Returns (access token, subscriptionType).
 async fn oauth_access(dir: &std::path::Path) -> Result<(String, Option<String>), String> {
     let path = dir.join(".credentials.json");
     // Two attempts: a refresh raced with Claude Code can fail with
@@ -340,7 +343,7 @@ async fn oauth_access(dir: &std::path::Path) -> Result<(String, Option<String>),
             return Ok(result);
         }
     }
-    unreachable!("oauth_access_once retries at most once")
+    Err(ROTATED_MSG.into())
 }
 
 async fn oauth_access_once(
@@ -419,10 +422,7 @@ async fn oauth_access_once(
                             }
                         }
                     }
-                    return Err(
-                        "Claude sign-in was rotated by another app — run `claude` in a terminal once and Pane recovers automatically"
-                            .into(),
-                    );
+                    return Err(ROTATED_MSG.into());
                 }
                 return Err(format!("token refresh failed: HTTP {status}"));
             }
@@ -846,6 +846,7 @@ mod tests {
         banked_resets, cloud_credits, identity_from, parse_reset_credit_id, push_weekly_scoped,
         rotated_since, scoped_id_charset, usage_error,
     };
+    use serde_json::json;
 
     #[test]
     fn rotated_since_flags_only_a_changed_disk_refresh_token() {
@@ -860,7 +861,6 @@ mod tests {
         let doc = serde_json::json!({"claudeAiOauth": {"refreshToken": ""}});
         assert!(!rotated_since("SAME", &doc));
     }
-    use serde_json::json;
 
     /// Fable 5.1's weekly_scoped limits entry must read as its own
     /// "Fable weekly" row, not the catch-all "Model weekly" (#283).
