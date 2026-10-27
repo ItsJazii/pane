@@ -1892,6 +1892,13 @@ footer {
 
 .sidebar-buttons button {
   transition: color 0.15s ease, background 0.15s ease, transform 0.1s ease;
+  /* Same box for every icon so the pitch between buttons stays even
+     regardless of the glyph's rendered size. */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
+  padding: 0;
 }
 
 .sidebar-buttons button:active {

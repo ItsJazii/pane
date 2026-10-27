@@ -167,7 +167,7 @@
   offset-rotate: 0deg;
   will-change: offset-distance;
   animation: bat-travel 20s ease-in-out infinite backwards;
-  filter: drop-shadow(0 0 1.5px rgb(251 146 60 / 0.6)); /* pumpkin rim light */
+  filter: drop-shadow(0 0 1.5px rgb(251 146 60 / 0.85)) drop-shadow(0 0 4px rgb(249 115 22 / 0.25)); /* pumpkin rim light */
 }
 
 :root[data-season="halloween"][data-theme="light"] .bat {
@@ -186,7 +186,7 @@
   width: 100%;
   height: auto;
   overflow: visible; /* wingtips swing above the viewBox at the up pose */
-  color: #1a1222;
+  color: #2b1e3a;
   fill: currentColor;
 }
 
@@ -196,7 +196,7 @@
 
 .bats .wing {
   transform-box: view-box;
-  fill: #1a1222;
+  fill: #2b1e3a;
 }
 .bats .wing-l {
   transform-origin: 30px 14px; /* left shoulder joint */
@@ -214,9 +214,9 @@
 .bats .bones {
   fill: none;
   stroke: #f97316;
-  stroke-width: 0.9;
+  stroke-width: 1.1;
   stroke-linecap: round;
-  opacity: 0.8;
+  opacity: 0.95;
 }
 .bats .eye {
   fill: #fb923c; /* lit-pumpkin eyes */
@@ -661,7 +661,6 @@ body.reduce-anim .metric.just-reset .fill::before {
   color: var(--muted-foreground);
   font-size: 16px;
   cursor: pointer;
-  padding: 3px 7px;
   border-radius: 7px;
   transition: background 0.15s, color 0.15s;
 }
@@ -676,7 +675,6 @@ body.reduce-anim .metric.just-reset .fill::before {
   width: 15px;
   height: 15px;
   display: block;
-  margin: 0 auto;
 }
 /* OFF inside the season window: grayscale + dimmed so the toggle reads as
    "turn it back on". */

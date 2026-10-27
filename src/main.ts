@@ -2728,11 +2728,11 @@ const BAT_SVG =
   '<svg class="bat-svg" viewBox="0 0 64 32" aria-hidden="true">' +
   '<g class="wing wing-l">' +
   '<path d="M30 14C27 6 16 1 6 3.5L4.5 2.5C6 9 9 13.5 12 17Q15.5 11 19 18.5Q22.5 13 26 21Q28 17 30 18.5L30 14Z"/>' +
-  '<path class="bones" d="M30 14L12 17M30 14L19 18.5M30 14L26 21"/>' +
+  '<path class="bones" d="M30 14L4.5 2.5M30 14L15.5 11M30 14L23.5 14"/>' +
   '</g>' +
   '<g class="wing wing-r">' +
   '<path d="M34 14C37 6 48 1 58 3.5L59.5 2.5C58 9 55 13.5 52 17Q48.5 11 45 18.5Q41.5 13 38 21Q36 17 34 18.5L34 14Z"/>' +
-  '<path class="bones" d="M34 14L52 17M34 14L45 18.5M34 14L38 21"/>' +
+  '<path class="bones" d="M34 14L59.5 2.5M34 14L48.5 11M34 14L40.5 14"/>' +
   '</g>' +
   '<g class="body">' +
   '<path d="M29.5 9.5L27.8 3.5L31.2 7.8Z"/>' +
@@ -2784,14 +2784,14 @@ let seasonWiping = false;
 async function syncSeasonBtn(): Promise<void> {
   const btn = document.querySelector<HTMLElement>("#season-btn");
   if (!btn) return;
-  let window = null;
+  let inWindow = null;
   try {
-    window = await invoke<string | null>("season_window_now");
+    inWindow = await invoke<string | null>("season_window_now");
   } catch {
-    window = null;
+    inWindow = null;
   }
-  btn.hidden = window !== "halloween";
-  const on = document.documentElement.dataset.season === "halloween";
+  btn.hidden = inWindow !== "halloween";
+  const on = config.seasonalThemes !== false;
   btn.title = on ? t("sidebar.seasonOff") : t("sidebar.seasonOn");
 }
 
