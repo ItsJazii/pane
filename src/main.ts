@@ -1287,7 +1287,7 @@ function renderMetric(m: Metric, providerId: string): string {
       resetHtml,
     ].filter(Boolean).join(" · ");
     return `
-      <div class="metric">
+      <div class="metric" data-mkey="${escapeHtml(`${providerId}:${m.label}`)}">
         <div class="metric-head">
           <span class="metric-label">${escapeHtml(displayMetricLabel(m.label))}</span>
           ${note}
@@ -2313,6 +2313,63 @@ function presentStarPrompt(): void {
   document.body.appendChild(overlay);
 }
 
+function rgbToHsl(r: number, g: number, b: number): [number, number, number] {
+  r /= 255; g /= 255; b /= 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+  const l = (mx + mn) / 2, d = mx - mn;
+  if (!d) return [0, 0, l];
+  const sat = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn);
+  const h = mx === r ? ((g - b) / d + (g < b ? 6 : 0)) * 60
+    : mx === g ? ((b - r) / d + 2) * 60 : ((r - g) / d + 4) * 60;
+  return [h, sat, l];
+}
+function hslToRgb(h: number, s: number, l: number): [number, number, number] {
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const hp = (((h % 360) + 360) % 360) / 60;
+  const x = c * (1 - Math.abs((hp % 2) - 1));
+  let r = 0, g = 0, b = 0;
+  if (hp < 1) [r, g, b] = [c, x, 0];
+  else if (hp < 2) [r, g, b] = [x, c, 0];
+  else if (hp < 3) [r, g, b] = [0, c, x];
+  else if (hp < 4) [r, g, b] = [0, x, c];
+  else if (hp < 5) [r, g, b] = [x, 0, c];
+  else [r, g, b] = [c, 0, x];
+  const m = l - c / 2;
+  return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)];
+}
+
+/// Pumpkin-recolored Pane icon for the shared-card footer — the same
+/// halloween_recolor() the Rust tray runs on the window icon. Computed
+/// once; falls back to the normal icon on any failure.
+let paneIconHalloween: string | null = null;
+async function halloweenPaneIcon(): Promise<string | null> {
+  if (paneIconHalloween) return paneIconHalloween;
+  try {
+    const img = new Image();
+    img.src = paneIcon;
+    await img.decode();
+    const cv = document.createElement("canvas");
+    cv.width = img.width;
+    cv.height = img.height;
+    const cx = cv.getContext("2d")!;
+    cx.drawImage(img, 0, 0);
+    const d = cx.getImageData(0, 0, cv.width, cv.height);
+    for (let i = 0; i < d.data.length; i += 4) {
+      if (!d.data[i + 3]) continue;
+      const [h, sat, l] = rgbToHsl(d.data[i], d.data[i + 1], d.data[i + 2]);
+      if (h >= 180 && h <= 250 && sat > 0.25) {
+        const [r, g, b] = hslToRgb(25, 0.9, l * 0.75);
+        d.data[i] = r; d.data[i + 1] = g; d.data[i + 2] = b;
+      }
+    }
+    cx.putImageData(d, 0, 0);
+    paneIconHalloween = cv.toDataURL("image/png");
+  } catch {
+    paneIconHalloween = null;
+  }
+  return paneIconHalloween;
+}
+
 async function shareCard(id: string): Promise<void> {
   const status = document.querySelector("#status")!;
   try {
@@ -2395,6 +2452,14 @@ async function shareCard(id: string): Promise<void> {
     // document is the <svg>, so the attributes are mirrored there for the
     // :root[data-…] rules to keep matching.
     const root = document.documentElement;
+    const halloween = root.dataset.season === "halloween";
+    const footIcon = halloween ? ((await halloweenPaneIcon()) ?? paneIcon) : paneIcon;
+    // "Pane" gets the brand glow only under the season; the wrap happens
+    // after escaping, on the standalone word (en/zh/ru taglines all have it).
+    const footTagline = halloween
+      ? escapeHtml(t("share.tagline")).replace(/Pane/, '<span class="snap-brand">Pane</span>')
+      : escapeHtml(t("share.tagline"));
+    const footPumpkin = halloween ? '<span class="snap-pumpkin"></span>' : "";
     const svgMarkup =
       `<svg xmlns="http://www.w3.org/2000/svg" width="${W2 * S}" height="${H2 * S}" ` +
       `viewBox="0 0 ${W2} ${H2}" data-theme="${root.dataset.theme ?? ""}" ` +
@@ -2408,7 +2473,7 @@ async function shareCard(id: string): Promise<void> {
       // literal "]]>" inside CSS would end the section early, so split it.
       `<style><![CDATA[${css.split("]]>").join("]]]]><![CDATA[>")}]]></style>` +
       new XMLSerializer().serializeToString(clone) +
-      `<div id="snap-foot"><img src="${paneIcon}" alt="" /><span>${escapeHtml(t("share.tagline"))}</span></div>` +
+      `<div id="snap-foot"><img src="${footIcon}" alt="" /><span>${footTagline}</span>${footPumpkin}</div>` +
       `</div></foreignObject></svg>`;
 
     const img = new Image();
@@ -3083,6 +3148,7 @@ function renderAll(): void {
   resetsPopover.onRender();
   if (customizeOpen) renderDrawerBody();
   rebuildTrail();
+  if (popoverOpen) playPendingBursts();
 }
 
 function renderDrawerBody(): void {
@@ -3962,6 +4028,7 @@ async function refresh(force = false, usageOnly = false): Promise<void> {
     }
     const firstData = lastSnapshots.length === 0;
     lastFetch = Date.now();
+    trackResetBursts(lastSnapshots, snapshots);
     lastSnapshots = snapshots;
     scheduleResetRefresh();
     ensureLayout();
@@ -4033,6 +4100,48 @@ function scheduleAutoRefresh(): void {
 let resetRefreshTimer: number | undefined;
 let resetRetryFor: number | null = null;
 const RESET_LONG_WINDOW_MS = 6 * 24 * 3_600_000;
+
+/// A long-window limit that rolled over while the season is active gets a
+/// one-shot pumpkin burst the next time the popover is open (within 6 h).
+const pendingBursts = new Map<string, number>();
+const BURST_MAX_AGE_MS = 6 * 3_600_000;
+
+function trackResetBursts(prev: Snapshot[], next: Snapshot[]): void {
+  if (document.documentElement.dataset.season !== "halloween") return;
+  const oldById = new Map(prev.map((s) => [s.id, s]));
+  for (const s of next) {
+    const old = oldById.get(s.id);
+    if (!old) continue;
+    for (const m of s.metrics) {
+      const om = old.metrics.find((x) => x.label === m.label);
+      if (m.resets_at && om?.resets_at && m.resets_at - om.resets_at >= RESET_LONG_WINDOW_MS) {
+        pendingBursts.set(`${s.id}:${m.label}`, Date.now());
+      }
+    }
+  }
+}
+
+function playPendingBursts(): void {
+  if (!pendingBursts.size) return;
+  const now = Date.now();
+  for (const [key, at] of [...pendingBursts]) {
+    if (now - at > BURST_MAX_AGE_MS) {
+      pendingBursts.delete(key);
+      continue;
+    }
+    const el = document.querySelector<HTMLElement>(
+      `.metric[data-mkey="${CSS.escape(key)}"]`,
+    );
+    if (el) {
+      el.classList.add("just-reset");
+      setTimeout(() => el.classList.remove("just-reset"), 1600);
+      pendingBursts.delete(key);
+    }
+  }
+}
+
+let popoverOpen = false;
+
 
 /// Long-window verdicts for metrics that report no period, keyed by
 /// "<snapshot id>:<label>". Decided once per observed resets_at (a reset
@@ -5699,6 +5808,9 @@ function syncSettingsControls(): void {
 // ---------------------------------------------------------------------------
 
 window.addEventListener("DOMContentLoaded", () => {
+  window.addEventListener("blur", () => {
+    popoverOpen = false;
+  });
   const appLogo = document.querySelector<HTMLElement>("#app-logo")!;
   appLogo.innerHTML = `<img src="${paneLogo}" alt="Pane" />`;
   // Party mode, the easy way: triple-click the logo. (The Konami code
@@ -6076,6 +6188,7 @@ window.addEventListener("DOMContentLoaded", () => {
   });
 
   void listen("popover-shown", () => {
+    popoverOpen = true;
     void checkForUpdate(true);
     void applySeason();
     // Always reopen on the main page, at the top — leftover Customize/
@@ -6091,6 +6204,7 @@ window.addEventListener("DOMContentLoaded", () => {
       starPromptTimer = undefined;
     }
     resetsPopover.dismiss();
+    playPendingBursts();
     // A fresh update's notes present on the first open after launch.
     if (pendingWhatsNew) {
       showChangelogDialog(t("dialog.whatsNew", { version: appVersion }), pendingWhatsNew);

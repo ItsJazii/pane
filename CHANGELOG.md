@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Halloween look until Nov 7: pumpkin-orange meters, flying bats, cobwebs (also on shared card images) and an orange tray icon. Turn it off in Settings → Seasonal themes.
+- Halloween look until Nov 7: pumpkin-orange meters, flying bats, cobwebs (also on shared card images), an orange tray icon, a ghost and jack-o'-lantern on bars that are about to run out, a pumpkin burst when a weekly limit resets, 🎃/👻 notification titles, and a pumpkin Pane logo on shared cards. Turn it off in Settings → Seasonal themes.
 
 ## 0.4.63 — 2026-10-24
 

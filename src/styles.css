@@ -3729,3 +3729,134 @@ body.reduce-anim .bats {
     display: none !important;
   }
 }
+
+/* --------------------------------------------------- share footer brand */
+/* "Pane" in the snapshot tagline gets the pumpkin glow; the icon itself is
+   recolored in JS (same hue-180..250 -> 25 mapping the Rust tray uses) and
+   a small pumpkin rides after the text. */
+:root[data-season="halloween"] .snap-brand {
+  font-weight: 650;
+  color: #fb923c;
+  text-shadow: 0 0 6px rgb(249 115 22 / 0.55);
+}
+:root[data-season="halloween"][data-theme="light"] .snap-brand {
+  color: #ea580c;
+  text-shadow: 0 0 4px rgb(234 88 12 / 0.35);
+}
+:root[data-season="halloween"] .snap-pumpkin {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  margin-left: 1px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8.6 4.6C8.9 3.1 9.7 2.1 11 1.4' fill='none' stroke='%233fa04e' stroke-width='1.5' stroke-linecap='round'/%3E%3Cellipse cx='8' cy='9.8' rx='6.6' ry='5.5' fill='%23f97316'/%3E%3Cellipse cx='4.9' cy='9.8' rx='1.7' ry='5' fill='%23ea580c'/%3E%3Cellipse cx='11.1' cy='9.8' rx='1.7' ry='5' fill='%23ea580c'/%3E%3Cellipse cx='8' cy='9.8' rx='1.5' ry='5.3' fill='%23fb923c'/%3E%3C/svg%3E");
+  background-size: contain;
+  background-repeat: no-repeat;
+}
+
+/* The live widget title gets the same brand glow (it IS just "Pane"). */
+:root[data-season="halloween"] #widget-bar .widget-title {
+  color: #fb923c;
+  text-shadow: 0 0 6px rgb(249 115 22 / 0.55);
+}
+:root[data-season="halloween"][data-theme="light"] #widget-bar .widget-title {
+  color: #ea580c;
+  text-shadow: 0 0 4px rgb(234 88 12 / 0.35);
+}
+
+/* ------------------------------------------------------- limit effects */
+/* A tiny ghost peeks off the end of a run-out bar. The thin dark outline
+   keeps it legible on the light theme too. Colors stay as usual — the
+   effect is the ghost, not a new palette. */
+@keyframes fx-ghostbob {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-2px); }
+}
+:root[data-season="halloween"] .fill.low {
+  position: relative;
+}
+:root[data-season="halloween"] .fill.low::after {
+  content: "";
+  position: absolute;
+  right: -5px;
+  top: -9px;
+  width: 10px;
+  height: 12px;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 12'%3E%3Cpath d='M5 0.8c2.6 0 4.2 2 4.2 4.6V11l-1.4-1.1L6.4 11 5 9.9 3.6 11 2.2 9.9 0.8 11V5.4C0.8 2.8 2.4 0.8 5 0.8Z' fill='%23fdfdfd' stroke='%23343a46' stroke-width='0.7'/%3E%3Ccircle cx='3.6' cy='4.8' r='0.8' fill='%23222028'/%3E%3Ccircle cx='6.4' cy='4.8' r='0.8' fill='%23222028'/%3E%3C/svg%3E");
+  background-size: contain;
+  background-repeat: no-repeat;
+  animation: fx-ghostbob 2s ease-in-out infinite;
+}
+
+/* Jack-o'-lantern replaces the flame in running-out notes — pure CSS swap
+   (path hidden), so the markup stays untouched. */
+:root[data-season="halloween"] .pace-flame {
+  width: 12px;
+  height: 12px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cellipse cx='8' cy='9.5' rx='7' ry='5.8' fill='%23f97316'/%3E%3Crect x='7.2' y='0.8' width='1.7' height='3' rx='0.8' fill='%23365e1f'/%3E%3Cpath d='M3.6 7.4L5.4 5.4L7.2 7.4Z' fill='%231a1620'/%3E%3Cpath d='M8.8 7.4L10.6 5.4L12.4 7.4Z' fill='%231a1620'/%3E%3Cpath d='M3.5 10.6L5 11.8L6.5 10.8L8 11.8L9.5 10.8L11 11.8L12.5 10.6V12.8H3.5Z' fill='%231a1620'/%3E%3C/svg%3E");
+  background-size: contain;
+  background-repeat: no-repeat;
+}
+:root[data-season="halloween"] .pace-flame path {
+  display: none;
+}
+
+/* --------------------------------------------------------- reset burst */
+/* One-shot: shimmer sweeps the fill once while a strip of tiny pumpkins
+   and bats pops above the bar and fades upward. .metric.just-reset is
+   applied once by JS, then removed after the animation. */
+@keyframes fx-shimmer {
+  0%   { background-position: -60% 0; opacity: 1; }
+  80%  { opacity: 1; }
+  100% { background-position: 170% 0; opacity: 0; }
+}
+@keyframes fx-burst {
+  0%   { transform: translateY(7px); opacity: 0; }
+  15%  { opacity: 1; }
+  70%  { transform: translateY(-8px); opacity: 1; }
+  100% { transform: translateY(-15px); opacity: 0; }
+}
+:root[data-season="halloween"] .metric.just-reset {
+  position: relative;
+}
+:root[data-season="halloween"] .metric.just-reset .fill {
+  position: relative;
+}
+:root[data-season="halloween"] .metric.just-reset .fill::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  pointer-events: none;
+  background-image: linear-gradient(90deg, transparent 0%, rgb(255 196 110 / 0.95) 50%, transparent 100%);
+  background-size: 45% 100%;
+  background-repeat: no-repeat;
+  animation: fx-shimmer 1.4s ease-out 1 forwards;
+}
+:root[data-season="halloween"] .metric.just-reset::after {
+  content: "";
+  position: absolute;
+  left: 6%;
+  right: 6%;
+  top: 14px;
+  height: 18px;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20viewBox%3D%270%200%20300%2018%27%3E%3Cg%20transform%3D%27translate%288%2C7%29%20scale%280.68%29%27%3E%3Cpath%20d%3D%27M8.6%204.6C8.9%203.1%209.7%202.1%2011%201.4%27%20fill%3D%27none%27%20stroke%3D%27%233fa04e%27%20stroke-width%3D%271.5%27%20stroke-linecap%3D%27round%27/%3E%3Cellipse%20cx%3D%278%27%20cy%3D%279.8%27%20rx%3D%276.6%27%20ry%3D%275.5%27%20fill%3D%27%23f97316%27/%3E%3Cellipse%20cx%3D%274.9%27%20cy%3D%279.8%27%20rx%3D%271.7%27%20ry%3D%275%27%20fill%3D%27%23ea580c%27/%3E%3Cellipse%20cx%3D%2711.1%27%20cy%3D%279.8%27%20rx%3D%271.7%27%20ry%3D%275%27%20fill%3D%27%23ea580c%27/%3E%3Cellipse%20cx%3D%278%27%20cy%3D%279.8%27%20rx%3D%271.5%27%20ry%3D%275.3%27%20fill%3D%27%23fb923c%27/%3E%3C/g%3E%3Cg%20transform%3D%27translate%2862%2C1%29%20scale%280.22%29%27%3E%3Cg%20fill%3D%27%237a5aa0%27%3E%3Cpath%20d%3D%27M30%2013C24%204%2012%204%205%209Q7%2011%2012%2016Q14%2013.5%2019%2019Q22%2016.5%2027%2020.5L29%2016Z%27/%3E%3Cpath%20d%3D%27M34%2013C40%204%2052%204%2059%209Q57%2011%2052%2016Q50%2013.5%2045%2019Q42%2016.5%2037%2020.5L35%2016Z%27/%3E%3Cpath%20d%3D%27M29.6%209.8L28.6%204.6L31.4%207.6Z%27/%3E%3Cpath%20d%3D%27M34.4%209.8L35.4%204.6L32.6%207.6Z%27/%3E%3Ccircle%20cx%3D%2732%27%20cy%3D%2711%27%20r%3D%273%27/%3E%3Cellipse%20cx%3D%2732%27%20cy%3D%2717.5%27%20rx%3D%273.4%27%20ry%3D%275.2%27/%3E%3C/g%3E%3C/g%3E%3Cg%20transform%3D%27translate%28116%2C8%29%20scale%280.68%29%27%3E%3Cpath%20d%3D%27M8.6%204.6C8.9%203.1%209.7%202.1%2011%201.4%27%20fill%3D%27none%27%20stroke%3D%27%233fa04e%27%20stroke-width%3D%271.5%27%20stroke-linecap%3D%27round%27/%3E%3Cellipse%20cx%3D%278%27%20cy%3D%279.8%27%20rx%3D%276.6%27%20ry%3D%275.5%27%20fill%3D%27%23f97316%27/%3E%3Cellipse%20cx%3D%274.9%27%20cy%3D%279.8%27%20rx%3D%271.7%27%20ry%3D%275%27%20fill%3D%27%23ea580c%27/%3E%3Cellipse%20cx%3D%2711.1%27%20cy%3D%279.8%27%20rx%3D%271.7%27%20ry%3D%275%27%20fill%3D%27%23ea580c%27/%3E%3Cellipse%20cx%3D%278%27%20cy%3D%279.8%27%20rx%3D%271.5%27%20ry%3D%275.3%27%20fill%3D%27%23fb923c%27/%3E%3C/g%3E%3Cg%20transform%3D%27translate%28170%2C2%29%20scale%280.22%29%27%3E%3Cg%20fill%3D%27%237a5aa0%27%3E%3Cpath%20d%3D%27M30%2013C24%204%2012%204%205%209Q7%2011%2012%2016Q14%2013.5%2019%2019Q22%2016.5%2027%2020.5L29%2016Z%27/%3E%3Cpath%20d%3D%27M34%2013C40%204%2052%204%2059%209Q57%2011%2052%2016Q50%2013.5%2045%2019Q42%2016.5%2037%2020.5L35%2016Z%27/%3E%3Cpath%20d%3D%27M29.6%209.8L28.6%204.6L31.4%207.6Z%27/%3E%3Cpath%20d%3D%27M34.4%209.8L35.4%204.6L32.6%207.6Z%27/%3E%3Ccircle%20cx%3D%2732%27%20cy%3D%2711%27%20r%3D%273%27/%3E%3Cellipse%20cx%3D%2732%27%20cy%3D%2717.5%27%20rx%3D%273.4%27%20ry%3D%275.2%27/%3E%3C/g%3E%3C/g%3E%3Cg%20transform%3D%27translate%28224%2C6%29%20scale%280.68%29%27%3E%3Cpath%20d%3D%27M8.6%204.6C8.9%203.1%209.7%202.1%2011%201.4%27%20fill%3D%27none%27%20stroke%3D%27%233fa04e%27%20stroke-width%3D%271.5%27%20stroke-linecap%3D%27round%27/%3E%3Cellipse%20cx%3D%278%27%20cy%3D%279.8%27%20rx%3D%276.6%27%20ry%3D%275.5%27%20fill%3D%27%23f97316%27/%3E%3Cellipse%20cx%3D%274.9%27%20cy%3D%279.8%27%20rx%3D%271.7%27%20ry%3D%275%27%20fill%3D%27%23ea580c%27/%3E%3Cellipse%20cx%3D%2711.1%27%20cy%3D%279.8%27%20rx%3D%271.7%27%20ry%3D%275%27%20fill%3D%27%23ea580c%27/%3E%3Cellipse%20cx%3D%278%27%20cy%3D%279.8%27%20rx%3D%271.5%27%20ry%3D%275.3%27%20fill%3D%27%23fb923c%27/%3E%3C/g%3E%3Cg%20transform%3D%27translate%28278%2C0%29%20scale%280.22%29%27%3E%3Cg%20fill%3D%27%237a5aa0%27%3E%3Cpath%20d%3D%27M30%2013C24%204%2012%204%205%209Q7%2011%2012%2016Q14%2013.5%2019%2019Q22%2016.5%2027%2020.5L29%2016Z%27/%3E%3Cpath%20d%3D%27M34%2013C40%204%2052%204%2059%209Q57%2011%2052%2016Q50%2013.5%2045%2019Q42%2016.5%2037%2020.5L35%2016Z%27/%3E%3Cpath%20d%3D%27M29.6%209.8L28.6%204.6L31.4%207.6Z%27/%3E%3Cpath%20d%3D%27M34.4%209.8L35.4%204.6L32.6%207.6Z%27/%3E%3Ccircle%20cx%3D%2732%27%20cy%3D%2711%27%20r%3D%273%27/%3E%3Cellipse%20cx%3D%2732%27%20cy%3D%2717.5%27%20rx%3D%273.4%27%20ry%3D%275.2%27/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+  background-size: 100% 18px;
+  background-repeat: no-repeat;
+  animation: fx-burst 1.4s ease-out 1 forwards;
+}
+
+/* Reduce-motion: the global animation clamp doesn't cover ::before/::after
+   reliably, so the burst pseudos hide outright. The ghost stays — its
+   static pose reads fine. */
+body.reduce-anim .metric.just-reset::after,
+body.reduce-anim .metric.just-reset .fill::before {
+  display: none !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  .metric.just-reset::after,
+  .metric.just-reset .fill::before {
+    display: none !important;
+  }
+}

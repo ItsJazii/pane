@@ -567,7 +567,7 @@ fn halloween_window(d: chrono::NaiveDate) -> bool {
 
 /// The active seasonal theme, if any. `seasonalThemes` defaults on;
 /// an explicit false disables it.
-fn active_season(cfg: &Value, today: chrono::NaiveDate) -> Option<&'static str> {
+pub(crate) fn active_season(cfg: &Value, today: chrono::NaiveDate) -> Option<&'static str> {
     if cfg.get("seasonalThemes").and_then(|v| v.as_bool()) == Some(false) {
         return None;
     }
