@@ -232,6 +232,7 @@ export interface Config {
   starPromptLastMs: number;
   reduceAnimations: boolean;
   seasonalThemes: boolean;
+  seasonShown: string;
   locale: LocalePref;
   stepfunPlanCredits: number | null;
   widgetMode: boolean;
@@ -272,6 +273,7 @@ const FRONTEND_CONFIG_KEYS = [
   "starPromptLastMs",
   "reduceAnimations",
   "seasonalThemes",
+  "seasonShown",
   "locale",
   "stepfunPlanCredits",
   "widgetMode",
@@ -487,6 +489,7 @@ let config: Config = {
   starPromptLastMs: 0,
   reduceAnimations: false,
   seasonalThemes: true,
+  seasonShown: "",
   locale: "auto",
   stepfunPlanCredits: null,
   widgetMode: false,
@@ -2740,13 +2743,9 @@ let batsLayer: HTMLElement | null = null;
 /// tray and the popover always agree). `data-season` on <html> activates
 /// the stylesheet block; the bat layer is injected here and removed when
 /// the season ends or the setting is off.
-async function applySeason(): Promise<void> {
-  let season: string | null = null;
-  try {
-    season = await invoke<string | null>("active_season_now");
-  } catch {
-    season = null;
-  }
+/// Applies the season to the DOM: data-season on <html> plus the bat
+/// layer (injected lazily, removed when the season ends).
+function setSeasonDom(season: string | null): void {
   if (season === "halloween") {
     document.documentElement.dataset.season = season;
     if (!batsLayer) {
@@ -2764,6 +2763,48 @@ async function applySeason(): Promise<void> {
     batsLayer?.remove();
     batsLayer = null;
   }
+}
+
+let seasonWiping = false;
+
+/// Syncs the popover's look with the active season. When the look is
+/// changing and the window is visible, the new look sweeps in from the top
+/// (View Transitions clip-path wipe, like toggleTheme's circle); otherwise
+/// it switches instantly. While hidden we keep whatever the user last saw
+/// (config.seasonShown) so the next visible open can play the wipe.
+async function applySeason(opts: { animate?: boolean } = {}): Promise<void> {
+  let season: string | null = null;
+  try {
+    season = await invoke<string | null>("active_season_now");
+  } catch {
+    season = null;
+  }
+  const target = season ?? "";
+  const current = document.documentElement.dataset.season ?? "";
+  const visible = popoverOpen || config.widgetMode;
+  if (target === current) {
+    if (config.seasonShown !== target) void patchConfig({ seasonShown: target });
+    return;
+  }
+  // Hidden and the user has never seen this look (or the look changed since
+  // they did): hold the old one until a visible open can play the wipe.
+  if (!visible && target !== config.seasonShown) return;
+
+  const doc = document as Document & {
+    startViewTransition?: (cb: () => void) => { finished: Promise<void> };
+  };
+  if (opts.animate && visible && !reduceMotion() && doc.startViewTransition && !seasonWiping) {
+    seasonWiping = true;
+    document.documentElement.classList.add("season-wipe");
+    const transition = doc.startViewTransition(() => setSeasonDom(season));
+    transition.finished.finally(() => {
+      seasonWiping = false;
+      document.documentElement.classList.remove("season-wipe");
+    });
+  } else {
+    setSeasonDom(season);
+  }
+  if (config.seasonShown !== target) void patchConfig({ seasonShown: target });
 }
 
 function applyAppearance(): void {
@@ -3922,7 +3963,7 @@ async function forceUsageRefreshAttempt(usageOnly = true): Promise<void> {
 }
 
 async function refresh(force = false, usageOnly = false): Promise<void> {
-  void applySeason();
+  void applySeason({ animate: popoverOpen || config.widgetMode });
   if (refreshing) {
     // Remember a forced request instead of dropping it: the in-flight
     // fetch may have started before whatever prompted this one (a saved
@@ -5636,11 +5677,11 @@ async function initSettings(): Promise<void> {
   seasonal.addEventListener("change", () => {
     // The tray icon recolors Rust-side, so it must re-sync too.
     void patchConfig({ seasonalThemes: seasonal.checked }).then(() => {
-      void applySeason();
+      void applySeason({ animate: true });
       requestTraySync();
     });
   });
-  void applySeason();
+  void applySeason({ animate: false });
 
   const shortcut = document.querySelector<HTMLInputElement>("#shortcut")!;
   shortcut.value = config.shortcut;
@@ -5738,6 +5779,7 @@ async function resetAllSettings(): Promise<void> {
     showTotalSpend: true,
     reduceAnimations: false,
     seasonalThemes: true,
+    seasonShown: "",
     locale: "auto",
     stepfunPlanCredits: null,
     widgetMode: false,
@@ -6189,7 +6231,9 @@ window.addEventListener("DOMContentLoaded", () => {
   void listen("popover-shown", () => {
     popoverOpen = true;
     void checkForUpdate(true);
-    void applySeason();
+    // popover-shown can fire a frame before paint; the wipe needs the old
+    // frame on screen first.
+    requestAnimationFrame(() => void applySeason({ animate: true }));
     // Always reopen on the main page, at the top — leftover Customize/
     // Settings panels, a stale confirm dialog, or a stale scroll position
     // from the previous visit feel like the app is stuck mid-page.

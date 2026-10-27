@@ -148,6 +148,7 @@ fn config_with_defaults(mut cfg: Value) -> Value {
     obj.entry("starPromptLastMs").or_insert(json!(0));
     obj.entry("reduceAnimations").or_insert(json!(false));
     obj.entry("seasonalThemes").or_insert(json!(true));
+    obj.entry("seasonShown").or_insert(json!(""));
     obj.entry("locale").or_insert(json!("auto"));
     // StepFun's plan tier pick — null = "Not set" (Credits row stays an
     // estimate-only text row instead of a bar against a monthly pool).
@@ -199,6 +200,7 @@ const CONFIG_KEYS: &[&str] = &[
     "glassEffects",
     "shortcut",
     "seasonalThemes",
+    "seasonShown",
     "proxy",
     "showTotalSpend",
     "welcomeDismissed",
