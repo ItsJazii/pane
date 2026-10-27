@@ -3232,3 +3232,500 @@ body.widget-on:not(.no-glass):not(.widget-collapsed) #widget-bar {
     0 8px 32px -8px rgba(0, 0, 0, 0.1),
     inset 0 1px 1.5px rgba(255, 255, 255, 0.6);
 }
+/* ============================================================================
+   Halloween season — enable with <html data-season="halloween">.
+   Pure CSS + three .bat elements; everything else rides on theme tokens, so
+   this block can be appended to styles.css unchanged. Dark is the base theme;
+   [data-theme="light"] combines on top of it.
+   ============================================================================ */
+
+:root[data-season="halloween"] {
+  --chart-blue: #f97316; /* pumpkin orange — every meter + fill inherits it */
+  --season-accent: #a855f7; /* witch purple for small highlights */
+  --background: #0c0a10;
+  --card: #1a1620;
+  --border: #2e2738;
+  --accent: #2a2233;
+  --muted: #2a2233;
+}
+
+:root[data-season="halloween"][data-theme="light"] {
+  --chart-blue: #ea580c;
+  --season-accent: #9333ea;
+  --background: #ffffff;
+  --card: #fffaf5;
+  --border: #f2e3d5;
+  --accent: #f4f4f5;
+  --muted: #f4f4f5;
+}
+
+/* Purple replaces blue wherever the app used --chart-blue as a *text/link*
+   accent rather than a meter fill (meters keep the orange token). */
+:root[data-season="halloween"] .rs-banner.info {
+  color: var(--season-accent);
+  background: rgb(168 85 247 / 0.12);
+}
+
+:root[data-season="halloween"] .status-dot.normal,
+:root[data-season="halloween"] .rs-dot.normal {
+  background: var(--season-accent);
+}
+
+/* Focus rings go purple too. */
+:root[data-season="halloween"] input[type="number"]:focus-visible,
+:root[data-season="halloween"] input[type="password"]:focus-visible,
+:root[data-season="halloween"] select:focus-visible,
+:root[data-season="halloween"] .ona-add input[type="text"]:focus-visible,
+:root[data-season="halloween"] .ona-edit input[type="text"]:focus-visible,
+:root[data-season="halloween"] .ona-key-add input[type="text"]:focus-visible,
+:root[data-season="halloween"] .ona-key-add input[type="password"]:focus-visible,
+:root[data-season="halloween"] .ona-key-edit input[type="text"]:focus-visible,
+:root[data-season="halloween"] .ona-key-edit input[type="password"]:focus-visible {
+  border-color: var(--season-accent);
+  box-shadow: 0 0 0 3px rgb(168 85 247 / 0.18);
+}
+
+:root[data-season="halloween"] .toggle input[type="checkbox"]:focus-visible {
+  box-shadow: 0 0 0 3px rgb(168 85 247 / 0.22);
+}
+
+/* The active trail tick is the one bright spot in the sidebar — purple. */
+:root[data-season="halloween"] .trail-tick.active {
+  background: var(--season-accent);
+}
+
+/* ------------------------------------------------------------ pumpkin logo */
+
+/* A tiny jack-o'-pumpkin perched on the app logo's bottom-right corner. */
+:root[data-season="halloween"] #app-logo {
+  position: relative;
+}
+
+:root[data-season="halloween"] #app-logo::after {
+  content: "";
+  position: absolute;
+  right: -5px;
+  bottom: -4px;
+  width: 11px;
+  height: 11px;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8.6 4.6C8.9 3.1 9.7 2.1 11 1.4' fill='none' stroke='%233fa04e' stroke-width='1.5' stroke-linecap='round'/%3E%3Cellipse cx='8' cy='9.8' rx='6.6' ry='5.5' fill='%23f97316'/%3E%3Cellipse cx='4.9' cy='9.8' rx='1.7' ry='5' fill='%23ea580c'/%3E%3Cellipse cx='11.1' cy='9.8' rx='1.7' ry='5' fill='%23ea580c'/%3E%3Cellipse cx='8' cy='9.8' rx='1.5' ry='5.3' fill='%23fb923c'/%3E%3C/svg%3E");
+  background-size: contain;
+  background-repeat: no-repeat;
+}
+
+/* --------------------------------------------------------------- cobweb */
+/* Faint line-art web in the top-right of the main column. Masked so the
+   threads take the theme's foreground color in both modes. */
+:root[data-season="halloween"] .main-col::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 70px;
+  height: 70px;
+  z-index: 2;
+  pointer-events: none;
+  background: var(--foreground);
+  opacity: 0.14;
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 70 70' fill='none' stroke='black' stroke-width='1.2' stroke-linecap='round'%3E%3Cpath d='M70 0L10 0M70 0L14.6 23M70 0L27.6 42.4M70 0L47 55.4M70 0L70 60'/%3E%3Cpath d='M52 0Q56.3 3 53.7 7.6Q58.9 8.5 58.4 13.8Q63.5 12.4 65.3 17.4Q68.2 13.9 70 18'/%3E%3Cpath d='M32 0Q41.1 6.4 35.6 16.1Q46.5 18 45.6 29.1Q56.3 26.3 60.2 36.7Q66.1 29.4 70 38'/%3E%3Cpath d='M12 0Q25.8 9.8 17.4 24.5Q34.1 27.5 32.7 44.4Q49.1 40.1 55 56Q64.1 44.8 70 58'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 70 70' fill='none' stroke='black' stroke-width='1.2' stroke-linecap='round'%3E%3Cpath d='M70 0L10 0M70 0L14.6 23M70 0L27.6 42.4M70 0L47 55.4M70 0L70 60'/%3E%3Cpath d='M52 0Q56.3 3 53.7 7.6Q58.9 8.5 58.4 13.8Q63.5 12.4 65.3 17.4Q68.2 13.9 70 18'/%3E%3Cpath d='M32 0Q41.1 6.4 35.6 16.1Q46.5 18 45.6 29.1Q56.3 26.3 60.2 36.7Q66.1 29.4 70 38'/%3E%3Cpath d='M12 0Q25.8 9.8 17.4 24.5Q34.1 27.5 32.7 44.4Q49.1 40.1 55 56Q64.1 44.8 70 58'/%3E%3C/svg%3E");
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+}
+
+:root[data-season="halloween"][data-theme="light"] .main-col::before {
+  opacity: 0.2;
+}
+
+/* Shared card (⧉ snapshot): the same web always rides in the card's
+   top-right corner during Halloween. .snap-card only exists inside the
+   serialized share image, so this rule is inert in the live popover. */
+:root[data-season="halloween"] .snap-card {
+  position: relative;
+}
+
+:root[data-season="halloween"] .snap-card::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 56px;
+  height: 56px;
+  border-top-right-radius: 12px; /* follows .card-panel's corner */
+  pointer-events: none;
+  background: var(--foreground);
+  opacity: 0.18;
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 70 70' fill='none' stroke='black' stroke-width='1.2' stroke-linecap='round'%3E%3Cpath d='M70 0L10 0M70 0L14.6 23M70 0L27.6 42.4M70 0L47 55.4M70 0L70 60'/%3E%3Cpath d='M52 0Q56.3 3 53.7 7.6Q58.9 8.5 58.4 13.8Q63.5 12.4 65.3 17.4Q68.2 13.9 70 18'/%3E%3Cpath d='M32 0Q41.1 6.4 35.6 16.1Q46.5 18 45.6 29.1Q56.3 26.3 60.2 36.7Q66.1 29.4 70 38'/%3E%3Cpath d='M12 0Q25.8 9.8 17.4 24.5Q34.1 27.5 32.7 44.4Q49.1 40.1 55 56Q64.1 44.8 70 58'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 70 70' fill='none' stroke='black' stroke-width='1.2' stroke-linecap='round'%3E%3Cpath d='M70 0L10 0M70 0L14.6 23M70 0L27.6 42.4M70 0L47 55.4M70 0L70 60'/%3E%3Cpath d='M52 0Q56.3 3 53.7 7.6Q58.9 8.5 58.4 13.8Q63.5 12.4 65.3 17.4Q68.2 13.9 70 18'/%3E%3Cpath d='M32 0Q41.1 6.4 35.6 16.1Q46.5 18 45.6 29.1Q56.3 26.3 60.2 36.7Q66.1 29.4 70 38'/%3E%3Cpath d='M12 0Q25.8 9.8 17.4 24.5Q34.1 27.5 32.7 44.4Q49.1 40.1 55 56Q64.1 44.8 70 58'/%3E%3C/svg%3E");
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+}
+
+:root[data-season="halloween"][data-theme="light"] .snap-card::after {
+  opacity: 0.24;
+}
+
+/* ------------------------------------------------------------------ bats */
+/* Three anatomical bats — ears, eyes, and membrane wings with scalloped
+   trailing edges that actually rotate around the shoulder — drift across
+   the popover on curved offset paths. Pure CSS; the .bats layer and .bat
+   markup are injected by JS in the app. Popover is 380x600 px; each path
+   starts/ends ~60 px off-canvas. */
+.bats {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 40; /* over cards, under Settings/Customize (50) and the glass footer (55) */
+  overflow: hidden;
+  pointer-events: none;
+}
+
+:root[data-season="halloween"] .bats {
+  display: block;
+}
+
+.bat {
+  position: absolute;
+  top: 0;
+  left: 0;
+  offset-rotate: 0deg;
+  will-change: offset-distance;
+  animation: bat-travel 20s ease-in-out infinite backwards;
+  filter: drop-shadow(0 0 1.5px rgb(251 146 60 / 0.6)); /* pumpkin rim light */
+}
+
+:root[data-season="halloween"][data-theme="light"] .bat {
+  filter: none;
+  opacity: 0.85;
+}
+
+/* Gentle banking into the swoops — offsets are flat, the tilt does the
+   turning. Delayed with the travel so the sway lands inside the crossing. */
+.bat-bank {
+  animation: bat-bank 20s ease-in-out infinite backwards;
+}
+
+.bat-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible; /* wingtips swing above the viewBox at the up pose */
+  color: #3a274d;
+  fill: currentColor;
+}
+
+:root[data-season="halloween"][data-theme="light"] .bat-svg {
+  color: #1f1629;
+}
+
+.bats .wing {
+  transform-box: view-box;
+  fill: #45305c; /* membrane a touch lighter than the body */
+}
+.bats .wing-l {
+  transform-origin: 30px 13px; /* left shoulder joint */
+  animation: wing-flap-l 0.25s ease-in-out infinite;
+}
+.bats .wing-r {
+  transform-origin: 34px 13px; /* right shoulder joint */
+  animation: wing-flap-r 0.25s ease-in-out infinite;
+}
+.bats .body {
+  animation: body-bob 0.25s ease-in-out infinite;
+}
+.bats .eye {
+  fill: #fb923c; /* lit-pumpkin eyes */
+}
+:root[data-season="halloween"][data-theme="light"] .bats .wing {
+  fill: #1f1629;
+}
+:root[data-season="halloween"][data-theme="light"] .bats .eye {
+  fill: #f97316;
+}
+
+/* bat-1 — medium, upper third, left to right. */
+.bat-1 {
+  width: 34px;
+  offset-path: path("M-60 80C60 30 140 110 220 60C300 15 390 95 470 60");
+}
+.bat-1 .wing-l,
+.bat-1 .wing-r {
+  animation-duration: 0.25s;
+}
+.bat-1 .body {
+  animation-duration: 0.25s;
+}
+
+/* bat-2 — small and far away: right to left (art mirrored), dimmer,
+   slightly soft for depth. */
+.bat-2 {
+  width: 26px;
+  opacity: 0.6;
+  offset-path: path("M450 300C360 255 280 340 190 295C115 258 35 335 -70 295");
+  animation-delay: 2s;
+}
+:root[data-season="halloween"][data-theme="light"] .bat-2 {
+  opacity: 0.45;
+}
+.bat-2 .bat-svg {
+  transform: scaleX(-1);
+}
+.bat-2 .bat-bank {
+  animation-delay: 2s;
+}
+.bat-2 .wing-l,
+.bat-2 .wing-r {
+  animation-duration: 0.22s;
+}
+.bat-2 .body {
+  animation-duration: 0.22s;
+}
+
+/* bat-3 — big and near, lower half, left to right. Its wings run the long
+   baked cycle below: ~4 s of rapid flaps, a ~1 s glide (wings held slightly
+   up, body floats), then flapping resumes. */
+.bat-3 {
+  width: 48px;
+  offset-path: path("M-70 420C60 380 150 475 235 435C320 395 400 470 480 420");
+  animation-delay: 11s;
+}
+.bat-3 .bat-bank {
+  animation-delay: 11s;
+}
+.bat-3 .wing-l {
+  animation: wing-flap3-l 7s ease-in-out infinite;
+}
+.bat-3 .wing-r {
+  animation: wing-flap3-r 7s ease-in-out infinite;
+}
+.bat-3 .body {
+  animation: body-bob3 7s ease-in-out infinite;
+}
+
+/* Crossing occupies 0-30% (~6 s) of the 20 s cycle; the rest is spent
+   parked off-canvas, so the popover is often empty. */
+@keyframes bat-travel {
+  0% {
+    offset-distance: 0%;
+  }
+  30%,
+  100% {
+    offset-distance: 100%;
+  }
+}
+
+@keyframes bat-bank {
+  0% {
+    transform: rotate(-7deg);
+  }
+  8% {
+    transform: rotate(6deg);
+  }
+  16% {
+    transform: rotate(-7deg);
+  }
+  24% {
+    transform: rotate(6deg);
+  }
+  30%,
+  100% {
+    transform: rotate(0deg);
+  }
+}
+
+/* Shoulder-joint flap: fast downstroke (~40% of the beat), slower recovery,
+   slight scaleY squash on the downstroke for foreshortening. */
+@keyframes wing-flap-l {
+  0% {
+    transform: rotate(38deg) scaleY(1);
+  }
+  40% {
+    transform: rotate(-32deg) scaleY(0.8);
+  }
+  70% {
+    transform: rotate(-6deg) scaleY(0.95);
+  }
+  100% {
+    transform: rotate(38deg) scaleY(1);
+  }
+}
+@keyframes wing-flap-r {
+  0% {
+    transform: rotate(-38deg) scaleY(1);
+  }
+  40% {
+    transform: rotate(32deg) scaleY(0.8);
+  }
+  70% {
+    transform: rotate(6deg) scaleY(0.95);
+  }
+  100% {
+    transform: rotate(-38deg) scaleY(1);
+  }
+}
+@keyframes body-bob {
+  0% {
+    transform: translateY(0);
+  }
+  40% {
+    transform: translateY(-1.5px);
+  }
+  100% {
+    transform: translateY(0);
+  }
+}
+
+/* bat-3's long cycle: baked 0.3 s flaps until 60%, glide 62.5-77% (~1 s,
+   wings held slightly up), flapping resumes to the loop point. */
+@keyframes wing-flap3-l {
+  0.0% { transform: rotate(38deg) scaleY(1); }
+  1.7% { transform: rotate(-32deg) scaleY(0.8); }
+  4.3% { transform: rotate(38deg) scaleY(1); }
+  6.0% { transform: rotate(-32deg) scaleY(0.8); }
+  8.6% { transform: rotate(38deg) scaleY(1); }
+  10.3% { transform: rotate(-32deg) scaleY(0.8); }
+  12.9% { transform: rotate(38deg) scaleY(1); }
+  14.6% { transform: rotate(-32deg) scaleY(0.8); }
+  17.1% { transform: rotate(38deg) scaleY(1); }
+  18.9% { transform: rotate(-32deg) scaleY(0.8); }
+  21.4% { transform: rotate(38deg) scaleY(1); }
+  23.1% { transform: rotate(-32deg) scaleY(0.8); }
+  25.7% { transform: rotate(38deg) scaleY(1); }
+  27.4% { transform: rotate(-32deg) scaleY(0.8); }
+  30.0% { transform: rotate(38deg) scaleY(1); }
+  31.7% { transform: rotate(-32deg) scaleY(0.8); }
+  34.3% { transform: rotate(38deg) scaleY(1); }
+  36.0% { transform: rotate(-32deg) scaleY(0.8); }
+  38.6% { transform: rotate(38deg) scaleY(1); }
+  40.3% { transform: rotate(-32deg) scaleY(0.8); }
+  42.9% { transform: rotate(38deg) scaleY(1); }
+  44.6% { transform: rotate(-32deg) scaleY(0.8); }
+  47.1% { transform: rotate(38deg) scaleY(1); }
+  48.9% { transform: rotate(-32deg) scaleY(0.8); }
+  51.4% { transform: rotate(38deg) scaleY(1); }
+  53.1% { transform: rotate(-32deg) scaleY(0.8); }
+  55.7% { transform: rotate(38deg) scaleY(1); }
+  57.4% { transform: rotate(-32deg) scaleY(0.8); }
+  60.0% { transform: rotate(38deg) scaleY(1); }
+  62.5% { transform: rotate(18deg) scaleY(0.95); }
+  77.0% { transform: rotate(18deg) scaleY(0.95); }
+  78.2% { transform: rotate(-32deg) scaleY(0.8); }
+  81.0% { transform: rotate(38deg) scaleY(1); }
+  82.6% { transform: rotate(-32deg) scaleY(0.8); }
+  85.0% { transform: rotate(38deg) scaleY(1); }
+  86.6% { transform: rotate(-32deg) scaleY(0.8); }
+  89.0% { transform: rotate(38deg) scaleY(1); }
+  90.6% { transform: rotate(-32deg) scaleY(0.8); }
+  93.0% { transform: rotate(38deg) scaleY(1); }
+  94.6% { transform: rotate(-32deg) scaleY(0.8); }
+  97.0% { transform: rotate(38deg) scaleY(1); }
+  98.6% { transform: rotate(-32deg) scaleY(0.8); }
+  100.0% { transform: rotate(38deg) scaleY(1); }
+}
+@keyframes wing-flap3-r {
+  0.0% { transform: rotate(-38deg) scaleY(1); }
+  1.7% { transform: rotate(32deg) scaleY(0.8); }
+  4.3% { transform: rotate(-38deg) scaleY(1); }
+  6.0% { transform: rotate(32deg) scaleY(0.8); }
+  8.6% { transform: rotate(-38deg) scaleY(1); }
+  10.3% { transform: rotate(32deg) scaleY(0.8); }
+  12.9% { transform: rotate(-38deg) scaleY(1); }
+  14.6% { transform: rotate(32deg) scaleY(0.8); }
+  17.1% { transform: rotate(-38deg) scaleY(1); }
+  18.9% { transform: rotate(32deg) scaleY(0.8); }
+  21.4% { transform: rotate(-38deg) scaleY(1); }
+  23.1% { transform: rotate(32deg) scaleY(0.8); }
+  25.7% { transform: rotate(-38deg) scaleY(1); }
+  27.4% { transform: rotate(32deg) scaleY(0.8); }
+  30.0% { transform: rotate(-38deg) scaleY(1); }
+  31.7% { transform: rotate(32deg) scaleY(0.8); }
+  34.3% { transform: rotate(-38deg) scaleY(1); }
+  36.0% { transform: rotate(32deg) scaleY(0.8); }
+  38.6% { transform: rotate(-38deg) scaleY(1); }
+  40.3% { transform: rotate(32deg) scaleY(0.8); }
+  42.9% { transform: rotate(-38deg) scaleY(1); }
+  44.6% { transform: rotate(32deg) scaleY(0.8); }
+  47.1% { transform: rotate(-38deg) scaleY(1); }
+  48.9% { transform: rotate(32deg) scaleY(0.8); }
+  51.4% { transform: rotate(-38deg) scaleY(1); }
+  53.1% { transform: rotate(32deg) scaleY(0.8); }
+  55.7% { transform: rotate(-38deg) scaleY(1); }
+  57.4% { transform: rotate(32deg) scaleY(0.8); }
+  60.0% { transform: rotate(-38deg) scaleY(1); }
+  62.5% { transform: rotate(-18deg) scaleY(0.95); }
+  77.0% { transform: rotate(-18deg) scaleY(0.95); }
+  78.2% { transform: rotate(32deg) scaleY(0.8); }
+  81.0% { transform: rotate(-38deg) scaleY(1); }
+  82.6% { transform: rotate(32deg) scaleY(0.8); }
+  85.0% { transform: rotate(-38deg) scaleY(1); }
+  86.6% { transform: rotate(32deg) scaleY(0.8); }
+  89.0% { transform: rotate(-38deg) scaleY(1); }
+  90.6% { transform: rotate(32deg) scaleY(0.8); }
+  93.0% { transform: rotate(-38deg) scaleY(1); }
+  94.6% { transform: rotate(32deg) scaleY(0.8); }
+  97.0% { transform: rotate(-38deg) scaleY(1); }
+  98.6% { transform: rotate(32deg) scaleY(0.8); }
+  100.0% { transform: rotate(-38deg) scaleY(1); }
+}
+@keyframes body-bob3 {
+  0.0% { transform: translateY(0); }
+  1.7% { transform: translateY(-1.5px); }
+  4.3% { transform: translateY(0); }
+  6.0% { transform: translateY(-1.5px); }
+  8.6% { transform: translateY(0); }
+  10.3% { transform: translateY(-1.5px); }
+  12.9% { transform: translateY(0); }
+  14.6% { transform: translateY(-1.5px); }
+  17.1% { transform: translateY(0); }
+  18.9% { transform: translateY(-1.5px); }
+  21.4% { transform: translateY(0); }
+  23.1% { transform: translateY(-1.5px); }
+  25.7% { transform: translateY(0); }
+  27.4% { transform: translateY(-1.5px); }
+  30.0% { transform: translateY(0); }
+  31.7% { transform: translateY(-1.5px); }
+  34.3% { transform: translateY(0); }
+  36.0% { transform: translateY(-1.5px); }
+  38.6% { transform: translateY(0); }
+  40.3% { transform: translateY(-1.5px); }
+  42.9% { transform: translateY(0); }
+  44.6% { transform: translateY(-1.5px); }
+  47.1% { transform: translateY(0); }
+  48.9% { transform: translateY(-1.5px); }
+  51.4% { transform: translateY(0); }
+  53.1% { transform: translateY(-1.5px); }
+  55.7% { transform: translateY(0); }
+  57.4% { transform: translateY(-1.5px); }
+  60.0% { transform: translateY(0); }
+  62.5% { transform: translateY(-0.8px); }
+  77.0% { transform: translateY(-0.8px); }
+  78.2% { transform: translateY(-1.5px); }
+  81.0% { transform: translateY(0); }
+  82.6% { transform: translateY(-1.5px); }
+  85.0% { transform: translateY(0); }
+  86.6% { transform: translateY(-1.5px); }
+  89.0% { transform: translateY(0); }
+  90.6% { transform: translateY(-1.5px); }
+  93.0% { transform: translateY(0); }
+  94.6% { transform: translateY(-1.5px); }
+  97.0% { transform: translateY(0); }
+  98.6% { transform: translateY(-1.5px); }
+  100.0% { transform: translateY(0); }
+}
+
+/* No bats when the user asked for less motion — both the in-app toggle
+   (body.reduce-anim) and the OS setting. */
+body.reduce-anim .bats {
+  display: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bats {
+    display: none !important;
+  }
+}

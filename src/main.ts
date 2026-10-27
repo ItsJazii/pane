@@ -231,6 +231,7 @@ export interface Config {
   starPromptDayCount: number;
   starPromptLastMs: number;
   reduceAnimations: boolean;
+  seasonalThemes: boolean;
   locale: LocalePref;
   stepfunPlanCredits: number | null;
   widgetMode: boolean;
@@ -270,6 +271,7 @@ const FRONTEND_CONFIG_KEYS = [
   "starPromptDayCount",
   "starPromptLastMs",
   "reduceAnimations",
+  "seasonalThemes",
   "locale",
   "stepfunPlanCredits",
   "widgetMode",
@@ -484,6 +486,7 @@ let config: Config = {
   starPromptDayCount: 0,
   starPromptLastMs: 0,
   reduceAnimations: false,
+  seasonalThemes: true,
   locale: "auto",
   stepfunPlanCredits: null,
   widgetMode: false,
@@ -2396,6 +2399,7 @@ async function shareCard(id: string): Promise<void> {
       `<svg xmlns="http://www.w3.org/2000/svg" width="${W2 * S}" height="${H2 * S}" ` +
       `viewBox="0 0 ${W2} ${H2}" data-theme="${root.dataset.theme ?? ""}" ` +
       `data-density="${root.dataset.density ?? ""}" ` +
+      `data-season="${root.dataset.season ?? ""}" ` +
       `data-minimal="${root.dataset.minimal ?? "false"}">` +
       `<foreignObject width="${W2}" height="${H2}">` +
       `<div xmlns="http://www.w3.org/1999/xhtml" id="snap-root">` +
@@ -2650,6 +2654,52 @@ function konamiListen(e: KeyboardEvent): void {
 }
 
 const systemLight = window.matchMedia("(prefers-color-scheme: light)");
+
+const BAT_SVG =
+  '<div class="bat-bank">' +
+  '<svg class="bat-svg" viewBox="0 0 64 32" aria-hidden="true">' +
+  '<g class="wing wing-l"><path d="M30 13C24 4 12 4 5 9Q7 11 12 16Q14 13.5 19 19Q22 16.5 27 20.5L29 16Z"/></g>' +
+  '<g class="wing wing-r"><path d="M34 13C40 4 52 4 59 9Q57 11 52 16Q50 13.5 45 19Q42 16.5 37 20.5L35 16Z"/></g>' +
+  '<g class="body">' +
+  '<path d="M29.6 9.8L28.6 4.6L31.4 7.6Z"/>' +
+  '<path d="M34.4 9.8L35.4 4.6L32.6 7.6Z"/>' +
+  '<circle cx="32" cy="11" r="3"/>' +
+  '<ellipse cx="32" cy="17.5" rx="3.4" ry="5.2"/>' +
+  '<circle class="eye" cx="30.7" cy="11.2" r="0.8"/>' +
+  '<circle class="eye" cx="33.3" cy="11.2" r="0.8"/>' +
+  '</g></svg></div>';
+
+let batsLayer: HTMLElement | null = null;
+
+/// Halloween is Oct 20 - Nov 7 (the backend owns the window so the
+/// tray and the popover always agree). `data-season` on <html> activates
+/// the stylesheet block; the bat layer is injected here and removed when
+/// the season ends or the setting is off.
+async function applySeason(): Promise<void> {
+  let season: string | null = null;
+  try {
+    season = await invoke<string | null>("active_season_now");
+  } catch {
+    season = null;
+  }
+  if (season === "halloween") {
+    document.documentElement.dataset.season = season;
+    if (!batsLayer) {
+      batsLayer = document.createElement("div");
+      batsLayer.className = "bats";
+      batsLayer.setAttribute("aria-hidden", "true");
+      batsLayer.innerHTML =
+        `<div class="bat bat-1">${BAT_SVG}</div>` +
+        `<div class="bat bat-2">${BAT_SVG}</div>` +
+        `<div class="bat bat-3">${BAT_SVG}</div>`;
+      document.body.appendChild(batsLayer);
+    }
+  } else {
+    delete document.documentElement.dataset.season;
+    batsLayer?.remove();
+    batsLayer = null;
+  }
+}
 
 function applyAppearance(): void {
   const mode =
@@ -3806,6 +3856,7 @@ async function forceUsageRefreshAttempt(usageOnly = true): Promise<void> {
 }
 
 async function refresh(force = false, usageOnly = false): Promise<void> {
+  void applySeason();
   if (refreshing) {
     // Remember a forced request instead of dropping it: the in-flight
     // fetch may have started before whatever prompted this one (a saved
@@ -5435,6 +5486,7 @@ async function initSettings(): Promise<void> {
   });
 
   applyAppearance();
+  void applySeason();
   const appearance = document.querySelector<HTMLSelectElement>("#appearance")!;
   appearance.value = config.appearance;
   appearance.addEventListener("change", () => {
@@ -5471,6 +5523,17 @@ async function initSettings(): Promise<void> {
     void patchConfig({ reduceAnimations: reduceAnim.checked }).then(applyReduceMotion);
   });
   applyReduceMotion();
+
+  const seasonal = document.querySelector<HTMLInputElement>("#seasonal")!;
+  seasonal.checked = config.seasonalThemes !== false;
+  seasonal.addEventListener("change", () => {
+    // The tray icon recolors Rust-side, so it must re-sync too.
+    void patchConfig({ seasonalThemes: seasonal.checked }).then(() => {
+      void applySeason();
+      requestTraySync();
+    });
+  });
+  void applySeason();
 
   const shortcut = document.querySelector<HTMLInputElement>("#shortcut")!;
   shortcut.value = config.shortcut;
@@ -5567,6 +5630,7 @@ async function resetAllSettings(): Promise<void> {
     proxy: { enabled: false, url: "" },
     showTotalSpend: true,
     reduceAnimations: false,
+    seasonalThemes: true,
     locale: "auto",
     stepfunPlanCredits: null,
     widgetMode: false,
@@ -5618,6 +5682,7 @@ function syncSettingsControls(): void {
   setCheck("#minimal", config.minimal === true);
   setCheck("#glass", config.glassEffects !== false);
   setCheck("#reduce-anim", config.reduceAnimations === true);
+  setCheck("#seasonal", config.seasonalThemes !== false);
   setNum("#shortcut", config.shortcut);
   setCheck("#proxy-enabled", config.proxy?.enabled ?? false);
   setNum("#proxy-url", config.proxy?.url ?? "");
@@ -6013,6 +6078,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
   void listen("popover-shown", () => {
     void checkForUpdate(true);
+    void applySeason();
     // Always reopen on the main page, at the top — leftover Customize/
     // Settings panels, a stale confirm dialog, or a stale scroll position
     // from the previous visit feel like the app is stuck mid-page.

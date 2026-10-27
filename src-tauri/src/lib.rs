@@ -197,6 +197,7 @@ const CONFIG_KEYS: &[&str] = &[
     "minimal",
     "glassEffects",
     "shortcut",
+    "seasonalThemes",
     "proxy",
     "showTotalSpend",
     "welcomeDismissed",
@@ -557,8 +558,108 @@ fn draw_tray_numbers_with(values: &[u32], ink: TrayInk) -> Vec<u8> {
     rgba
 }
 
-fn draw_tray_numbers(values: &[u32]) -> Vec<u8> {
-    draw_tray_numbers_with(values, tray_ink_for_theme(system_uses_light_theme()))
+/// Halloween window: Oct 20 - Nov 7, recurring yearly.
+fn halloween_window(d: chrono::NaiveDate) -> bool {
+    use chrono::Datelike;
+    (d.month() == 10 && d.day() >= 20) || (d.month() == 11 && d.day() <= 7)
+}
+
+/// The active seasonal theme, if any. `seasonalThemes` defaults on;
+/// an explicit false disables it.
+fn active_season(cfg: &Value, today: chrono::NaiveDate) -> Option<&'static str> {
+    if cfg.get("seasonalThemes").and_then(|v| v.as_bool()) == Some(false) {
+        return None;
+    }
+    halloween_window(today).then_some("halloween")
+}
+
+fn season_now() -> Option<&'static str> {
+    active_season(
+        &config_with_defaults(load_config()),
+        chrono::Local::now().date_naive(),
+    )
+}
+
+#[tauri::command]
+fn active_season_now() -> Option<&'static str> {
+    season_now()
+}
+
+/// Theme ink, pumpkin-orange foreground during Halloween (same outline).
+fn current_tray_ink() -> TrayInk {
+    let mut ink = tray_ink_for_theme(system_uses_light_theme());
+    if season_now().is_some() {
+        ink.foreground = [251, 146, 60, 255];
+    }
+    ink
+}
+
+fn rgb_to_hsl(r: u8, g: u8, b: u8) -> (f64, f64, f64) {
+    let (r, g, b) = (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let l = (max + min) / 2.0;
+    let d = max - min;
+    if d == 0.0 {
+        return (0.0, 0.0, l);
+    }
+    let s = if l > 0.5 {
+        d / (2.0 - max - min)
+    } else {
+        d / (max + min)
+    };
+    let h = if max == r {
+        ((g - b) / d + if g < b { 6.0 } else { 0.0 }) * 60.0
+    } else if max == g {
+        ((b - r) / d + 2.0) * 60.0
+    } else {
+        ((r - g) / d + 4.0) * 60.0
+    };
+    (h, s, l)
+}
+
+fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (u8, u8, u8) {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let hp = h.rem_euclid(360.0) / 60.0;
+    let x = c * (1.0 - ((hp % 2.0) - 1.0).abs());
+    let (r, g, b) = if hp < 1.0 {
+        (c, x, 0.0)
+    } else if hp < 2.0 {
+        (x, c, 0.0)
+    } else if hp < 3.0 {
+        (0.0, c, x)
+    } else if hp < 4.0 {
+        (0.0, x, c)
+    } else if hp < 5.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+    let m = l - c / 2.0;
+    (
+        ((r + m) * 255.0).round() as u8,
+        ((g + m) * 255.0).round() as u8,
+        ((b + m) * 255.0).round() as u8,
+    )
+}
+
+/// Halloween logo recolor: bluish pixels (hue 180-250, sat > 0.25) become
+/// pumpkin hue 25 at saturation 0.9 and 75% lightness; everything else,
+/// including alpha, is byte-identical.
+fn halloween_recolor(rgba: &[u8]) -> Vec<u8> {
+    let mut out = rgba.to_vec();
+    for px in out.chunks_exact_mut(4) {
+        if px[3] == 0 {
+            continue;
+        }
+        let (h, s, l) = rgb_to_hsl(px[0], px[1], px[2]);
+        if (180.0..=250.0).contains(&h) && s > 0.25 {
+            let (r, g, b) = hsl_to_rgb(25.0, 0.9, l * 0.75);
+            px[0] = r;
+            px[1] = g;
+            px[2] = b;
+        }
+    }
+    out
 }
 
 fn apply_main_tray_projection(
@@ -570,17 +671,26 @@ fn apply_main_tray_projection(
         .ok_or_else(|| "main tray icon is unavailable".to_string())?;
     tray.set_tooltip(Some(&projection.tooltip))
         .map_err(|error| format!("set main tray tooltip: {error}"))?;
+    let halloween = season_now().is_some();
     match projection.icon_mode {
         tray_projection::MainTrayIconMode::Logo => {
             let default = app
                 .default_window_icon()
                 .ok_or_else(|| "default Pane icon is unavailable".to_string())?;
-            tray.set_icon(Some(default.clone()))
+            let icon = if halloween {
+                static HW_RGBA: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+                let bytes =
+                    HW_RGBA.get_or_init(|| halloween_recolor(default.rgba()));
+                tauri::image::Image::new_owned(bytes.clone(), default.width(), default.height())
+            } else {
+                default.clone()
+            };
+            tray.set_icon(Some(icon))
                 .map_err(|error| format!("set main tray logo: {error}"))?;
         }
         tray_projection::MainTrayIconMode::Numbers => {
             let icon = tauri::image::Image::new_owned(
-                draw_tray_numbers(&projection.remaining_percentages),
+                draw_tray_numbers_with(&projection.remaining_percentages, current_tray_ink()),
                 32,
                 32,
             );
@@ -858,16 +968,14 @@ async fn apply_tray_strip(
                 handle.remove_tray_by_id(&format!("strip-num-{key}"));
             }
 
+            let ink = current_tray_ink();
             for entry in strip_entry_application_order(&entries, rebuild_order) {
                 let tray_key = strip_tray_key(&entry.id);
                 let logo_id = format!("strip-logo-{tray_key}");
                 let num_id = format!("strip-num-{tray_key}");
                 let logo_icon = tauri::image::Image::new_owned(entry.logo.clone(), 32, 32);
-                let num_icon = tauri::image::Image::new_owned(
-                    draw_tray_numbers(&entry.values),
-                    32,
-                    32,
-                );
+                let num_icon =
+                    tauri::image::Image::new_owned(draw_tray_numbers_with(&entry.values, ink), 32, 32);
                 let tooltip = entry.tooltip.clone();
 
                 let new_trays = if let Some(tray) = handle.tray_by_id(&num_id) {
@@ -3511,6 +3619,7 @@ pub fn run() {
             sub2api_update_key,
             sub2api_delete_key,
             get_config,
+            active_season_now,
             set_config,
             check_dir,
             system_ui_locale,
@@ -5644,5 +5753,43 @@ mod tests {
         let small = ScreenRect { x: 40, y: 50, width: 300, height: 200 };
         assert_eq!(popover_origin((200, 100), (380, 600), monitor, small), (40, 50));
         assert_eq!(popover_origin((1800, 1050), (380, 500), monitor, tie), (1420, 540));
+    }
+    #[test]
+    fn halloween_window_edges() {
+        use chrono::NaiveDate;
+        let d = |m, day| super::halloween_window(NaiveDate::from_ymd_opt(2026, m, day).unwrap());
+        assert!(!d(10, 19));
+        assert!(d(10, 20));
+        assert!(d(10, 31));
+        assert!(d(11, 7));
+        assert!(!d(11, 8));
+        assert!(!d(1, 1));
+    }
+
+    #[test]
+    fn active_season_respects_toggle_and_window() {
+        use chrono::NaiveDate;
+        let on = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let off = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        assert_eq!(
+            super::active_season(&serde_json::json!({"seasonalThemes": false}), on),
+            None
+        );
+        assert_eq!(
+            super::active_season(&serde_json::json!({}), on),
+            Some("halloween")
+        );
+        assert_eq!(super::active_season(&serde_json::json!({}), off), None);
+    }
+
+    #[test]
+    fn halloween_recolor_turns_blues_orange_only() {
+        let out = super::halloween_recolor(&[59, 130, 246, 255]); // #3b82f6
+        let (h, _s, _l) = super::rgb_to_hsl(out[0], out[1], out[2]);
+        assert!((h - 25.0).abs() < 2.0, "hue {h}");
+        // white, yellow (#facc15) and transparent pixels are untouched
+        for px in [[255, 255, 255, 255], [250, 204, 21, 255], [59, 130, 246, 0]] {
+            assert_eq!(super::halloween_recolor(&px).as_slice(), px);
+        }
     }
 }

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Halloween look until Nov 7: pumpkin-orange meters, flying bats, cobwebs (also on shared card images) and an orange tray icon. Turn it off in Settings → Seasonal themes.
+
 ## 0.4.63 — 2026-10-24
 
 ### Added
