@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Claude: when Claude Code refreshes its sign-in at the same moment as Pane, Pane now picks up the new sign-in instead of showing the "rotated by another app" error.
+
 ## 0.4.63 — 2026-10-24
 
 ### Added
