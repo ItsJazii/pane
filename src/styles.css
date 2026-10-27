@@ -1901,6 +1901,15 @@ footer {
   padding: 0;
 }
 
+/* The ⟳ glyph's ink sits ~2px high inside the uniform box — nudge it so
+   all five icons share the same ink pitch. */
+#refresh {
+  transform: translateY(2px);
+}
+#refresh:active {
+  transform: translateY(2px) scale(0.88);
+}
+
 .sidebar-buttons button:active {
   transform: scale(0.88);
 }

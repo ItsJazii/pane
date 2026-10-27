@@ -2723,30 +2723,35 @@ function konamiListen(e: KeyboardEvent): void {
 
 const systemLight = window.matchMedia("(prefers-color-scheme: light)");
 
-const BAT_SVG =
-  '<div class="bat-bank">' +
-  '<svg class="bat-svg" viewBox="0 0 64 32" aria-hidden="true">' +
-  '<g class="wing wing-l">' +
-  '<path d="M30 14C27 6 16 1 6 3.5L4.5 2.5C6 9 9 13.5 12 17Q15.5 11 19 18.5Q22.5 13 26 21Q28 17 30 18.5L30 14Z"/>' +
-  '<path class="bones" d="M30 14L4.5 2.5M30 14L15.5 11M30 14L23.5 14"/>' +
-  '</g>' +
-  '<g class="wing wing-r">' +
-  '<path d="M34 14C37 6 48 1 58 3.5L59.5 2.5C58 9 55 13.5 52 17Q48.5 11 45 18.5Q41.5 13 38 21Q36 17 34 18.5L34 14Z"/>' +
-  '<path class="bones" d="M34 14L59.5 2.5M34 14L48.5 11M34 14L40.5 14"/>' +
-  '</g>' +
-  '<g class="body">' +
-  '<path d="M29.5 9.5L27.8 3.5L31.2 7.8Z"/>' +
-  '<path d="M34.5 9.5L36.2 3.5L32.8 7.8Z"/>' +
-  '<circle cx="32" cy="10" r="3.4"/>' +
-  '<ellipse cx="32" cy="16" rx="3.2" ry="5"/>' +
-  '<circle class="eye" cx="30.6" cy="9.6" r="0.85"/>' +
-  '<circle class="eye" cx="33.4" cy="9.6" r="0.85"/>' +
-  '<g class="face">' +
-  '<path d="M29.9 12.8Q32 14.4 34.1 12.8" fill="none" stroke="#cfc6e0" stroke-width="0.5" stroke-linecap="round"/>' +
-  '<path d="M30.4 13.1L31.1 14.6L31.8 13.2Z" fill="#e8e4f0"/>' +
-  '<path d="M32.2 13.2L32.9 14.6L33.6 13.1Z" fill="#e8e4f0"/>' +
-  '</g>' +
-  '</g></svg></div>';
+function batSvg(id: number): string {
+  return (
+    '<div class="bat-bank">' +
+    `<svg class="bat-svg" viewBox="0 0 64 32" aria-hidden="true">` +
+    `<clipPath id="bw${id}l"><path d="M30 14C27 6 16 1 6 3.5L4.5 2.5C6 9 9 13.5 12 17Q15.5 11 19 18.5Q22.5 13 26 21Q28 17 30 18.5L30 14Z"/></clipPath>` +
+    `<clipPath id="bw${id}r"><path d="M34 14C37 6 48 1 58 3.5L59.5 2.5C58 9 55 13.5 52 17Q48.5 11 45 18.5Q41.5 13 38 21Q36 17 34 18.5L34 14Z"/></clipPath>` +
+    '<g class="wing wing-l">' +
+    '<path d="M30 14C27 6 16 1 6 3.5L4.5 2.5C6 9 9 13.5 12 17Q15.5 11 19 18.5Q22.5 13 26 21Q28 17 30 18.5L30 14Z"/>' +
+    `<g clip-path="url(#bw${id}l)"><path class="bones" d="M28 14.5Q18 8 6 4.2M28 14.5Q22 12.3 16.5 11.6M28 14.5Q25 13.8 23.4 14.2"/></g>` +
+    '</g>' +
+    '<g class="wing wing-r">' +
+    '<path d="M34 14C37 6 48 1 58 3.5L59.5 2.5C58 9 55 13.5 52 17Q48.5 11 45 18.5Q41.5 13 38 21Q36 17 34 18.5L34 14Z"/>' +
+    `<g clip-path="url(#bw${id}r)"><path class="bones" d="M36 14.5Q46 8 58 4.2M36 14.5Q42 12.3 47.5 11.6M36 14.5Q39 13.8 40.6 14.2"/></g>` +
+    '</g>' +
+    '<g class="body">' +
+    '<path d="M29.5 9.5L27.8 3.5L31.2 7.8Z"/>' +
+    '<path d="M34.5 9.5L36.2 3.5L32.8 7.8Z"/>' +
+    '<circle cx="32" cy="10" r="3.4"/>' +
+    '<ellipse cx="32" cy="16" rx="3.2" ry="5"/>' +
+    '<circle class="eye" cx="30.6" cy="9.6" r="0.85"/>' +
+    '<circle class="eye" cx="33.4" cy="9.6" r="0.85"/>' +
+    '<g class="face">' +
+    '<path d="M29.9 12.8Q32 14.4 34.1 12.8" fill="none" stroke="#cfc6e0" stroke-width="0.5" stroke-linecap="round"/>' +
+    '<path d="M30.4 13.1L31.1 14.6L31.8 13.2Z" fill="#e8e4f0"/>' +
+    '<path d="M32.2 13.2L32.9 14.6L33.6 13.1Z" fill="#e8e4f0"/>' +
+    '</g>' +
+    '</g></svg></div>'
+  );
+}
 
 let batsLayer: HTMLElement | null = null;
 
@@ -2764,9 +2769,9 @@ function setSeasonDom(season: string | null): void {
       batsLayer.className = "bats";
       batsLayer.setAttribute("aria-hidden", "true");
       batsLayer.innerHTML =
-        `<div class="bat bat-1">${BAT_SVG}</div>` +
-        `<div class="bat bat-2">${BAT_SVG}</div>` +
-        `<div class="bat bat-3">${BAT_SVG}</div>`;
+        `<div class="bat bat-1">${batSvg(1)}</div>` +
+        `<div class="bat bat-2">${batSvg(2)}</div>` +
+        `<div class="bat bat-3">${batSvg(3)}</div>`;
       document.body.appendChild(batsLayer);
     }
   } else {
