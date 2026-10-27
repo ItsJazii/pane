@@ -105,7 +105,6 @@
 :root[data-minimal="true"] .provider:not(.total-spend):not(.welcome-card) .provider-head {
   margin-bottom: 0;
 }
-:root[data-minimal="true"] .provider:not(.total-spend):not(.welcome-card) .plan,
 :root[data-minimal="true"] .provider:not(.total-spend):not(.welcome-card) .quick-links,
 :root[data-minimal="true"] .provider:not(.total-spend):not(.welcome-card) .card-caret,
 :root[data-minimal="true"] .provider:not(.total-spend):not(.welcome-card) .on-demand {

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Minimal view now keeps the plan name (Pro, Max, Plus…) on each card.
+
 ## 0.4.63 — 2026-10-24
 
 ### Added
