@@ -3834,19 +3834,17 @@ async function refresh(force = false, usageOnly = false): Promise<void> {
     await unparkRecentlyKeyed();
     const contexts = sub2ApiSnapshotContexts.capture();
     let snapshots = await invoke<Snapshot[]>("fetch_usage", { disabled: [...config.disabled] });
-    // First launch ever (no layout yet): start with only the providers that
-    // actually have credentials on this PC, like the Mac app's first-run
-    // detection. The rest stay available in Customize.
+    // First launch ever (no layout yet): start with just Claude and Codex —
+    // their cards are the new-user onboarding. Every other provider waits
+    // in Customize regardless of what credentials the PC has.
     if (config.layout === null && snapshots.length > 0) {
-      // Claude and Codex always start enabled — their "connect me" cards are
-      // the new-user onboarding. Everything else without credentials waits
-      // in Customize (a fresh PC with zero AI tools sees just those two).
+      // Families, so extra accounts (claude@work, codex@home) stay on too.
+      // recentlyKeyed keeps a key entered during this very first scan.
       const starters = new Set(["claude", "codex"]);
       const noCreds = snapshots
         .filter(
           (s) =>
-            s.status === "no_credentials" &&
-            !starters.has(s.id) &&
+            !starters.has(providerFamily(s.id)) &&
             !recentlyKeyed.has(s.id)
         )
         .map((s) => s.id);

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- New installs start with just the Claude and Codex cards; turn on the rest in Customize.
+
 ## 0.4.63 — 2026-10-24
 
 ### Added
