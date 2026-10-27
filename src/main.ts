@@ -5486,7 +5486,6 @@ async function initSettings(): Promise<void> {
   });
 
   applyAppearance();
-  void applySeason();
   const appearance = document.querySelector<HTMLSelectElement>("#appearance")!;
   appearance.value = config.appearance;
   appearance.addEventListener("change", () => {
