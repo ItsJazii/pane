@@ -80,7 +80,7 @@
   width: 11px;
   height: 11px;
   pointer-events: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8.6 4.6C8.9 3.1 9.7 2.1 11 1.4' fill='none' stroke='%233fa04e' stroke-width='1.5' stroke-linecap='round'/%3E%3Cellipse cx='8' cy='9.8' rx='6.6' ry='5.5' fill='%23f97316'/%3E%3Cellipse cx='4.9' cy='9.8' rx='1.7' ry='5' fill='%23ea580c'/%3E%3Cellipse cx='11.1' cy='9.8' rx='1.7' ry='5' fill='%23ea580c'/%3E%3Cellipse cx='8' cy='9.8' rx='1.5' ry='5.3' fill='%23fb923c'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20viewBox%3D%270%200%2016%2016%27%3E%0A%3Cpath%20d%3D%27M8.4%204.4C8.7%203.2%209.5%202.2%2010.8%201.6%2010.2%202.6%2010%203.4%209.9%204.4Z%27%20fill%3D%27%236f5d27%27/%3E%0A%3Cellipse%20cx%3D%278%27%20cy%3D%279.6%27%20rx%3D%276.4%27%20ry%3D%275.4%27%20fill%3D%27%23f97316%27/%3E%0A%3Cellipse%20cx%3D%274.9%27%20cy%3D%279.6%27%20rx%3D%271.8%27%20ry%3D%275%27%20fill%3D%27%23ea580c%27/%3E%0A%3Cellipse%20cx%3D%2711.1%27%20cy%3D%279.6%27%20rx%3D%271.8%27%20ry%3D%275%27%20fill%3D%27%23ea580c%27/%3E%0A%3Cellipse%20cx%3D%278%27%20cy%3D%279.6%27%20rx%3D%271.6%27%20ry%3D%275.2%27%20fill%3D%27%23fb923c%27/%3E%0A%3Cpath%20d%3D%27M4.7%208.2%206.1%206.9%206.7%208.8Z%27%20fill%3D%27%23ffd43b%27/%3E%0A%3Cpath%20d%3D%27M11.3%208.2%209.9%206.9%209.3%208.8Z%27%20fill%3D%27%23ffd43b%27/%3E%0A%3Cpath%20d%3D%27M4.6%2011.2%206%2012.3%207.4%2011.3%208.8%2012.4%2010.2%2011.3%2011.6%2011.4%2010.6%2013.4%208%2014%205.4%2013.4Z%27%20fill%3D%27%23ffd43b%27/%3E%0A%3C/svg%3E");
   background-size: contain;
   background-repeat: no-repeat;
 }
@@ -186,34 +186,52 @@
   width: 100%;
   height: auto;
   overflow: visible; /* wingtips swing above the viewBox at the up pose */
-  color: #3a274d;
+  color: #1a1222;
   fill: currentColor;
 }
 
 :root[data-season="halloween"][data-theme="light"] .bat-svg {
-  color: #1f1629;
+  color: #1a1222;
 }
 
 .bats .wing {
   transform-box: view-box;
-  fill: #45305c; /* membrane a touch lighter than the body */
+  fill: #1a1222;
 }
 .bats .wing-l {
-  transform-origin: 30px 13px; /* left shoulder joint */
+  transform-origin: 30px 14px; /* left shoulder joint */
   animation: wing-flap-l 0.25s ease-in-out infinite;
 }
 .bats .wing-r {
-  transform-origin: 34px 13px; /* right shoulder joint */
+  transform-origin: 34px 14px; /* right shoulder joint */
   animation: wing-flap-r 0.25s ease-in-out infinite;
 }
 .bats .body {
   animation: body-bob 0.25s ease-in-out infinite;
 }
+/* Orange finger bones fan inside each wing — they live in the wing group,
+   so they ride the flap for free. */
+.bats .bones {
+  fill: none;
+  stroke: #f97316;
+  stroke-width: 0.9;
+  stroke-linecap: round;
+  opacity: 0.8;
+}
 .bats .eye {
   fill: #fb923c; /* lit-pumpkin eyes */
+  filter: drop-shadow(0 0 0.8px rgb(251 146 60 / 0.9));
+}
+/* The fanged grin only reads on the big near bat; on the two small ones it
+   just smears, so it's hidden there. */
+.bats .face {
+  display: none;
+}
+.bat-3 .face {
+  display: block;
 }
 :root[data-season="halloween"][data-theme="light"] .bats .wing {
-  fill: #1f1629;
+  fill: #1a1222;
 }
 :root[data-season="halloween"][data-theme="light"] .bats .eye {
   fill: #f97316;
@@ -519,7 +537,7 @@ body.reduce-anim .bats {
   width: 13px;
   height: 13px;
   margin-left: 1px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8.6 4.6C8.9 3.1 9.7 2.1 11 1.4' fill='none' stroke='%233fa04e' stroke-width='1.5' stroke-linecap='round'/%3E%3Cellipse cx='8' cy='9.8' rx='6.6' ry='5.5' fill='%23f97316'/%3E%3Cellipse cx='4.9' cy='9.8' rx='1.7' ry='5' fill='%23ea580c'/%3E%3Cellipse cx='11.1' cy='9.8' rx='1.7' ry='5' fill='%23ea580c'/%3E%3Cellipse cx='8' cy='9.8' rx='1.5' ry='5.3' fill='%23fb923c'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20viewBox%3D%270%200%2016%2016%27%3E%0A%3Cpath%20d%3D%27M8.4%204.4C8.7%203.2%209.5%202.2%2010.8%201.6%2010.2%202.6%2010%203.4%209.9%204.4Z%27%20fill%3D%27%236f5d27%27/%3E%0A%3Cellipse%20cx%3D%278%27%20cy%3D%279.6%27%20rx%3D%276.4%27%20ry%3D%275.4%27%20fill%3D%27%23f97316%27/%3E%0A%3Cellipse%20cx%3D%274.9%27%20cy%3D%279.6%27%20rx%3D%271.8%27%20ry%3D%275%27%20fill%3D%27%23ea580c%27/%3E%0A%3Cellipse%20cx%3D%2711.1%27%20cy%3D%279.6%27%20rx%3D%271.8%27%20ry%3D%275%27%20fill%3D%27%23ea580c%27/%3E%0A%3Cellipse%20cx%3D%278%27%20cy%3D%279.6%27%20rx%3D%271.6%27%20ry%3D%275.2%27%20fill%3D%27%23fb923c%27/%3E%0A%3Cpath%20d%3D%27M4.7%208.2%206.1%206.9%206.7%208.8Z%27%20fill%3D%27%23ffd43b%27/%3E%0A%3Cpath%20d%3D%27M11.3%208.2%209.9%206.9%209.3%208.8Z%27%20fill%3D%27%23ffd43b%27/%3E%0A%3Cpath%20d%3D%27M4.6%2011.2%206%2012.3%207.4%2011.3%208.8%2012.4%2010.2%2011.3%2011.6%2011.4%2010.6%2013.4%208%2014%205.4%2013.4Z%27%20fill%3D%27%23ffd43b%27/%3E%0A%3C/svg%3E");
   background-size: contain;
   background-repeat: no-repeat;
 }
@@ -564,7 +582,7 @@ body.reduce-anim .bats {
 :root[data-season="halloween"] .pace-flame {
   width: 12px;
   height: 12px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cellipse cx='8' cy='9.5' rx='7' ry='5.8' fill='%23f97316'/%3E%3Crect x='7.2' y='0.8' width='1.7' height='3' rx='0.8' fill='%23365e1f'/%3E%3Cpath d='M3.6 7.4L5.4 5.4L7.2 7.4Z' fill='%231a1620'/%3E%3Cpath d='M8.8 7.4L10.6 5.4L12.4 7.4Z' fill='%231a1620'/%3E%3Cpath d='M3.5 10.6L5 11.8L6.5 10.8L8 11.8L9.5 10.8L11 11.8L12.5 10.6V12.8H3.5Z' fill='%231a1620'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20viewBox%3D%270%200%2016%2016%27%3E%0A%3Cpath%20d%3D%27M8.4%204.4C8.7%203.2%209.5%202.2%2010.8%201.6%2010.2%202.6%2010%203.4%209.9%204.4Z%27%20fill%3D%27%236f5d27%27/%3E%0A%3Cellipse%20cx%3D%278%27%20cy%3D%279.6%27%20rx%3D%276.4%27%20ry%3D%275.4%27%20fill%3D%27%23f97316%27/%3E%0A%3Cellipse%20cx%3D%274.9%27%20cy%3D%279.6%27%20rx%3D%271.8%27%20ry%3D%275%27%20fill%3D%27%23ea580c%27/%3E%0A%3Cellipse%20cx%3D%2711.1%27%20cy%3D%279.6%27%20rx%3D%271.8%27%20ry%3D%275%27%20fill%3D%27%23ea580c%27/%3E%0A%3Cellipse%20cx%3D%278%27%20cy%3D%279.6%27%20rx%3D%271.6%27%20ry%3D%275.2%27%20fill%3D%27%23fb923c%27/%3E%0A%3Cpath%20d%3D%27M4.7%208.2%206.1%206.9%206.7%208.8Z%27%20fill%3D%27%23ffd43b%27/%3E%0A%3Cpath%20d%3D%27M11.3%208.2%209.9%206.9%209.3%208.8Z%27%20fill%3D%27%23ffd43b%27/%3E%0A%3Cpath%20d%3D%27M4.6%2011.2%206%2012.3%207.4%2011.3%208.8%2012.4%2010.2%2011.3%2011.6%2011.4%2010.6%2013.4%208%2014%205.4%2013.4Z%27%20fill%3D%27%23ffd43b%27/%3E%0A%3C/svg%3E");
   background-size: contain;
   background-repeat: no-repeat;
 }
@@ -612,7 +630,7 @@ body.reduce-anim .bats {
   top: 14px;
   height: 18px;
   pointer-events: none;
-  background-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20viewBox%3D%270%200%20300%2018%27%3E%3Cg%20transform%3D%27translate%288%2C7%29%20scale%280.68%29%27%3E%3Cpath%20d%3D%27M8.6%204.6C8.9%203.1%209.7%202.1%2011%201.4%27%20fill%3D%27none%27%20stroke%3D%27%233fa04e%27%20stroke-width%3D%271.5%27%20stroke-linecap%3D%27round%27/%3E%3Cellipse%20cx%3D%278%27%20cy%3D%279.8%27%20rx%3D%276.6%27%20ry%3D%275.5%27%20fill%3D%27%23f97316%27/%3E%3Cellipse%20cx%3D%274.9%27%20cy%3D%279.8%27%20rx%3D%271.7%27%20ry%3D%275%27%20fill%3D%27%23ea580c%27/%3E%3Cellipse%20cx%3D%2711.1%27%20cy%3D%279.8%27%20rx%3D%271.7%27%20ry%3D%275%27%20fill%3D%27%23ea580c%27/%3E%3Cellipse%20cx%3D%278%27%20cy%3D%279.8%27%20rx%3D%271.5%27%20ry%3D%275.3%27%20fill%3D%27%23fb923c%27/%3E%3C/g%3E%3Cg%20transform%3D%27translate%2862%2C1%29%20scale%280.22%29%27%3E%3Cg%20fill%3D%27%237a5aa0%27%3E%3Cpath%20d%3D%27M30%2013C24%204%2012%204%205%209Q7%2011%2012%2016Q14%2013.5%2019%2019Q22%2016.5%2027%2020.5L29%2016Z%27/%3E%3Cpath%20d%3D%27M34%2013C40%204%2052%204%2059%209Q57%2011%2052%2016Q50%2013.5%2045%2019Q42%2016.5%2037%2020.5L35%2016Z%27/%3E%3Cpath%20d%3D%27M29.6%209.8L28.6%204.6L31.4%207.6Z%27/%3E%3Cpath%20d%3D%27M34.4%209.8L35.4%204.6L32.6%207.6Z%27/%3E%3Ccircle%20cx%3D%2732%27%20cy%3D%2711%27%20r%3D%273%27/%3E%3Cellipse%20cx%3D%2732%27%20cy%3D%2717.5%27%20rx%3D%273.4%27%20ry%3D%275.2%27/%3E%3C/g%3E%3C/g%3E%3Cg%20transform%3D%27translate%28116%2C8%29%20scale%280.68%29%27%3E%3Cpath%20d%3D%27M8.6%204.6C8.9%203.1%209.7%202.1%2011%201.4%27%20fill%3D%27none%27%20stroke%3D%27%233fa04e%27%20stroke-width%3D%271.5%27%20stroke-linecap%3D%27round%27/%3E%3Cellipse%20cx%3D%278%27%20cy%3D%279.8%27%20rx%3D%276.6%27%20ry%3D%275.5%27%20fill%3D%27%23f97316%27/%3E%3Cellipse%20cx%3D%274.9%27%20cy%3D%279.8%27%20rx%3D%271.7%27%20ry%3D%275%27%20fill%3D%27%23ea580c%27/%3E%3Cellipse%20cx%3D%2711.1%27%20cy%3D%279.8%27%20rx%3D%271.7%27%20ry%3D%275%27%20fill%3D%27%23ea580c%27/%3E%3Cellipse%20cx%3D%278%27%20cy%3D%279.8%27%20rx%3D%271.5%27%20ry%3D%275.3%27%20fill%3D%27%23fb923c%27/%3E%3C/g%3E%3Cg%20transform%3D%27translate%28170%2C2%29%20scale%280.22%29%27%3E%3Cg%20fill%3D%27%237a5aa0%27%3E%3Cpath%20d%3D%27M30%2013C24%204%2012%204%205%209Q7%2011%2012%2016Q14%2013.5%2019%2019Q22%2016.5%2027%2020.5L29%2016Z%27/%3E%3Cpath%20d%3D%27M34%2013C40%204%2052%204%2059%209Q57%2011%2052%2016Q50%2013.5%2045%2019Q42%2016.5%2037%2020.5L35%2016Z%27/%3E%3Cpath%20d%3D%27M29.6%209.8L28.6%204.6L31.4%207.6Z%27/%3E%3Cpath%20d%3D%27M34.4%209.8L35.4%204.6L32.6%207.6Z%27/%3E%3Ccircle%20cx%3D%2732%27%20cy%3D%2711%27%20r%3D%273%27/%3E%3Cellipse%20cx%3D%2732%27%20cy%3D%2717.5%27%20rx%3D%273.4%27%20ry%3D%275.2%27/%3E%3C/g%3E%3C/g%3E%3Cg%20transform%3D%27translate%28224%2C6%29%20scale%280.68%29%27%3E%3Cpath%20d%3D%27M8.6%204.6C8.9%203.1%209.7%202.1%2011%201.4%27%20fill%3D%27none%27%20stroke%3D%27%233fa04e%27%20stroke-width%3D%271.5%27%20stroke-linecap%3D%27round%27/%3E%3Cellipse%20cx%3D%278%27%20cy%3D%279.8%27%20rx%3D%276.6%27%20ry%3D%275.5%27%20fill%3D%27%23f97316%27/%3E%3Cellipse%20cx%3D%274.9%27%20cy%3D%279.8%27%20rx%3D%271.7%27%20ry%3D%275%27%20fill%3D%27%23ea580c%27/%3E%3Cellipse%20cx%3D%2711.1%27%20cy%3D%279.8%27%20rx%3D%271.7%27%20ry%3D%275%27%20fill%3D%27%23ea580c%27/%3E%3Cellipse%20cx%3D%278%27%20cy%3D%279.8%27%20rx%3D%271.5%27%20ry%3D%275.3%27%20fill%3D%27%23fb923c%27/%3E%3C/g%3E%3Cg%20transform%3D%27translate%28278%2C0%29%20scale%280.22%29%27%3E%3Cg%20fill%3D%27%237a5aa0%27%3E%3Cpath%20d%3D%27M30%2013C24%204%2012%204%205%209Q7%2011%2012%2016Q14%2013.5%2019%2019Q22%2016.5%2027%2020.5L29%2016Z%27/%3E%3Cpath%20d%3D%27M34%2013C40%204%2052%204%2059%209Q57%2011%2052%2016Q50%2013.5%2045%2019Q42%2016.5%2037%2020.5L35%2016Z%27/%3E%3Cpath%20d%3D%27M29.6%209.8L28.6%204.6L31.4%207.6Z%27/%3E%3Cpath%20d%3D%27M34.4%209.8L35.4%204.6L32.6%207.6Z%27/%3E%3Ccircle%20cx%3D%2732%27%20cy%3D%2711%27%20r%3D%273%27/%3E%3Cellipse%20cx%3D%2732%27%20cy%3D%2717.5%27%20rx%3D%273.4%27%20ry%3D%275.2%27/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20viewBox%3D%270%200%20300%2018%27%3E%3Cg%20transform%3D%27translate%288%2C7%29%20scale%280.68%29%27%3E%0A%3Cpath%20d%3D%27M8.4%204.4C8.7%203.2%209.5%202.2%2010.8%201.6%2010.2%202.6%2010%203.4%209.9%204.4Z%27%20fill%3D%27%236f5d27%27/%3E%0A%3Cellipse%20cx%3D%278%27%20cy%3D%279.6%27%20rx%3D%276.4%27%20ry%3D%275.4%27%20fill%3D%27%23f97316%27/%3E%0A%3Cellipse%20cx%3D%274.9%27%20cy%3D%279.6%27%20rx%3D%271.8%27%20ry%3D%275%27%20fill%3D%27%23ea580c%27/%3E%0A%3Cellipse%20cx%3D%2711.1%27%20cy%3D%279.6%27%20rx%3D%271.8%27%20ry%3D%275%27%20fill%3D%27%23ea580c%27/%3E%0A%3Cellipse%20cx%3D%278%27%20cy%3D%279.6%27%20rx%3D%271.6%27%20ry%3D%275.2%27%20fill%3D%27%23fb923c%27/%3E%0A%3Cpath%20d%3D%27M4.7%208.2%206.1%206.9%206.7%208.8Z%27%20fill%3D%27%23ffd43b%27/%3E%0A%3Cpath%20d%3D%27M11.3%208.2%209.9%206.9%209.3%208.8Z%27%20fill%3D%27%23ffd43b%27/%3E%0A%3Cpath%20d%3D%27M4.6%2011.2%206%2012.3%207.4%2011.3%208.8%2012.4%2010.2%2011.3%2011.6%2011.4%2010.6%2013.4%208%2014%205.4%2013.4Z%27%20fill%3D%27%23ffd43b%27/%3E%0A%3C/g%3E%3Cg%20transform%3D%27translate%2862%2C1%29%20scale%280.22%29%27%3E%3Cg%20fill%3D%27%237a5aa0%27%3E%3Cpath%20d%3D%27M30%2014C27%206%2016%201%206%203.5L4.5%202.5C6%209%209%2013.5%2012%2017Q15.5%2011%2019%2018.5Q22.5%2013%2026%2021Q28%2017%2030%2018.5L30%2014Z%27/%3E%3Cpath%20d%3D%27M34%2014C37%206%2048%201%2058%203.5L59.5%202.5C58%209%2055%2013.5%2052%2017Q48.5%2011%2045%2018.5Q41.5%2013%2038%2021Q36%2017%2034%2018.5L34%2014Z%27/%3E%3Cpath%20d%3D%27M29.5%209.5L27.8%203.5L31.2%207.8Z%27/%3E%3Cpath%20d%3D%27M34.5%209.5L36.2%203.5L32.8%207.8Z%27/%3E%3Cellipse%20cx%3D%2732%27%20cy%3D%2716%27%20rx%3D%273.2%27%20ry%3D%275%27/%3E%3Ccircle%20cx%3D%2732%27%20cy%3D%2710%27%20r%3D%273.4%27/%3E%3C/g%3E%3C/g%3E%3Cg%20transform%3D%27translate%28116%2C8%29%20scale%280.68%29%27%3E%0A%3Cpath%20d%3D%27M8.4%204.4C8.7%203.2%209.5%202.2%2010.8%201.6%2010.2%202.6%2010%203.4%209.9%204.4Z%27%20fill%3D%27%236f5d27%27/%3E%0A%3Cellipse%20cx%3D%278%27%20cy%3D%279.6%27%20rx%3D%276.4%27%20ry%3D%275.4%27%20fill%3D%27%23f97316%27/%3E%0A%3Cellipse%20cx%3D%274.9%27%20cy%3D%279.6%27%20rx%3D%271.8%27%20ry%3D%275%27%20fill%3D%27%23ea580c%27/%3E%0A%3Cellipse%20cx%3D%2711.1%27%20cy%3D%279.6%27%20rx%3D%271.8%27%20ry%3D%275%27%20fill%3D%27%23ea580c%27/%3E%0A%3Cellipse%20cx%3D%278%27%20cy%3D%279.6%27%20rx%3D%271.6%27%20ry%3D%275.2%27%20fill%3D%27%23fb923c%27/%3E%0A%3Cpath%20d%3D%27M4.7%208.2%206.1%206.9%206.7%208.8Z%27%20fill%3D%27%23ffd43b%27/%3E%0A%3Cpath%20d%3D%27M11.3%208.2%209.9%206.9%209.3%208.8Z%27%20fill%3D%27%23ffd43b%27/%3E%0A%3Cpath%20d%3D%27M4.6%2011.2%206%2012.3%207.4%2011.3%208.8%2012.4%2010.2%2011.3%2011.6%2011.4%2010.6%2013.4%208%2014%205.4%2013.4Z%27%20fill%3D%27%23ffd43b%27/%3E%0A%3C/g%3E%3Cg%20transform%3D%27translate%28168%2C2%29%20scale%280.22%29%27%3E%3Cg%20fill%3D%27%237a5aa0%27%3E%3Cpath%20d%3D%27M30%2014C27%206%2016%201%206%203.5L4.5%202.5C6%209%209%2013.5%2012%2017Q15.5%2011%2019%2018.5Q22.5%2013%2026%2021Q28%2017%2030%2018.5L30%2014Z%27/%3E%3Cpath%20d%3D%27M34%2014C37%206%2048%201%2058%203.5L59.5%202.5C58%209%2055%2013.5%2052%2017Q48.5%2011%2045%2018.5Q41.5%2013%2038%2021Q36%2017%2034%2018.5L34%2014Z%27/%3E%3Cpath%20d%3D%27M29.5%209.5L27.8%203.5L31.2%207.8Z%27/%3E%3Cpath%20d%3D%27M34.5%209.5L36.2%203.5L32.8%207.8Z%27/%3E%3Cellipse%20cx%3D%2732%27%20cy%3D%2716%27%20rx%3D%273.2%27%20ry%3D%275%27/%3E%3Ccircle%20cx%3D%2732%27%20cy%3D%2710%27%20r%3D%273.4%27/%3E%3C/g%3E%3C/g%3E%3Cg%20transform%3D%27translate%28222%2C7%29%20scale%280.68%29%27%3E%0A%3Cpath%20d%3D%27M8.4%204.4C8.7%203.2%209.5%202.2%2010.8%201.6%2010.2%202.6%2010%203.4%209.9%204.4Z%27%20fill%3D%27%236f5d27%27/%3E%0A%3Cellipse%20cx%3D%278%27%20cy%3D%279.6%27%20rx%3D%276.4%27%20ry%3D%275.4%27%20fill%3D%27%23f97316%27/%3E%0A%3Cellipse%20cx%3D%274.9%27%20cy%3D%279.6%27%20rx%3D%271.8%27%20ry%3D%275%27%20fill%3D%27%23ea580c%27/%3E%0A%3Cellipse%20cx%3D%2711.1%27%20cy%3D%279.6%27%20rx%3D%271.8%27%20ry%3D%275%27%20fill%3D%27%23ea580c%27/%3E%0A%3Cellipse%20cx%3D%278%27%20cy%3D%279.6%27%20rx%3D%271.6%27%20ry%3D%275.2%27%20fill%3D%27%23fb923c%27/%3E%0A%3Cpath%20d%3D%27M4.7%208.2%206.1%206.9%206.7%208.8Z%27%20fill%3D%27%23ffd43b%27/%3E%0A%3Cpath%20d%3D%27M11.3%208.2%209.9%206.9%209.3%208.8Z%27%20fill%3D%27%23ffd43b%27/%3E%0A%3Cpath%20d%3D%27M4.6%2011.2%206%2012.3%207.4%2011.3%208.8%2012.4%2010.2%2011.3%2011.6%2011.4%2010.6%2013.4%208%2014%205.4%2013.4Z%27%20fill%3D%27%23ffd43b%27/%3E%0A%3C/g%3E%3Cg%20transform%3D%27translate%28274%2C1%29%20scale%280.22%29%27%3E%3Cg%20fill%3D%27%237a5aa0%27%3E%3Cpath%20d%3D%27M30%2014C27%206%2016%201%206%203.5L4.5%202.5C6%209%209%2013.5%2012%2017Q15.5%2011%2019%2018.5Q22.5%2013%2026%2021Q28%2017%2030%2018.5L30%2014Z%27/%3E%3Cpath%20d%3D%27M34%2014C37%206%2048%201%2058%203.5L59.5%202.5C58%209%2055%2013.5%2052%2017Q48.5%2011%2045%2018.5Q41.5%2013%2038%2021Q36%2017%2034%2018.5L34%2014Z%27/%3E%3Cpath%20d%3D%27M29.5%209.5L27.8%203.5L31.2%207.8Z%27/%3E%3Cpath%20d%3D%27M34.5%209.5L36.2%203.5L32.8%207.8Z%27/%3E%3Cellipse%20cx%3D%2732%27%20cy%3D%2716%27%20rx%3D%273.2%27%20ry%3D%275%27/%3E%3Ccircle%20cx%3D%2732%27%20cy%3D%2710%27%20r%3D%273.4%27/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
   background-size: 100% 18px;
   background-repeat: no-repeat;
   animation: fx-burst 1.4s ease-out 1 forwards;
@@ -632,20 +650,37 @@ body.reduce-anim .metric.just-reset .fill::before {
   }
 }
 
-/* ----------------------------------------------------------- season wipe */
-/* When the look flips between normal and Halloween while the popover is
-   visible, the NEW look is revealed top-to-bottom like a curtain. The class
-   sits on <html> for the transition's duration only; the unscoped
-   ::view-transition rules in styles.css (animation:none, normal blend) stay
-   in charge of the day/night circle wipe — this selector just out-ranks
-   them while .season-wipe is set. */
-html.season-wipe::view-transition-old(root) {
-  animation: none;
+/* -------------------------------------------------------- season toggle */
+/* Pumpkin button in the sidebar, above #theme-btn. Chrome identical to the
+   other sidebar icon buttons (they're de-chromed by an ID list in
+   styles.css; this file owns the whole theme so we restate it here — not
+   season-gated, the button must look right while Halloween is OFF). */
+#season-btn {
+  background: none;
+  border: none;
+  color: var(--muted-foreground);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 3px 7px;
+  border-radius: 7px;
+  transition: background 0.15s, color 0.15s;
 }
-html.season-wipe::view-transition-new(root) {
-  animation: season-wipe 1.2s cubic-bezier(0.65, 0, 0.35, 1) both;
+#season-btn:hover {
+  background: var(--accent);
+  color: var(--foreground);
 }
-@keyframes season-wipe {
-  from { clip-path: inset(0 0 100% 0); }
-  to { clip-path: inset(0 0 0 0); }
+#season-btn:active {
+  transform: scale(0.88);
+}
+#season-btn svg {
+  width: 15px;
+  height: 15px;
+  display: block;
+  margin: 0 auto;
+}
+/* OFF inside the season window: grayscale + dimmed so the toggle reads as
+   "turn it back on". */
+:root:not([data-season="halloween"]) #season-btn svg {
+  filter: grayscale(1);
+  opacity: 0.55;
 }

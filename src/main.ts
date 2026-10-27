@@ -2726,15 +2726,26 @@ const systemLight = window.matchMedia("(prefers-color-scheme: light)");
 const BAT_SVG =
   '<div class="bat-bank">' +
   '<svg class="bat-svg" viewBox="0 0 64 32" aria-hidden="true">' +
-  '<g class="wing wing-l"><path d="M30 13C24 4 12 4 5 9Q7 11 12 16Q14 13.5 19 19Q22 16.5 27 20.5L29 16Z"/></g>' +
-  '<g class="wing wing-r"><path d="M34 13C40 4 52 4 59 9Q57 11 52 16Q50 13.5 45 19Q42 16.5 37 20.5L35 16Z"/></g>' +
+  '<g class="wing wing-l">' +
+  '<path d="M30 14C27 6 16 1 6 3.5L4.5 2.5C6 9 9 13.5 12 17Q15.5 11 19 18.5Q22.5 13 26 21Q28 17 30 18.5L30 14Z"/>' +
+  '<path class="bones" d="M30 14L12 17M30 14L19 18.5M30 14L26 21"/>' +
+  '</g>' +
+  '<g class="wing wing-r">' +
+  '<path d="M34 14C37 6 48 1 58 3.5L59.5 2.5C58 9 55 13.5 52 17Q48.5 11 45 18.5Q41.5 13 38 21Q36 17 34 18.5L34 14Z"/>' +
+  '<path class="bones" d="M34 14L52 17M34 14L45 18.5M34 14L38 21"/>' +
+  '</g>' +
   '<g class="body">' +
-  '<path d="M29.6 9.8L28.6 4.6L31.4 7.6Z"/>' +
-  '<path d="M34.4 9.8L35.4 4.6L32.6 7.6Z"/>' +
-  '<circle cx="32" cy="11" r="3"/>' +
-  '<ellipse cx="32" cy="17.5" rx="3.4" ry="5.2"/>' +
-  '<circle class="eye" cx="30.7" cy="11.2" r="0.8"/>' +
-  '<circle class="eye" cx="33.3" cy="11.2" r="0.8"/>' +
+  '<path d="M29.5 9.5L27.8 3.5L31.2 7.8Z"/>' +
+  '<path d="M34.5 9.5L36.2 3.5L32.8 7.8Z"/>' +
+  '<circle cx="32" cy="10" r="3.4"/>' +
+  '<ellipse cx="32" cy="16" rx="3.2" ry="5"/>' +
+  '<circle class="eye" cx="30.6" cy="9.6" r="0.85"/>' +
+  '<circle class="eye" cx="33.4" cy="9.6" r="0.85"/>' +
+  '<g class="face">' +
+  '<path d="M29.9 12.8Q32 14.4 34.1 12.8" fill="none" stroke="#cfc6e0" stroke-width="0.5" stroke-linecap="round"/>' +
+  '<path d="M30.4 13.1L31.1 14.6L31.8 13.2Z" fill="#e8e4f0"/>' +
+  '<path d="M32.2 13.2L32.9 14.6L33.6 13.1Z" fill="#e8e4f0"/>' +
+  '</g>' +
   '</g></svg></div>';
 
 let batsLayer: HTMLElement | null = null;
@@ -2767,12 +2778,31 @@ function setSeasonDom(season: string | null): void {
 
 let seasonWiping = false;
 
+/// Sidebar pumpkin toggle: visible only while the Halloween window is
+/// active (it is also how the theme gets turned back on). Tooltip mirrors
+/// the current state.
+async function syncSeasonBtn(): Promise<void> {
+  const btn = document.querySelector<HTMLElement>("#season-btn");
+  if (!btn) return;
+  let window = null;
+  try {
+    window = await invoke<string | null>("season_window_now");
+  } catch {
+    window = null;
+  }
+  btn.hidden = window !== "halloween";
+  const on = document.documentElement.dataset.season === "halloween";
+  btn.title = on ? t("sidebar.seasonOff") : t("sidebar.seasonOn");
+}
+
 /// Syncs the popover's look with the active season. When the look is
-/// changing and the window is visible, the new look sweeps in from the top
-/// (View Transitions clip-path wipe, like toggleTheme's circle); otherwise
-/// it switches instantly. While hidden we keep whatever the user last saw
-/// (config.seasonShown) so the next visible open can play the wipe.
-async function applySeason(opts: { animate?: boolean } = {}): Promise<void> {
+/// changing and the window is visible, the new look is revealed by the
+/// day/night-style clip-path circle from the pumpkin button (or an
+/// explicit origin element); otherwise it switches instantly. While hidden
+/// we keep whatever the user last saw (config.seasonShown) so the next
+/// visible open can play the reveal.
+async function applySeason(opts: { animate?: boolean; origin?: HTMLElement } = {}): Promise<void> {
+  void syncSeasonBtn();
   let season: string | null = null;
   try {
     season = await invoke<string | null>("active_season_now");
@@ -2787,24 +2817,34 @@ async function applySeason(opts: { animate?: boolean } = {}): Promise<void> {
     return;
   }
   // Hidden and the user has never seen this look (or the look changed since
-  // they did): hold the old one until a visible open can play the wipe.
+  // they did): hold the old one until a visible open can play the reveal.
   if (!visible && target !== config.seasonShown) return;
 
-  const doc = document as Document & {
-    startViewTransition?: (cb: () => void) => { finished: Promise<void> };
-  };
-  if (opts.animate && visible && !reduceMotion() && doc.startViewTransition && !seasonWiping) {
+  if (opts.animate && visible && !seasonWiping) {
     seasonWiping = true;
-    document.documentElement.classList.add("season-wipe");
-    const transition = doc.startViewTransition(() => setSeasonDom(season));
-    transition.finished.finally(() => {
+    const btn = document.querySelector<HTMLElement>("#season-btn");
+    const origin =
+      opts.origin ?? (btn && !btn.hidden ? btn : document.getElementById("app-logo")!);
+    circleReveal(origin, () => setSeasonDom(season), () => {
       seasonWiping = false;
-      document.documentElement.classList.remove("season-wipe");
     });
   } else {
     setSeasonDom(season);
   }
   if (config.seasonShown !== target) void patchConfig({ seasonShown: target });
+}
+
+/// Pumpkin button in the sidebar: same flip as Settings -> Seasonal themes,
+/// with the day/night circle reveal playing from the button.
+function toggleSeason(): void {
+  const next = config.seasonalThemes === false;
+  const btn = document.querySelector<HTMLElement>("#season-btn") ?? undefined;
+  void patchConfig({ seasonalThemes: next }).then(() => {
+    const seasonal = document.querySelector<HTMLInputElement>("#seasonal");
+    if (seasonal) seasonal.checked = next;
+    void applySeason({ animate: true, origin: btn });
+    requestTraySync();
+  });
 }
 
 function applyAppearance(): void {
@@ -2823,20 +2863,12 @@ function applyAppearance(): void {
   }
 }
 
-/// Day/night toggle with the circular wipe from jazii.dev: the new theme
-/// expands as a clip-path circle from the button via the View Transitions
-/// API. Falls back to an instant switch where unsupported.
-function toggleTheme(e: Event): void {
-  const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
-  const apply = () => {
-    config.appearance = next;
-    applyAppearance();
-    const select = document.querySelector<HTMLSelectElement>("#appearance");
-    if (select) select.value = next;
-  };
-
-  const btn = e.currentTarget as HTMLElement;
-  const rect = btn.getBoundingClientRect();
+/// Circular reveal from jazii.dev, shared by the day/night and season
+/// toggles: the new look expands as a clip-path circle from the origin
+/// element's center via the View Transitions API. Falls back to an instant
+/// switch under reduced motion or where the API is missing.
+function circleReveal(origin: HTMLElement, apply: () => void, onDone?: () => void): void {
+  const rect = origin.getBoundingClientRect();
   const x = rect.left + rect.width / 2;
   const y = rect.top + rect.height / 2;
   const maxRadius = Math.hypot(
@@ -2849,7 +2881,7 @@ function toggleTheme(e: Event): void {
     const transition = doc.startViewTransition(apply);
     transition.ready
       .then(() => {
-        document.documentElement.animate(
+        const anim = document.documentElement.animate(
           [
             { clipPath: `circle(0px at ${x}px ${y}px)` },
             { clipPath: `circle(${maxRadius}px at ${x}px ${y}px)` },
@@ -2860,11 +2892,25 @@ function toggleTheme(e: Event): void {
             pseudoElement: "::view-transition-new(root)",
           },
         );
+        anim.finished.finally(() => onDone?.());
       })
-      .catch(() => {});
+      .catch(() => onDone?.());
   } else {
     apply();
+    onDone?.();
   }
+}
+
+/// Day/night toggle: the new theme expands as a circle from the button.
+function toggleTheme(e: Event): void {
+  const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+  const apply = () => {
+    config.appearance = next;
+    applyAppearance();
+    const select = document.querySelector<HTMLSelectElement>("#appearance");
+    if (select) select.value = next;
+  };
+  circleReveal(e.currentTarget as HTMLElement, apply);
   void patchConfig({ appearance: next });
 }
 
@@ -5677,7 +5723,7 @@ async function initSettings(): Promise<void> {
   seasonal.addEventListener("change", () => {
     // The tray icon recolors Rust-side, so it must re-sync too.
     void patchConfig({ seasonalThemes: seasonal.checked }).then(() => {
-      void applySeason({ animate: true });
+      void applySeason({ animate: true, origin: seasonal });
       requestTraySync();
     });
   });
@@ -5868,6 +5914,7 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
   document.querySelector("#theme-btn")!.addEventListener("click", toggleTheme);
+  document.querySelector("#season-btn")!.addEventListener("click", toggleSeason);
   setupTrailFisheye();
   setupTooltips();
   // No lens init here: applyGlass() (via initSettings, after the saved

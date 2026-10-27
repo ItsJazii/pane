@@ -36,6 +36,8 @@ const en: Dict = {
   "detail.unknownType": "Unknown type",
   "sidebar.theme": "Light / dark mode",
   "sidebar.themeToDark": "Switch to dark mode",
+  "sidebar.seasonOff": "Turn off Halloween theme",
+  "sidebar.seasonOn": "Turn on Halloween theme",
   "sidebar.themeToLight": "Switch to light mode",
   "sidebar.refresh": "Refresh now",
   "sidebar.customize": "Customize",
@@ -474,6 +476,8 @@ const zh: Dict = {
   "detail.unknownType": "类型未知",
   "sidebar.theme": "浅色 / 深色模式",
   "sidebar.themeToDark": "切换到深色模式",
+  "sidebar.seasonOff": "关闭万圣节主题",
+  "sidebar.seasonOn": "开启万圣节主题",
   "sidebar.themeToLight": "切换到浅色模式",
 
   "sidebar.refresh": "立即刷新",
@@ -875,6 +879,8 @@ const zh: Dict = {
 const ru: Dict = {
   "sidebar.theme": "Светлая / тёмная тема",
   "sidebar.themeToDark": "Переключить на тёмную тему",
+  "sidebar.seasonOff": "Выключить тему Хэллоуина",
+  "sidebar.seasonOn": "Включить тему Хэллоуина",
   "sidebar.themeToLight": "Переключить на светлую тему",
 
   "sidebar.refresh": "Обновить сейчас",

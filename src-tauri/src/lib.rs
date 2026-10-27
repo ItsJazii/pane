@@ -588,6 +588,18 @@ fn active_season_now() -> Option<&'static str> {
     season_now()
 }
 
+/// Whether the Halloween window is live right now (ignores the user's
+/// seasonalThemes toggle — the sidebar pumpkin button stays visible in the
+/// window so it can be switched back on).
+#[tauri::command]
+fn season_window_now() -> Option<&'static str> {
+    if halloween_window(chrono::Local::now().date_naive()) {
+        Some("halloween")
+    } else {
+        None
+    }
+}
+
 /// Theme ink, pumpkin-orange foreground during Halloween (same outline).
 fn current_tray_ink() -> TrayInk {
     let mut ink = tray_ink_for_theme(system_uses_light_theme());
@@ -3623,6 +3635,7 @@ pub fn run() {
             sub2api_delete_key,
             get_config,
             active_season_now,
+            season_window_now,
             set_config,
             check_dir,
             system_ui_locale,
