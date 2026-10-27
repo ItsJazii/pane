@@ -100,8 +100,6 @@ fn long_window(
             && matches!((old_reset, new_reset), (Some(o), Some(n)) if n - o >= LONG_WINDOW_MS))
 }
 
-/// Compact duration for toast text: `6d 23h`, `4h 58m`, `12m`. Negative
-/// durations clamp to `0m`.
 /// Seasonal toast chrome: Halloween prefixes the reset title with a
 /// pumpkin and the warning titles with a ghost, in every locale. The rest
 /// of the toast (body, icon) stays exactly as the OS renders it.
@@ -113,6 +111,8 @@ pub(crate) fn seasonal_title(title: String, reset: bool, season: Option<&str>) -
     }
 }
 
+/// Compact duration for toast text: `6d 23h`, `4h 58m`, `12m`. Negative
+/// durations clamp to `0m`.
 fn compact_duration(ms: i64) -> String {
     let ms = ms.max(0);
     const MIN: i64 = 60_000;

@@ -4142,7 +4142,6 @@ function playPendingBursts(): void {
 
 let popoverOpen = false;
 
-
 /// Long-window verdicts for metrics that report no period, keyed by
 /// "<snapshot id>:<label>". Decided once per observed resets_at (a reset
 /// ≥6 days out, or a ≥6-day jump from the previous reset) and kept until
