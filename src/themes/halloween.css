@@ -144,8 +144,9 @@
 /* ------------------------------------------------------------------ bats */
 /* Three anatomical bats — ears, eyes, and membrane wings with scalloped
    trailing edges that actually rotate around the shoulder — drift across
-   the popover on curved offset paths. Pure CSS; the .bats layer and .bat
-   markup are injected by JS in the app. Popover is 380x600 px; each path
+   the popover on curved offset paths. The .bats layer lives in the DOM
+   while the season is on; .bat nodes are spawned per flight by the JS
+   scheduler and remove themselves on animationend. Each path
    starts/ends ~60 px off-canvas. */
 .bats {
   display: none;
@@ -166,7 +167,7 @@
   left: 0;
   offset-rotate: 0deg;
   will-change: offset-distance;
-  animation: bat-travel 20s ease-in-out infinite backwards;
+  animation: bat-travel 6s ease-in-out 1 both;
   filter: drop-shadow(0 0 1.5px rgb(251 146 60 / 0.85)) drop-shadow(0 0 4px rgb(249 115 22 / 0.25)); /* pumpkin rim light */
 }
 
@@ -178,7 +179,7 @@
 /* Gentle banking into the swoops — offsets are flat, the tilt does the
    turning. Delayed with the travel so the sway lands inside the crossing. */
 .bat-bank {
-  animation: bat-bank 20s ease-in-out infinite backwards;
+  animation: bat-bank 6s ease-in-out 1 both;
 }
 
 .bat-svg {
@@ -256,7 +257,6 @@
   width: 26px;
   opacity: 0.6;
   offset-path: path("M450 300C360 255 280 340 190 295C115 258 35 335 -70 295");
-  animation-delay: 2s;
 }
 :root[data-season="halloween"][data-theme="light"] .bat-2 {
   opacity: 0.45;
@@ -264,9 +264,7 @@
 .bat-2 .bat-svg {
   transform: scaleX(-1);
 }
-.bat-2 .bat-bank {
-  animation-delay: 2s;
-}
+
 .bat-2 .wing-l,
 .bat-2 .wing-r {
   animation-duration: 0.22s;
@@ -281,10 +279,6 @@
 .bat-3 {
   width: 48px;
   offset-path: path("M-70 420C60 380 150 475 235 435C320 395 400 470 480 420");
-  animation-delay: 11s;
-}
-.bat-3 .bat-bank {
-  animation-delay: 11s;
 }
 .bat-3 .wing-l {
   animation: wing-flap3-l 7s ease-in-out infinite;
@@ -296,13 +290,11 @@
   animation: body-bob3 7s ease-in-out infinite;
 }
 
-/* Crossing occupies 0-30% (~6 s) of the 20 s cycle; the rest is spent
-   parked off-canvas, so the popover is often empty. */
+/* One flight = one crossing; JS removes the node on animationend. */
 @keyframes bat-travel {
   0% {
     offset-distance: 0%;
   }
-  30%,
   100% {
     offset-distance: 100%;
   }
@@ -312,16 +304,15 @@
   0% {
     transform: rotate(-7deg);
   }
-  8% {
+  26.7% {
     transform: rotate(6deg);
   }
-  16% {
+  53.3% {
     transform: rotate(-7deg);
   }
-  24% {
+  80% {
     transform: rotate(6deg);
   }
-  30%,
   100% {
     transform: rotate(0deg);
   }

@@ -601,9 +601,11 @@ fn season_window_now() -> Option<&'static str> {
 }
 
 /// Theme ink, pumpkin-orange foreground during Halloween (same outline).
-fn current_tray_ink() -> TrayInk {
+/// The caller computes the season once per tray apply — season_now()
+/// reloads the config from disk.
+fn tray_ink(halloween: bool) -> TrayInk {
     let mut ink = tray_ink_for_theme(system_uses_light_theme());
-    if season_now().is_some() {
+    if halloween {
         ink.foreground = [251, 146, 60, 255];
     }
     ink
@@ -705,7 +707,7 @@ fn apply_main_tray_projection(
         }
         tray_projection::MainTrayIconMode::Numbers => {
             let icon = tauri::image::Image::new_owned(
-                draw_tray_numbers_with(&projection.remaining_percentages, current_tray_ink()),
+                draw_tray_numbers_with(&projection.remaining_percentages, tray_ink(halloween)),
                 32,
                 32,
             );
@@ -983,7 +985,7 @@ async fn apply_tray_strip(
                 handle.remove_tray_by_id(&format!("strip-num-{key}"));
             }
 
-            let ink = current_tray_ink();
+            let ink = tray_ink(season_now().is_some());
             for entry in strip_entry_application_order(&entries, rebuild_order) {
                 let tray_key = strip_tray_key(&entry.id);
                 let logo_id = format!("strip-logo-{tray_key}");

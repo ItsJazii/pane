@@ -2581,6 +2581,7 @@ function reduceMotion(): boolean {
 
 function applyReduceMotion(): void {
   document.body.classList.toggle("reduce-anim", config.reduceAnimations === true);
+  syncBats();
 }
 
 let lensReady = false;
@@ -2754,13 +2755,17 @@ function batSvg(id: number): string {
 }
 
 let batsLayer: HTMLElement | null = null;
+const batTimers: number[] = [];
+let batFlightId = 0;
+const BAT_CYCLE_MS = 20_000;
 
 /// Halloween is Oct 20 - Nov 7 (the backend owns the window so the
 /// tray and the popover always agree). `data-season` on <html> activates
 /// the stylesheet block; the bat layer is injected here and removed when
 /// the season ends or the setting is off.
-/// Applies the season to the DOM: data-season on <html> plus the bat
-/// layer (injected lazily, removed when the season ends).
+/// Applies the season to the DOM: data-season on <html> plus the empty
+/// .bats container — the bats themselves are spawned per flight by the
+/// scheduler below, so nothing animates while nobody can see them.
 function setSeasonDom(season: string | null): void {
   if (season === "halloween") {
     document.documentElement.dataset.season = season;
@@ -2768,16 +2773,62 @@ function setSeasonDom(season: string | null): void {
       batsLayer = document.createElement("div");
       batsLayer.className = "bats";
       batsLayer.setAttribute("aria-hidden", "true");
-      batsLayer.innerHTML =
-        `<div class="bat bat-1">${batSvg(1)}</div>` +
-        `<div class="bat bat-2">${batSvg(2)}</div>` +
-        `<div class="bat bat-3">${batSvg(3)}</div>`;
       document.body.appendChild(batsLayer);
     }
   } else {
     delete document.documentElement.dataset.season;
+    stopBats();
     batsLayer?.remove();
     batsLayer = null;
+  }
+  syncBats();
+}
+
+/// Bats fly only while someone can actually see them: season on, popover
+/// open (never in widget mode), window visible, motion allowed.
+function batsShouldRun(): boolean {
+  return (
+    document.documentElement.dataset.season === "halloween" &&
+    popoverOpen &&
+    !config.widgetMode &&
+    !document.hidden &&
+    !config.reduceAnimations &&
+    !window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+}
+
+/// One bat, one flight: it removes itself when the travel animation ends.
+function flyBat(n: number): void {
+  if (!batsLayer) return;
+  const el = document.createElement("div");
+  el.className = `bat bat-${n}`;
+  el.innerHTML = batSvg(++batFlightId);
+  el.addEventListener("animationend", (e) => {
+    if (e.target === el && e.animationName === "bat-travel") el.remove();
+  });
+  batsLayer.appendChild(el);
+}
+
+/// Today's choreography, driven by timers instead of parked animations:
+/// bat-1 at 0 s, bat-2 at 2 s, bat-3 at 11 s, every 20 s.
+function startBats(): void {
+  batTimers.push(window.setTimeout(() => flyBat(1), 0));
+  batTimers.push(window.setTimeout(() => flyBat(2), 2000));
+  batTimers.push(window.setTimeout(() => flyBat(3), 11000));
+  batTimers.push(window.setTimeout(startBats, BAT_CYCLE_MS));
+}
+
+function stopBats(): void {
+  for (const t of batTimers) window.clearTimeout(t);
+  batTimers.length = 0;
+  batsLayer?.querySelectorAll(".bat").forEach((b) => b.remove());
+}
+
+function syncBats(): void {
+  if (batsShouldRun()) {
+    if (batTimers.length === 0) startBats();
+  } else {
+    stopBats();
   }
 }
 
@@ -5781,7 +5832,7 @@ async function initSettings(): Promise<void> {
 
   for (const manager of siteKeyManagers) manager.init();
 
-  initWidget({ getConfig: () => config, patchConfig, brandColor: spendColor });
+  initWidget({ getConfig: () => config, patchConfig, brandColor: spendColor, syncSeasonalFx: syncBats });
 }
 
 /// Restore every preference to the same defaults a fresh install gets.
@@ -5902,7 +5953,9 @@ function syncSettingsControls(): void {
 window.addEventListener("DOMContentLoaded", () => {
   window.addEventListener("blur", () => {
     popoverOpen = false;
+    syncBats();
   });
+  document.addEventListener("visibilitychange", () => syncBats());
   const appLogo = document.querySelector<HTMLElement>("#app-logo")!;
   appLogo.innerHTML = `<img src="${paneLogo}" alt="Pane" />`;
   // Party mode, the easy way: triple-click the logo. (The Konami code
@@ -6282,6 +6335,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
   void listen("popover-shown", () => {
     popoverOpen = true;
+    syncBats();
     void checkForUpdate(true);
     // popover-shown can fire a frame before paint; the wipe needs the old
     // frame on screen first.
