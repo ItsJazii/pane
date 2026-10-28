@@ -1899,6 +1899,11 @@ footer {
   height: 26px;
   padding: 0;
 }
+/* The flex box above outranks the UA [hidden] rule (the seasonal button
+   hides itself outside its date window). */
+.sidebar-buttons button[hidden] {
+  display: none;
+}
 
 /* The ⟳ glyph's ink sits ~2px high inside the uniform box — nudge it so
    all five icons share the same ink pitch. */
