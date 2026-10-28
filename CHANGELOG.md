@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.5.0 — 2026-10-28
+
+### Added
+- **Halloween theme (#301, #302).** Until Nov 7 Pane wears a Halloween
+  look: pumpkin-orange meters, a pumpkin on the logo, cobwebs, bats
+  that fly across when you open Pane, an orange tray icon, a ghost and
+  jack-o'-lantern on limits that are about to run out, a pumpkin burst
+  when a weekly limit resets, and 🎃/👻 notification titles. Shared
+  card images get a cobweb and a pumpkin footer. It switches Pane to
+  dark mode while it's on and puts your old mode back when it ends.
+  Turn it off with the pumpkin button in the sidebar or Settings →
+  Seasonal themes. It turns itself off after Nov 7.
+
+### Changed
+- **New installs start with just Claude and Codex (#298).** Every other
+  provider waits in Customize, ready to turn on.
+- **Minimal view keeps plan names (#300).** Pro, Max, Plus and so on
+  now stay next to each card name in Minimal view.
+- **Back to the normal view (#302).** If you used Minimal view, this
+  update moves you to the normal view in the compact layout, once. You
+  can turn Minimal view back on in Settings.
+
+### Fixed
+- **Claude sign-in clash (#299).** When Claude Code and Pane renewed
+  your Claude sign-in at the same moment, the Claude card could show
+  "rotated by another app" until you opened Claude Code. Pane now picks
+  up Claude Code's new sign-in by itself.
+
 ## 0.4.63 — 2026-10-24
 
 ### Added

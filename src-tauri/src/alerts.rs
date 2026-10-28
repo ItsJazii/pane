@@ -100,6 +100,17 @@ fn long_window(
             && matches!((old_reset, new_reset), (Some(o), Some(n)) if n - o >= LONG_WINDOW_MS))
 }
 
+/// Seasonal toast chrome: Halloween prefixes the reset title with a
+/// pumpkin and the warning titles with a ghost, in every locale. The rest
+/// of the toast (body, icon) stays exactly as the OS renders it.
+pub(crate) fn seasonal_title(title: String, reset: bool, season: Option<&str>) -> String {
+    match (season, reset) {
+        (Some("halloween"), true) => format!("🎃 {title}"),
+        (Some("halloween"), false) => format!("👻 {title}"),
+        _ => title,
+    }
+}
+
 /// Compact duration for toast text: `6d 23h`, `4h 58m`, `12m`. Negative
 /// durations clamp to `0m`.
 fn compact_duration(ms: i64) -> String {
@@ -117,6 +128,18 @@ fn compact_duration(ms: i64) -> String {
 }
 
 pub fn evaluate(snapshots: &[Snapshot], cfg: &Value) -> Vec<Alert> {
+    evaluate_with_season(
+        snapshots,
+        cfg,
+        crate::active_season(cfg, chrono::Local::now().date_naive()),
+    )
+}
+
+pub(crate) fn evaluate_with_season(
+    snapshots: &[Snapshot],
+    cfg: &Value,
+    season: Option<&'static str>,
+) -> Vec<Alert> {
     let want = |key: &str| cfg.get(key).and_then(Value::as_bool).unwrap_or(false);
     let want_almost = want("notifyAlmostOut");
     let want_close = want("notifyCuttingClose");
@@ -204,11 +227,11 @@ pub fn evaluate(snapshots: &[Snapshot], cfg: &Value) -> Vec<Alert> {
                     compact_duration(resets - chrono::Utc::now().timestamp_millis())
                 });
                 alerts.push(Alert {
-                    title: match loc {
+                    title: seasonal_title(match loc {
                         "zh" => "额度已重置".into(),
                         "ru" => "Лимит сброшен".into(),
                         _ => "Limit reset".into(),
-                    },
+                    }, true, season),
                     body: match loc {
                         "zh" => format!(
                             "{}{}",
@@ -249,11 +272,11 @@ pub fn evaluate(snapshots: &[Snapshot], cfg: &Value) -> Vec<Alert> {
                 let loc = crate::i18n::resolved_locale(cfg);
                 if want_runout && run_out_now && !entry.run_out {
                     alerts.push(Alert {
-                        title: match loc {
+                        title: seasonal_title(match loc {
                             "zh" => "将会用完".into(),
                             "ru" => "Кончится до сброса".into(),
                             _ => "Will Run Out".into(),
-                        },
+                        }, false, season),
                         body: match loc {
                             "zh" => format!("{name} 按当前速度会在重置前用完。"),
                             "ru" => format!("{name} при текущем темпе исчерпается до сброса."),
@@ -262,11 +285,11 @@ pub fn evaluate(snapshots: &[Snapshot], cfg: &Value) -> Vec<Alert> {
                     });
                 } else if want_close && close_now && !entry.close {
                     alerts.push(Alert {
-                        title: match loc {
+                        title: seasonal_title(match loc {
                             "zh" => "余量紧张".into(),
                             "ru" => "Запас на исходе".into(),
                             _ => "Cutting It Close".into(),
-                        },
+                        }, false, season),
                         body: match loc {
                             "zh" => format!("{name} 按当前速度重置时大约只剩 {spare:.0}%。"),
                             "ru" => format!("{name} к сбросу останется примерно {spare:.0}%."),
@@ -278,11 +301,11 @@ pub fn evaluate(snapshots: &[Snapshot], cfg: &Value) -> Vec<Alert> {
                 }
                 if want_almost && almost_now && !entry.almost_out {
                     alerts.push(Alert {
-                        title: match loc {
+                        title: seasonal_title(match loc {
                             "zh" => "即将用完".into(),
                             "ru" => "Почти кончилось".into(),
                             _ => "Almost Out".into(),
-                        },
+                        }, false, season),
                         body: match loc {
                             "zh" => format!("{name} 剩余不足 10%（还剩 {left:.0}%）。"),
                             "ru" => format!("{name} осталось меньше 10% (ещё {left:.0}%)."),
@@ -420,7 +443,7 @@ mod tests {
         // never alerts.
         assert!(evaluate(&[make(80.0, true)], &cfg).is_empty());
         // The same reading live does alert, proving the skip suppressed it.
-        let alerts = evaluate(&[make(80.0, false)], &cfg);
+        let alerts = evaluate_with_season(&[make(80.0, false)], &cfg, None);
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].title, "Will Run Out");
         forget_snapshot(id);
@@ -445,7 +468,7 @@ mod tests {
         };
         forget_snapshot(id);
         assert!(evaluate(&[make(10.0, false)], &cfg).is_empty());
-        let alerts = evaluate(&[make(80.0, true)], &cfg);
+        let alerts = evaluate_with_season(&[make(80.0, true)], &cfg, None);
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].title, "Will Run Out");
         forget_snapshot(id);
@@ -464,7 +487,7 @@ mod tests {
         forget_snapshot(id);
         assert!(evaluate(&[make(80.0, t)], &cfg).is_empty());
         assert!(evaluate(&[make(80.0, t)], &cfg).is_empty());
-        let alerts = evaluate(&[make(0.0, t + period)], &cfg);
+        let alerts = evaluate_with_season(&[make(0.0, t + period)], &cfg, None);
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].title, "Limit reset");
         assert!(alerts[0].body.contains("Codex Weekly is back to 100%"));
@@ -613,5 +636,26 @@ mod tests {
         assert!(!has_state_for_test("onenewapi@ticket07-abc:Expiry"));
         assert!(has_state_for_test("onenewapi@ticket07-abcd:Usage"));
         forget_snapshot("onenewapi@ticket07-abcd");
+    }
+
+    #[test]
+    fn seasonal_title_prefixes_halloween_only() {
+        use super::seasonal_title;
+        assert_eq!(
+            seasonal_title("Limit reset".into(), true, Some("halloween")),
+            "🎃 Limit reset"
+        );
+        assert_eq!(
+            seasonal_title("Will Run Out".into(), false, Some("halloween")),
+            "👻 Will Run Out"
+        );
+        assert_eq!(
+            seasonal_title("Will Run Out".into(), false, None),
+            "Will Run Out"
+        );
+        assert_eq!(
+            seasonal_title("Limit reset".into(), true, Some("xmas")),
+            "Limit reset"
+        );
     }
 }

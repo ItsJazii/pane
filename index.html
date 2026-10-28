@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="stylesheet" href="/src/styles.css" />
+    <link rel="stylesheet" href="/src/themes/halloween.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Pane</title>
     <script type="module" src="/src/main.ts" defer></script>
@@ -106,6 +107,7 @@
           <span id="app-logo" class="app-logo" title="Pane"></span>
           <nav id="trail" aria-label="Card navigation" data-i18n-aria="sidebar.cards"></nav>
           <div class="sidebar-buttons">
+            <button id="season-btn" hidden title="Halloween"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8.4 4.4C8.7 3.2 9.5 2.2 10.8 1.6 10.2 2.6 10 3.4 9.9 4.4Z" fill="#6f5d27"/><ellipse cx="8" cy="9.6" rx="6.4" ry="5.4" fill="#f97316"/><ellipse cx="4.9" cy="9.6" rx="1.8" ry="5" fill="#ea580c"/><ellipse cx="11.1" cy="9.6" rx="1.8" ry="5" fill="#ea580c"/><ellipse cx="8" cy="9.6" rx="1.6" ry="5.2" fill="#fb923c"/><path d="M4.7 8.2 6.1 6.9 6.7 8.8Z" fill="#ffd43b"/><path d="M11.3 8.2 9.9 6.9 9.3 8.8Z" fill="#ffd43b"/><path d="M4.6 11.2 6 12.3 7.4 11.3 8.8 12.4 10.2 11.3 11.6 11.4 10.6 13.4 8 14 5.4 13.4Z" fill="#ffd43b"/></svg></button>
             <button id="theme-btn" title="Light / dark mode" data-i18n-title="sidebar.theme">&#9728;</button>
             <button id="refresh" title="Refresh now" data-i18n-title="sidebar.refresh">&#10227;</button>
             <button id="customize-btn" title="Customize" data-i18n-title="sidebar.customize">&#9776;</button>
@@ -178,13 +180,16 @@
             <label class="toggle"><input id="density" type="checkbox" /> <span data-i18n="settings.compact">Compact layout</span></label>
           </div>
           <div class="setting-row">
-            <label class="toggle" title="One starred (or first) meter per card — hide plan chips, extra rows, links, and share" data-i18n-title="settings.minimalTip"><input id="minimal" type="checkbox" /> <span data-i18n="settings.minimal">Minimal view</span></label>
+            <label class="toggle" title="One starred (or first) meter per card — hide extra rows, links, and share" data-i18n-title="settings.minimalTip"><input id="minimal" type="checkbox" /> <span data-i18n="settings.minimal">Minimal view</span></label>
           </div>
           <div class="setting-row">
             <label class="toggle" title="Turn off on slower PCs — replaces the glass refraction with a simple solid look" data-i18n-title="settings.glassTip"><input id="glass" type="checkbox" /> <span data-i18n="settings.glass">Liquid glass effects</span></label>
           </div>
           <div class="setting-row">
             <label class="toggle" title="Skip card entrance motion and the day/night wipe. Windows' own 'Animation effects' setting is still respected." data-i18n-title="settings.reduceAnimTip"><input id="reduce-anim" type="checkbox" /> <span data-i18n="settings.reduceAnim">Reduce animations</span></label>
+          </div>
+          <div class="setting-row">
+            <label class="toggle" title="Halloween look (Oct 20 – Nov 7) and future holiday themes. Turn off to keep the normal look." data-i18n-title="settings.seasonalTip"><input id="seasonal" type="checkbox" /> <span data-i18n="settings.seasonal">Seasonal themes</span></label>
           </div>
           <div class="setting-row">
             <label class="toggle"><input id="show-total-spend" type="checkbox" /> <span data-i18n="settings.showSpend">Show Total Spend card</span></label>

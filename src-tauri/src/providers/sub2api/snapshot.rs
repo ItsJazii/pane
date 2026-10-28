@@ -505,7 +505,7 @@ mod tests {
                     "rate_limits":[{"window":window,"used":used,"limit":100,"reset_at":reset.to_rfc3339()}]})).await;
                 snapshot.id = id.clone();
                 assert_eq!(snapshot.status, "ok");
-                let alerts = crate::alerts::evaluate(&[snapshot], &cfg);
+                let alerts = crate::alerts::evaluate_with_season(&[snapshot], &cfg, None);
                 assert_eq!(alerts.first().map(|alert| alert.title.as_str()), expected, "{window} at {used}%");
                 assert_eq!(alerts.len(), usize::from(expected.is_some()));
             }

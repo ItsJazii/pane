@@ -10,6 +10,9 @@ export interface WidgetDeps {
   getConfig: () => Config;
   patchConfig: (patch: Partial<Config>) => Promise<void>;
   brandColor: (providerId: string) => string;
+  /// Called after every widget-state apply (mode on/off, collapse, lock)
+  /// so seasonal effects can re-evaluate their run conditions.
+  syncSeasonalFx?: () => void;
 }
 
 let deps: WidgetDeps | null = null;
@@ -189,4 +192,5 @@ export async function applyWidgetState(): Promise<void> {
     collapsed,
     glass: cfg.glassEffects !== false,
   });
+  deps?.syncSeasonalFx?.();
 }

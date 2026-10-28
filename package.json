@@ -1,7 +1,7 @@
 {
   "name": "pane",
   "private": true,
-  "version": "0.4.63",
+  "version": "0.5.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -15,7 +15,7 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
-    "vite": "^6.0.3",
+    "vite": "^6.4.4",
     "typescript": "~5.6.2"
   }
 }
