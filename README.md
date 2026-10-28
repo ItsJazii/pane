@@ -309,6 +309,16 @@ Pane is not affiliated with or endorsed by Robin Ebers or any of the AI
 vendors listed. Provider names and logos belong to their respective owners
 and are used only to identify the services.
 
+## Star History
+
+<a href="https://www.star-history.com/?repos=itsjazii%2Fpane&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=itsjazii/pane&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=itsjazii/pane&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=itsjazii/pane&type=date&legend=top-left" />
+ </picture>
+</a>
+
 ## License
 
 [MIT](LICENSE) — © 2026 Jazii, with provider research credit to Robin
