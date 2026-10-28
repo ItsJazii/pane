@@ -5679,8 +5679,15 @@ async function initSettings(): Promise<void> {
   // normal view once. configRev stays set so later revs can append steps.
   const CONFIG_REV = 1;
   if ((config.configRev ?? 0) < CONFIG_REV) {
-    config.minimal = false;
-    void patchConfig({ minimal: false, configRev: CONFIG_REV }).catch(() => {});
+    // Minimal-view users go back to the normal view once, in the compact
+    // layout; everyone else keeps their density.
+    if (config.minimal === true) {
+      config.minimal = false;
+      config.density = "compact";
+      void patchConfig({ minimal: false, density: "compact", configRev: CONFIG_REV }).catch(() => {});
+    } else {
+      void patchConfig({ configRev: CONFIG_REV }).catch(() => {});
+    }
   }
   // First launch timestamp — backs the star prompt's "a few days old"
   // eligibility. Recorded once, on the first config load that finds it 0.
