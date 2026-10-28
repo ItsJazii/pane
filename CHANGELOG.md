@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Claude: when Claude Code refreshes its sign-in at the same moment as Pane, Pane now picks up the new sign-in instead of showing the "rotated by another app" error.
+- New installs start with just the Claude and Codex cards; turn on the rest in Customize.
 
 ## 0.4.63 — 2026-10-24
 
