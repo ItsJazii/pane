@@ -171,6 +171,16 @@ Pane 的诞生离不开 **[Robin Ebers](https://github.com/robinebers)** 开发�
 
 Pane 与 Robin Ebers 或所列 AI 服务商不存在关联，也未获得他们的认可。服务商名称和标识仅用于识别对应服务。
 
+## Star 历史
+
+<a href="https://www.star-history.com/?repos=itsjazii%2Fpane&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=itsjazii/pane&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=itsjazii/pane&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=itsjazii/pane&type=date&legend=top-left" />
+ </picture>
+</a>
+
 ## 许可证
 
 [MIT](LICENSE) — © 2026 Jazii；服务商相关研究归功于采用 MIT 许可证的 Robin Ebers OpenUsage。
