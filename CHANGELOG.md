@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Updated the secure-connection (rustls), DeepSeek Harness log reader
+  (zstd) and build (Vite) libraries to fix known security advisories.
+
 ## 0.5.0 — 2026-10-28
 
 ### Added
