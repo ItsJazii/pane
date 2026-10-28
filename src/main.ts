@@ -3840,17 +3840,15 @@ async function refresh(force = false, usageOnly = false): Promise<void> {
     if (config.layout === null && snapshots.length > 0) {
       // Families, so extra accounts (claude@work, codex@home) stay on too.
       // recentlyKeyed keeps a key entered during this very first scan.
+      // ALL_PROVIDERS too: some ids never come back in this fetch (Moonshot
+      // folds into an ok Kimi card) and would otherwise stay enabled.
       const starters = new Set(["claude", "codex"]);
-      const noCreds = snapshots
-        .filter(
-          (s) =>
-            !starters.has(providerFamily(s.id)) &&
-            !recentlyKeyed.has(s.id)
-        )
-        .map((s) => s.id);
-      if (noCreds.length) {
-        snapshots = snapshots.filter((s) => !noCreds.includes(s.id));
-        await patchConfig({ disabled: noCreds }).catch(() => {});
+      const offIds = [
+        ...new Set([...snapshots.map((s) => s.id), ...ALL_PROVIDERS.map(([id]) => id)]),
+      ].filter((id) => !starters.has(providerFamily(id)) && !recentlyKeyed.has(id));
+      if (offIds.length) {
+        snapshots = snapshots.filter((s) => !offIds.includes(s.id));
+        await patchConfig({ disabled: offIds }).catch(() => {});
         await unparkRecentlyKeyed();
       }
     } else if (config.layout) {
