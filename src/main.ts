@@ -231,6 +231,8 @@ export interface Config {
   starPromptDayCount: number;
   starPromptLastMs: number;
   reduceAnimations: boolean;
+  seasonalThemes: boolean;
+  seasonShown: string;
   locale: LocalePref;
   stepfunPlanCredits: number | null;
   widgetMode: boolean;
@@ -270,6 +272,8 @@ const FRONTEND_CONFIG_KEYS = [
   "starPromptDayCount",
   "starPromptLastMs",
   "reduceAnimations",
+  "seasonalThemes",
+  "seasonShown",
   "locale",
   "stepfunPlanCredits",
   "widgetMode",
@@ -484,6 +488,8 @@ let config: Config = {
   starPromptDayCount: 0,
   starPromptLastMs: 0,
   reduceAnimations: false,
+  seasonalThemes: true,
+  seasonShown: "",
   locale: "auto",
   stepfunPlanCredits: null,
   widgetMode: false,
@@ -1284,7 +1290,7 @@ function renderMetric(m: Metric, providerId: string): string {
       resetHtml,
     ].filter(Boolean).join(" · ");
     return `
-      <div class="metric">
+      <div class="metric" data-mkey="${escapeHtml(`${providerId}:${m.label}`)}">
         <div class="metric-head">
           <span class="metric-label">${escapeHtml(displayMetricLabel(m.label))}</span>
           ${note}
@@ -2310,6 +2316,63 @@ function presentStarPrompt(): void {
   document.body.appendChild(overlay);
 }
 
+function rgbToHsl(r: number, g: number, b: number): [number, number, number] {
+  r /= 255; g /= 255; b /= 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+  const l = (mx + mn) / 2, d = mx - mn;
+  if (!d) return [0, 0, l];
+  const sat = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn);
+  const h = mx === r ? ((g - b) / d + (g < b ? 6 : 0)) * 60
+    : mx === g ? ((b - r) / d + 2) * 60 : ((r - g) / d + 4) * 60;
+  return [h, sat, l];
+}
+function hslToRgb(h: number, s: number, l: number): [number, number, number] {
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const hp = (((h % 360) + 360) % 360) / 60;
+  const x = c * (1 - Math.abs((hp % 2) - 1));
+  let r = 0, g = 0, b = 0;
+  if (hp < 1) [r, g, b] = [c, x, 0];
+  else if (hp < 2) [r, g, b] = [x, c, 0];
+  else if (hp < 3) [r, g, b] = [0, c, x];
+  else if (hp < 4) [r, g, b] = [0, x, c];
+  else if (hp < 5) [r, g, b] = [x, 0, c];
+  else [r, g, b] = [c, 0, x];
+  const m = l - c / 2;
+  return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)];
+}
+
+/// Pumpkin-recolored Pane icon for the shared-card footer — the same
+/// halloween_recolor() the Rust tray runs on the window icon. Computed
+/// once; falls back to the normal icon on any failure.
+let paneIconHalloween: string | null = null;
+async function halloweenPaneIcon(): Promise<string | null> {
+  if (paneIconHalloween) return paneIconHalloween;
+  try {
+    const img = new Image();
+    img.src = paneIcon;
+    await img.decode();
+    const cv = document.createElement("canvas");
+    cv.width = img.width;
+    cv.height = img.height;
+    const cx = cv.getContext("2d")!;
+    cx.drawImage(img, 0, 0);
+    const d = cx.getImageData(0, 0, cv.width, cv.height);
+    for (let i = 0; i < d.data.length; i += 4) {
+      if (!d.data[i + 3]) continue;
+      const [h, sat, l] = rgbToHsl(d.data[i], d.data[i + 1], d.data[i + 2]);
+      if (h >= 180 && h <= 250 && sat > 0.25) {
+        const [r, g, b] = hslToRgb(25, 0.9, l * 0.75);
+        d.data[i] = r; d.data[i + 1] = g; d.data[i + 2] = b;
+      }
+    }
+    cx.putImageData(d, 0, 0);
+    paneIconHalloween = cv.toDataURL("image/png");
+  } catch {
+    paneIconHalloween = null;
+  }
+  return paneIconHalloween;
+}
+
 async function shareCard(id: string): Promise<void> {
   const status = document.querySelector("#status")!;
   try {
@@ -2392,10 +2455,19 @@ async function shareCard(id: string): Promise<void> {
     // document is the <svg>, so the attributes are mirrored there for the
     // :root[data-…] rules to keep matching.
     const root = document.documentElement;
+    const halloween = root.dataset.season === "halloween";
+    const footIcon = halloween ? ((await halloweenPaneIcon()) ?? paneIcon) : paneIcon;
+    // "Pane" gets the brand glow only under the season; the wrap happens
+    // after escaping, on the standalone word (en/zh/ru taglines all have it).
+    const footTagline = halloween
+      ? escapeHtml(t("share.tagline")).replace(/Pane/, '<span class="snap-brand">Pane</span>')
+      : escapeHtml(t("share.tagline"));
+    const footPumpkin = halloween ? '<span class="snap-pumpkin"></span>' : "";
     const svgMarkup =
       `<svg xmlns="http://www.w3.org/2000/svg" width="${W2 * S}" height="${H2 * S}" ` +
       `viewBox="0 0 ${W2} ${H2}" data-theme="${root.dataset.theme ?? ""}" ` +
       `data-density="${root.dataset.density ?? ""}" ` +
+      `data-season="${root.dataset.season ?? ""}" ` +
       `data-minimal="${root.dataset.minimal ?? "false"}">` +
       `<foreignObject width="${W2}" height="${H2}">` +
       `<div xmlns="http://www.w3.org/1999/xhtml" id="snap-root">` +
@@ -2404,7 +2476,7 @@ async function shareCard(id: string): Promise<void> {
       // literal "]]>" inside CSS would end the section early, so split it.
       `<style><![CDATA[${css.split("]]>").join("]]]]><![CDATA[>")}]]></style>` +
       new XMLSerializer().serializeToString(clone) +
-      `<div id="snap-foot"><img src="${paneIcon}" alt="" /><span>${escapeHtml(t("share.tagline"))}</span></div>` +
+      `<div id="snap-foot"><img src="${footIcon}" alt="" /><span>${footTagline}</span>${footPumpkin}</div>` +
       `</div></foreignObject></svg>`;
 
     const img = new Image();
@@ -2509,6 +2581,7 @@ function reduceMotion(): boolean {
 
 function applyReduceMotion(): void {
   document.body.classList.toggle("reduce-anim", config.reduceAnimations === true);
+  syncBats();
 }
 
 let lensReady = false;
@@ -2651,6 +2724,190 @@ function konamiListen(e: KeyboardEvent): void {
 
 const systemLight = window.matchMedia("(prefers-color-scheme: light)");
 
+function batSvg(id: number): string {
+  return (
+    '<div class="bat-bank">' +
+    `<svg class="bat-svg" viewBox="0 0 64 32" aria-hidden="true">` +
+    `<clipPath id="bw${id}l"><path d="M30 14C27 6 16 1 6 3.5L4.5 2.5C6 9 9 13.5 12 17Q15.5 11 19 18.5Q22.5 13 26 21Q28 17 30 18.5L30 14Z"/></clipPath>` +
+    `<clipPath id="bw${id}r"><path d="M34 14C37 6 48 1 58 3.5L59.5 2.5C58 9 55 13.5 52 17Q48.5 11 45 18.5Q41.5 13 38 21Q36 17 34 18.5L34 14Z"/></clipPath>` +
+    '<g class="wing wing-l">' +
+    '<path d="M30 14C27 6 16 1 6 3.5L4.5 2.5C6 9 9 13.5 12 17Q15.5 11 19 18.5Q22.5 13 26 21Q28 17 30 18.5L30 14Z"/>' +
+    `<g clip-path="url(#bw${id}l)"><path class="bones" d="M28 14.5Q18 8 6 4.2M28 14.5Q22 12.3 16.5 11.6M28 14.5Q25 13.8 23.4 14.2"/></g>` +
+    '</g>' +
+    '<g class="wing wing-r">' +
+    '<path d="M34 14C37 6 48 1 58 3.5L59.5 2.5C58 9 55 13.5 52 17Q48.5 11 45 18.5Q41.5 13 38 21Q36 17 34 18.5L34 14Z"/>' +
+    `<g clip-path="url(#bw${id}r)"><path class="bones" d="M36 14.5Q46 8 58 4.2M36 14.5Q42 12.3 47.5 11.6M36 14.5Q39 13.8 40.6 14.2"/></g>` +
+    '</g>' +
+    '<g class="body">' +
+    '<path d="M29.5 9.5L27.8 3.5L31.2 7.8Z"/>' +
+    '<path d="M34.5 9.5L36.2 3.5L32.8 7.8Z"/>' +
+    '<circle cx="32" cy="10" r="3.4"/>' +
+    '<ellipse cx="32" cy="16" rx="3.2" ry="5"/>' +
+    '<circle class="eye" cx="30.6" cy="9.6" r="0.85"/>' +
+    '<circle class="eye" cx="33.4" cy="9.6" r="0.85"/>' +
+    '<g class="face">' +
+    '<path d="M29.9 12.8Q32 14.4 34.1 12.8" fill="none" stroke="#cfc6e0" stroke-width="0.5" stroke-linecap="round"/>' +
+    '<path d="M30.4 13.1L31.1 14.6L31.8 13.2Z" fill="#e8e4f0"/>' +
+    '<path d="M32.2 13.2L32.9 14.6L33.6 13.1Z" fill="#e8e4f0"/>' +
+    '</g>' +
+    '</g></svg></div>'
+  );
+}
+
+let batsLayer: HTMLElement | null = null;
+const batTimers: number[] = [];
+let batFlightId = 0;
+
+/// Halloween is Oct 20 - Nov 7 (the backend owns the window so the
+/// tray and the popover always agree). `data-season` on <html> activates
+/// the stylesheet block; the bat layer is injected here and removed when
+/// the season ends or the setting is off.
+/// Applies the season to the DOM: data-season on <html> plus the empty
+/// .bats container — the bats themselves are spawned per flight by the
+/// scheduler below, so nothing animates while nobody can see them.
+function setSeasonDom(season: string | null): void {
+  if (season === "halloween") {
+    document.documentElement.dataset.season = season;
+    if (!batsLayer) {
+      batsLayer = document.createElement("div");
+      batsLayer.className = "bats";
+      batsLayer.setAttribute("aria-hidden", "true");
+      document.body.appendChild(batsLayer);
+    }
+  } else {
+    delete document.documentElement.dataset.season;
+    stopBats();
+    batsLayer?.remove();
+    batsLayer = null;
+  }
+  syncBats();
+}
+
+/// Bats fly only while someone can actually see them: season on, popover
+/// open (never in widget mode), window visible, motion allowed.
+function batsShouldRun(): boolean {
+  return (
+    document.documentElement.dataset.season === "halloween" &&
+    popoverOpen &&
+    !config.widgetMode &&
+    !document.hidden &&
+    !config.reduceAnimations &&
+    !window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+}
+
+/// One bat, one flight: it removes itself when the travel animation ends.
+function flyBat(n: number): void {
+  if (!batsLayer) return;
+  const el = document.createElement("div");
+  el.className = `bat bat-${n}`;
+  el.innerHTML = batSvg(++batFlightId);
+  el.addEventListener("animationend", (e) => {
+    if (e.target === el && e.animationName === "bat-travel") el.remove();
+  });
+  batsLayer.appendChild(el);
+}
+
+/// One round per popover open — a flying bat forces a whole-window
+/// repaint every frame, so the flyby plays once and the window goes back
+/// to fully idle until the next open: bat-1 at 0 s, bat-2 at 2 s, the
+/// big near bat at 11 s. batsRoundDone stops syncBats from re-arming on
+/// visibilitychange/settings nudges while the popover stays open; it
+/// resets on blur so the next open plays a round again.
+let batsRoundDone = false;
+
+function startBats(): void {
+  batsRoundDone = true;
+  batTimers.push(window.setTimeout(() => flyBat(1), 0));
+  batTimers.push(window.setTimeout(() => flyBat(2), 2000));
+  batTimers.push(window.setTimeout(() => flyBat(3), 11000));
+}
+
+function stopBats(): void {
+  for (const t of batTimers) window.clearTimeout(t);
+  batTimers.length = 0;
+  batsLayer?.querySelectorAll(".bat").forEach((b) => b.remove());
+}
+
+function syncBats(): void {
+  if (batsShouldRun()) {
+    if (batTimers.length === 0 && !batsRoundDone) startBats();
+  } else {
+    stopBats();
+  }
+}
+
+let seasonWiping = false;
+
+/// Sidebar pumpkin toggle: visible only while the Halloween window is
+/// active (it is also how the theme gets turned back on). Tooltip mirrors
+/// the current state.
+async function syncSeasonBtn(): Promise<void> {
+  const btn = document.querySelector<HTMLElement>("#season-btn");
+  if (!btn) return;
+  let inWindow = null;
+  try {
+    inWindow = await invoke<string | null>("season_window_now");
+  } catch {
+    inWindow = null;
+  }
+  btn.hidden = inWindow !== "halloween";
+  const on = config.seasonalThemes !== false;
+  btn.title = on ? t("sidebar.seasonOff") : t("sidebar.seasonOn");
+}
+
+/// Syncs the popover's look with the active season. When the look is
+/// changing and the window is visible, the new look is revealed by the
+/// day/night-style clip-path circle from the pumpkin button (or an
+/// explicit origin element); otherwise it switches instantly. While hidden
+/// we keep whatever the user last saw (config.seasonShown) so the next
+/// visible open can play the reveal.
+async function applySeason(opts: { animate?: boolean; origin?: HTMLElement } = {}): Promise<void> {
+  void syncSeasonBtn();
+  let season: string | null = null;
+  try {
+    season = await invoke<string | null>("active_season_now");
+  } catch {
+    season = null;
+  }
+  const target = season ?? "";
+  const current = document.documentElement.dataset.season ?? "";
+  const visible = popoverOpen || config.widgetMode;
+  if (target === current) {
+    if (config.seasonShown !== target) void patchConfig({ seasonShown: target });
+    return;
+  }
+  // Hidden and the user has never seen this look (or the look changed since
+  // they did): hold the old one until a visible open can play the reveal.
+  if (!visible && target !== config.seasonShown) return;
+
+  if (opts.animate && visible && !seasonWiping) {
+    seasonWiping = true;
+    const btn = document.querySelector<HTMLElement>("#season-btn");
+    const origin =
+      opts.origin ?? (btn && !btn.hidden ? btn : document.getElementById("app-logo")!);
+    circleReveal(origin, () => setSeasonDom(season), () => {
+      seasonWiping = false;
+    });
+  } else {
+    setSeasonDom(season);
+  }
+  if (config.seasonShown !== target) void patchConfig({ seasonShown: target });
+}
+
+/// Pumpkin button in the sidebar: same flip as Settings -> Seasonal themes,
+/// with the day/night circle reveal playing from the button.
+function toggleSeason(): void {
+  const next = config.seasonalThemes === false;
+  const btn = document.querySelector<HTMLElement>("#season-btn") ?? undefined;
+  void patchConfig({ seasonalThemes: next }).then(() => {
+    const seasonal = document.querySelector<HTMLInputElement>("#seasonal");
+    if (seasonal) seasonal.checked = next;
+    void applySeason({ animate: true, origin: btn });
+    requestTraySync();
+  });
+}
+
 function applyAppearance(): void {
   const mode =
     config.appearance === "system" ? (systemLight.matches ? "light" : "dark") : config.appearance;
@@ -2667,20 +2924,12 @@ function applyAppearance(): void {
   }
 }
 
-/// Day/night toggle with the circular wipe from jazii.dev: the new theme
-/// expands as a clip-path circle from the button via the View Transitions
-/// API. Falls back to an instant switch where unsupported.
-function toggleTheme(e: Event): void {
-  const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
-  const apply = () => {
-    config.appearance = next;
-    applyAppearance();
-    const select = document.querySelector<HTMLSelectElement>("#appearance");
-    if (select) select.value = next;
-  };
-
-  const btn = e.currentTarget as HTMLElement;
-  const rect = btn.getBoundingClientRect();
+/// Circular reveal from jazii.dev, shared by the day/night and season
+/// toggles: the new look expands as a clip-path circle from the origin
+/// element's center via the View Transitions API. Falls back to an instant
+/// switch under reduced motion or where the API is missing.
+function circleReveal(origin: HTMLElement, apply: () => void, onDone?: () => void): void {
+  const rect = origin.getBoundingClientRect();
   const x = rect.left + rect.width / 2;
   const y = rect.top + rect.height / 2;
   const maxRadius = Math.hypot(
@@ -2693,7 +2942,7 @@ function toggleTheme(e: Event): void {
     const transition = doc.startViewTransition(apply);
     transition.ready
       .then(() => {
-        document.documentElement.animate(
+        const anim = document.documentElement.animate(
           [
             { clipPath: `circle(0px at ${x}px ${y}px)` },
             { clipPath: `circle(${maxRadius}px at ${x}px ${y}px)` },
@@ -2704,11 +2953,25 @@ function toggleTheme(e: Event): void {
             pseudoElement: "::view-transition-new(root)",
           },
         );
+        anim.finished.finally(() => onDone?.());
       })
-      .catch(() => {});
+      .catch(() => onDone?.());
   } else {
     apply();
+    onDone?.();
   }
+}
+
+/// Day/night toggle: the new theme expands as a circle from the button.
+function toggleTheme(e: Event): void {
+  const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+  const apply = () => {
+    config.appearance = next;
+    applyAppearance();
+    const select = document.querySelector<HTMLSelectElement>("#appearance");
+    if (select) select.value = next;
+  };
+  circleReveal(e.currentTarget as HTMLElement, apply);
   void patchConfig({ appearance: next });
 }
 
@@ -3033,6 +3296,7 @@ function renderAll(): void {
   resetsPopover.onRender();
   if (customizeOpen) renderDrawerBody();
   rebuildTrail();
+  if (popoverOpen) playPendingBursts();
 }
 
 function renderDrawerBody(): void {
@@ -3806,6 +4070,7 @@ async function forceUsageRefreshAttempt(usageOnly = true): Promise<void> {
 }
 
 async function refresh(force = false, usageOnly = false): Promise<void> {
+  void applySeason({ animate: popoverOpen || config.widgetMode });
   if (refreshing) {
     // Remember a forced request instead of dropping it: the in-flight
     // fetch may have started before whatever prompted this one (a saved
@@ -3907,6 +4172,7 @@ async function refresh(force = false, usageOnly = false): Promise<void> {
     }
     const firstData = lastSnapshots.length === 0;
     lastFetch = Date.now();
+    trackResetBursts(lastSnapshots, snapshots);
     lastSnapshots = snapshots;
     scheduleResetRefresh();
     ensureLayout();
@@ -3978,6 +4244,47 @@ function scheduleAutoRefresh(): void {
 let resetRefreshTimer: number | undefined;
 let resetRetryFor: number | null = null;
 const RESET_LONG_WINDOW_MS = 6 * 24 * 3_600_000;
+
+/// A long-window limit that rolled over while the season is active gets a
+/// one-shot pumpkin burst the next time the popover is open (within 6 h).
+const pendingBursts = new Map<string, number>();
+const BURST_MAX_AGE_MS = 6 * 3_600_000;
+
+function trackResetBursts(prev: Snapshot[], next: Snapshot[]): void {
+  if (document.documentElement.dataset.season !== "halloween") return;
+  const oldById = new Map(prev.map((s) => [s.id, s]));
+  for (const s of next) {
+    const old = oldById.get(s.id);
+    if (!old) continue;
+    for (const m of s.metrics) {
+      const om = old.metrics.find((x) => x.label === m.label);
+      if (m.resets_at && om?.resets_at && m.resets_at - om.resets_at >= RESET_LONG_WINDOW_MS) {
+        pendingBursts.set(`${s.id}:${m.label}`, Date.now());
+      }
+    }
+  }
+}
+
+function playPendingBursts(): void {
+  if (!pendingBursts.size) return;
+  const now = Date.now();
+  for (const [key, at] of [...pendingBursts]) {
+    if (now - at > BURST_MAX_AGE_MS) {
+      pendingBursts.delete(key);
+      continue;
+    }
+    const el = document.querySelector<HTMLElement>(
+      `.metric[data-mkey="${CSS.escape(key)}"]`,
+    );
+    if (el) {
+      el.classList.add("just-reset");
+      setTimeout(() => el.classList.remove("just-reset"), 1600);
+      pendingBursts.delete(key);
+    }
+  }
+}
+
+let popoverOpen = false;
 
 /// Long-window verdicts for metrics that report no period, keyed by
 /// "<snapshot id>:<label>". Decided once per observed resets_at (a reset
@@ -5468,6 +5775,17 @@ async function initSettings(): Promise<void> {
   });
   applyReduceMotion();
 
+  const seasonal = document.querySelector<HTMLInputElement>("#seasonal")!;
+  seasonal.checked = config.seasonalThemes !== false;
+  seasonal.addEventListener("change", () => {
+    // The tray icon recolors Rust-side, so it must re-sync too.
+    void patchConfig({ seasonalThemes: seasonal.checked }).then(() => {
+      void applySeason({ animate: true, origin: seasonal });
+      requestTraySync();
+    });
+  });
+  void applySeason({ animate: false });
+
   const shortcut = document.querySelector<HTMLInputElement>("#shortcut")!;
   shortcut.value = config.shortcut;
   shortcut.addEventListener("change", async () => {
@@ -5515,7 +5833,7 @@ async function initSettings(): Promise<void> {
 
   for (const manager of siteKeyManagers) manager.init();
 
-  initWidget({ getConfig: () => config, patchConfig, brandColor: spendColor });
+  initWidget({ getConfig: () => config, patchConfig, brandColor: spendColor, syncSeasonalFx: syncBats });
 }
 
 /// Restore every preference to the same defaults a fresh install gets.
@@ -5563,6 +5881,8 @@ async function resetAllSettings(): Promise<void> {
     proxy: { enabled: false, url: "" },
     showTotalSpend: true,
     reduceAnimations: false,
+    seasonalThemes: true,
+    seasonShown: "",
     locale: "auto",
     stepfunPlanCredits: null,
     widgetMode: false,
@@ -5614,6 +5934,7 @@ function syncSettingsControls(): void {
   setCheck("#minimal", config.minimal === true);
   setCheck("#glass", config.glassEffects !== false);
   setCheck("#reduce-anim", config.reduceAnimations === true);
+  setCheck("#seasonal", config.seasonalThemes !== false);
   setNum("#shortcut", config.shortcut);
   setCheck("#proxy-enabled", config.proxy?.enabled ?? false);
   setNum("#proxy-url", config.proxy?.url ?? "");
@@ -5631,6 +5952,12 @@ function syncSettingsControls(): void {
 // ---------------------------------------------------------------------------
 
 window.addEventListener("DOMContentLoaded", () => {
+  window.addEventListener("blur", () => {
+    popoverOpen = false;
+    batsRoundDone = false;
+    syncBats();
+  });
+  document.addEventListener("visibilitychange", () => syncBats());
   const appLogo = document.querySelector<HTMLElement>("#app-logo")!;
   appLogo.innerHTML = `<img src="${paneLogo}" alt="Pane" />`;
   // Party mode, the easy way: triple-click the logo. (The Konami code
@@ -5647,6 +5974,7 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
   document.querySelector("#theme-btn")!.addEventListener("click", toggleTheme);
+  document.querySelector("#season-btn")!.addEventListener("click", toggleSeason);
   setupTrailFisheye();
   setupTooltips();
   // No lens init here: applyGlass() (via initSettings, after the saved
@@ -6008,7 +6336,12 @@ window.addEventListener("DOMContentLoaded", () => {
   });
 
   void listen("popover-shown", () => {
+    popoverOpen = true;
+    syncBats();
     void checkForUpdate(true);
+    // popover-shown can fire a frame before paint; the wipe needs the old
+    // frame on screen first.
+    requestAnimationFrame(() => void applySeason({ animate: true }));
     // Always reopen on the main page, at the top — leftover Customize/
     // Settings panels, a stale confirm dialog, or a stale scroll position
     // from the previous visit feel like the app is stuck mid-page.
@@ -6022,6 +6355,7 @@ window.addEventListener("DOMContentLoaded", () => {
       starPromptTimer = undefined;
     }
     resetsPopover.dismiss();
+    playPendingBursts();
     // A fresh update's notes present on the first open after launch.
     if (pendingWhatsNew) {
       showChangelogDialog(t("dialog.whatsNew", { version: appVersion }), pendingWhatsNew);

@@ -36,6 +36,8 @@ const en: Dict = {
   "detail.unknownType": "Unknown type",
   "sidebar.theme": "Light / dark mode",
   "sidebar.themeToDark": "Switch to dark mode",
+  "sidebar.seasonOff": "Turn off Halloween theme",
+  "sidebar.seasonOn": "Turn on Halloween theme",
   "sidebar.themeToLight": "Switch to light mode",
   "sidebar.refresh": "Refresh now",
   "sidebar.customize": "Customize",
@@ -117,6 +119,9 @@ const en: Dict = {
   "settings.reduceAnim": "Reduce animations",
   "settings.reduceAnimTip":
     "Skip card entrance motion and the day/night wipe. Windows' own 'Animation effects' setting is still respected.",
+  "settings.seasonal": "Seasonal themes",
+  "settings.seasonalTip":
+    "Halloween look (Oct 20 – Nov 7) and future holiday themes. Turn off to keep the normal look.",
   "settings.showSpend": "Show Total Spend card",
   "settings.shortcut": "Global shortcut",
   "settings.shortcutPh": "e.g. Ctrl+Shift+U",
@@ -471,6 +476,8 @@ const zh: Dict = {
   "detail.unknownType": "类型未知",
   "sidebar.theme": "浅色 / 深色模式",
   "sidebar.themeToDark": "切换到深色模式",
+  "sidebar.seasonOff": "关闭万圣节主题",
+  "sidebar.seasonOn": "开启万圣节主题",
   "sidebar.themeToLight": "切换到浅色模式",
 
   "sidebar.refresh": "立即刷新",
@@ -551,6 +558,9 @@ const zh: Dict = {
   "settings.reduceAnim": "减少动画",
   "settings.reduceAnimTip":
     "跳过卡片入场动画和日夜切换过渡。仍会遵守 Windows 自己的“动画效果”设置。",
+  "settings.seasonal": "节日主题",
+  "settings.seasonalTip":
+    "万圣节外观（10月20日至11月7日）及以后的节日主题。关闭后保持默认外观。",
   "settings.showSpend": "显示总花费卡片",
   "settings.shortcut": "全局快捷键",
   "settings.shortcutPh": "例如 Ctrl+Shift+U",
@@ -869,6 +879,8 @@ const zh: Dict = {
 const ru: Dict = {
   "sidebar.theme": "Светлая / тёмная тема",
   "sidebar.themeToDark": "Переключить на тёмную тему",
+  "sidebar.seasonOff": "Выключить тему Хэллоуина",
+  "sidebar.seasonOn": "Включить тему Хэллоуина",
   "sidebar.themeToLight": "Переключить на светлую тему",
 
   "sidebar.refresh": "Обновить сейчас",
@@ -944,6 +956,9 @@ const ru: Dict = {
   "settings.reduceAnim": "Меньше анимации",
   "settings.reduceAnimTip":
     "Пропустить появление карточек и переход день/ночь. Настройка Windows «Эффекты анимации» всё равно учитывается.",
+  "settings.seasonal": "Сезонные темы",
+  "settings.seasonalTip":
+    "Оформление к Хэллоуину (20 октября – 7 ноября) и будущие праздничные темы. Выключите, чтобы оставить обычный вид.",
   "settings.showSpend": "Показывать карточку общих трат",
   "settings.shortcut": "Глобальная горячая клавиша",
   "settings.shortcutPh": "например Ctrl+Shift+U",
