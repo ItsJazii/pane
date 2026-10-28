@@ -2879,10 +2879,10 @@ async function applySeason(opts: { animate?: boolean; origin?: HTMLElement } = {
   const target = season ?? "";
   const current = document.documentElement.dataset.season ?? "";
   const visible = popoverOpen || config.widgetMode;
-  if (target === current) {
-    if (config.seasonShown !== target) void patchConfig({ seasonShown: target });
-    return;
-  }
+  // A look the user hasn't seen yet still goes through the path below even
+  // when the DOM already matches: on a fresh launch after Nov 7 the page
+  // starts without data-season, but the saved appearance must come back.
+  if (target === current && config.seasonShown === target) return;
   // Hidden and the user has never seen this look (or the look changed since
   // they did): hold the old one until a visible open can play the reveal.
   if (!visible && target !== config.seasonShown) return;
