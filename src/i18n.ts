@@ -112,7 +112,7 @@ const en: Dict = {
   "settings.compact": "Compact layout",
   "settings.minimal": "Minimal view",
   "settings.minimalTip":
-    "One starred (or first) meter per card — hide plan chips, extra rows, links, and share",
+    "One starred (or first) meter per card — hide extra rows, links, and share",
   "settings.glass": "Liquid glass effects",
   "settings.glassTip":
     "Turn off on slower PCs — replaces the glass refraction with a simple solid look",
@@ -552,7 +552,7 @@ const zh: Dict = {
   "settings.appearDark": "深色",
   "settings.compact": "紧凑布局",
   "settings.minimal": "精简视图",
-  "settings.minimalTip": "每张卡片只留加星（或第一行）用量，隐藏套餐、其余行、快捷链接和分享",
+  "settings.minimalTip": "每张卡片只留加星（或第一行）用量，隐藏其余行、快捷链接和分享",
   "settings.glass": "液态玻璃效果",
   "settings.glassTip": "较慢的电脑可以关掉 — 会改成简单的纯色背景",
   "settings.reduceAnim": "减少动画",
@@ -949,7 +949,7 @@ const ru: Dict = {
   "settings.compact": "Компактный вид",
   "settings.minimal": "Минимальный вид",
   "settings.minimalTip":
-    "Одна отмеченная (или первая) строка на карточке — без тарифа, лишних строк, ссылок и кнопки «поделиться»",
+    "Одна отмеченная (или первая) строка на карточке — без лишних строк, ссылок и кнопки «поделиться»",
   "settings.glass": "Эффект жидкого стекла",
   "settings.glassTip":
     "На слабых ПК лучше выключить — вместо стекла будет простой фон",

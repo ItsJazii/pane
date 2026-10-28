@@ -1533,7 +1533,7 @@ function renderCard(s: Snapshot): string {
     !config.minimal && s.status === "ok"
       ? `<button class="share-btn" data-share="${escapeHtml(s.id)}" title="${escapeHtml(t("card.share"))}">⧉</button>`
       : "";
-  const planChip = config.minimal ? "" : plan;
+  const planChip = plan;
   return `
     <article class="provider${muted}" data-provider="${escapeHtml(s.id)}">
       <div class="provider-head">
@@ -4094,25 +4094,21 @@ async function refresh(force = false, usageOnly = false): Promise<void> {
     await unparkRecentlyKeyed();
     const contexts = sub2ApiSnapshotContexts.capture();
     let snapshots = await invoke<Snapshot[]>("fetch_usage", { disabled: [...config.disabled] });
-    // First launch ever (no layout yet): start with only the providers that
-    // actually have credentials on this PC, like the Mac app's first-run
-    // detection. The rest stay available in Customize.
+    // First launch ever (no layout yet): start with just Claude and Codex —
+    // their cards are the new-user onboarding. Every other provider waits
+    // in Customize regardless of what credentials the PC has.
     if (config.layout === null && snapshots.length > 0) {
-      // Claude and Codex always start enabled — their "connect me" cards are
-      // the new-user onboarding. Everything else without credentials waits
-      // in Customize (a fresh PC with zero AI tools sees just those two).
+      // Families, so extra accounts (claude@work, codex@home) stay on too.
+      // recentlyKeyed keeps a key entered during this very first scan.
+      // ALL_PROVIDERS too: some ids never come back in this fetch (Moonshot
+      // folds into an ok Kimi card) and would otherwise stay enabled.
       const starters = new Set(["claude", "codex"]);
-      const noCreds = snapshots
-        .filter(
-          (s) =>
-            s.status === "no_credentials" &&
-            !starters.has(s.id) &&
-            !recentlyKeyed.has(s.id)
-        )
-        .map((s) => s.id);
-      if (noCreds.length) {
-        snapshots = snapshots.filter((s) => !noCreds.includes(s.id));
-        await patchConfig({ disabled: noCreds }).catch(() => {});
+      const offIds = [
+        ...new Set([...snapshots.map((s) => s.id), ...ALL_PROVIDERS.map(([id]) => id)]),
+      ].filter((id) => !starters.has(providerFamily(id)) && !recentlyKeyed.has(id));
+      if (offIds.length) {
+        snapshots = snapshots.filter((s) => !offIds.includes(s.id));
+        await patchConfig({ disabled: offIds }).catch(() => {});
         await unparkRecentlyKeyed();
       }
     } else if (config.layout) {
