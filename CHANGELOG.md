@@ -6,6 +6,7 @@
 - New installs start with just the Claude and Codex cards; turn on the rest in Customize.
 - Minimal view now keeps the plan name (Pro, Max, Plus…) on each card.
 - Halloween look until Nov 7: pumpkin-orange meters, flying bats, cobwebs (also on shared card images), an orange tray icon, a ghost and jack-o'-lantern on bars that are about to run out, a pumpkin burst when a weekly limit resets, 🎃/👻 notification titles, and a pumpkin Pane logo on shared cards. Toggle it with the pumpkin button in the sidebar (plays the same circle reveal as the day/night switch) or in Settings → Seasonal themes.
+- Updating to this version switches Pane to dark mode while the Halloween look is on, with the look revealed by the circle animation on the first open; your previous mode comes back when Halloween ends (unless you changed it in the meantime). If you used Minimal view, Pane moves you back to the normal view in the compact layout once.
 
 ## 0.4.63 — 2026-10-24
 
