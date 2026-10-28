@@ -1,12 +1,32 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 — 2026-10-28
 
-- Claude: when Claude Code refreshes its sign-in at the same moment as Pane, Pane now picks up the new sign-in instead of showing the "rotated by another app" error.
-- New installs start with just the Claude and Codex cards; turn on the rest in Customize.
-- Minimal view now keeps the plan name (Pro, Max, Plus…) on each card.
-- Halloween look until Nov 7: pumpkin-orange meters, flying bats, cobwebs (also on shared card images), an orange tray icon, a ghost and jack-o'-lantern on bars that are about to run out, a pumpkin burst when a weekly limit resets, 🎃/👻 notification titles, and a pumpkin Pane logo on shared cards. Toggle it with the pumpkin button in the sidebar (plays the same circle reveal as the day/night switch) or in Settings → Seasonal themes.
-- Updating to this version switches Pane to dark mode while the Halloween look is on, with the look revealed by the circle animation on the first open; your previous mode comes back when Halloween ends (unless you changed it in the meantime). If you used Minimal view, Pane moves you back to the normal view in the compact layout once.
+### Added
+- **Halloween theme (#301, #302).** Until Nov 7 Pane wears a Halloween
+  look: pumpkin-orange meters, a pumpkin on the logo, cobwebs, bats
+  that fly across when you open Pane, an orange tray icon, a ghost and
+  jack-o'-lantern on limits that are about to run out, a pumpkin burst
+  when a weekly limit resets, and 🎃/👻 notification titles. Shared
+  card images get a cobweb and a pumpkin footer. It switches Pane to
+  dark mode while it's on and puts your old mode back when it ends.
+  Turn it off with the pumpkin button in the sidebar or Settings →
+  Seasonal themes. It turns itself off after Nov 7.
+
+### Changed
+- **New installs start with just Claude and Codex (#298).** Every other
+  provider waits in Customize, ready to turn on.
+- **Minimal view keeps plan names (#300).** Pro, Max, Plus and so on
+  now stay next to each card name in Minimal view.
+- **Back to the normal view (#302).** If you used Minimal view, this
+  update moves you to the normal view in the compact layout, once. You
+  can turn Minimal view back on in Settings.
+
+### Fixed
+- **Claude sign-in clash (#299).** When Claude Code and Pane renewed
+  your Claude sign-in at the same moment, the Claude card could show
+  "rotated by another app" until you opened Claude Code. Pane now picks
+  up Claude Code's new sign-in by itself.
 
 ## 0.4.63 — 2026-10-24
 
