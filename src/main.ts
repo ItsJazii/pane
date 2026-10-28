@@ -233,6 +233,8 @@ export interface Config {
   reduceAnimations: boolean;
   seasonalThemes: boolean;
   seasonShown: string;
+  configRev: number;
+  appearanceBeforeSeason: string;
   locale: LocalePref;
   stepfunPlanCredits: number | null;
   widgetMode: boolean;
@@ -274,6 +276,8 @@ const FRONTEND_CONFIG_KEYS = [
   "reduceAnimations",
   "seasonalThemes",
   "seasonShown",
+  "configRev",
+  "appearanceBeforeSeason",
   "locale",
   "stepfunPlanCredits",
   "widgetMode",
@@ -490,6 +494,8 @@ let config: Config = {
   reduceAnimations: false,
   seasonalThemes: true,
   seasonShown: "",
+  configRev: 0,
+  appearanceBeforeSeason: "",
   locale: "auto",
   stepfunPlanCredits: null,
   widgetMode: false,
@@ -2881,18 +2887,44 @@ async function applySeason(opts: { animate?: boolean; origin?: HTMLElement } = {
   // they did): hold the old one until a visible open can play the reveal.
   if (!visible && target !== config.seasonShown) return;
 
+  // Ride the look change with the user's appearance: Halloween forces
+  // dark (saved so we can restore it); ending the season restores the
+  // saved mode — unless the user picked something else in the meantime.
+  const applyWithAppearance = () => {
+    let appearance: Config["appearance"] = config.appearance;
+    if (target === "halloween") {
+      if (config.appearanceBeforeSeason === "") config.appearanceBeforeSeason = appearance;
+      appearance = "dark";
+    } else if (config.appearanceBeforeSeason !== "") {
+      if (appearance === "dark") appearance = config.appearanceBeforeSeason as Config["appearance"];
+      config.appearanceBeforeSeason = "";
+    }
+    if (appearance !== config.appearance) {
+      config.appearance = appearance;
+      applyAppearance();
+      const select = document.querySelector<HTMLSelectElement>("#appearance");
+      if (select) select.value = appearance;
+    }
+    setSeasonDom(season);
+  };
   if (opts.animate && visible && !seasonWiping) {
     seasonWiping = true;
     const btn = document.querySelector<HTMLElement>("#season-btn");
     const origin =
       opts.origin ?? (btn && !btn.hidden ? btn : document.getElementById("app-logo")!);
-    circleReveal(origin, () => setSeasonDom(season), () => {
+    circleReveal(origin, applyWithAppearance, () => {
       seasonWiping = false;
     });
   } else {
-    setSeasonDom(season);
+    applyWithAppearance();
   }
-  if (config.seasonShown !== target) void patchConfig({ seasonShown: target });
+  if (config.seasonShown !== target) {
+    void patchConfig({
+      seasonShown: target,
+      appearance: config.appearance,
+      appearanceBeforeSeason: config.appearanceBeforeSeason,
+    });
+  }
 }
 
 /// Pumpkin button in the sidebar: same flip as Settings -> Seasonal themes,
@@ -5643,6 +5675,13 @@ function removeCodexDir(dir: string): void {
 
 async function initSettings(): Promise<void> {
   config = await invoke<Config>("get_config");
+  // Config migration rev 1 = v0.5.0: Minimal-view users go back to the
+  // normal view once. configRev stays set so later revs can append steps.
+  const CONFIG_REV = 1;
+  if ((config.configRev ?? 0) < CONFIG_REV) {
+    config.minimal = false;
+    void patchConfig({ minimal: false, configRev: CONFIG_REV }).catch(() => {});
+  }
   // First launch timestamp — backs the star prompt's "a few days old"
   // eligibility. Recorded once, on the first config load that finds it 0.
   if (!config.firstSeenMs) {
@@ -5883,6 +5922,7 @@ async function resetAllSettings(): Promise<void> {
     reduceAnimations: false,
     seasonalThemes: true,
     seasonShown: "",
+    appearanceBeforeSeason: "",
     locale: "auto",
     stepfunPlanCredits: null,
     widgetMode: false,
