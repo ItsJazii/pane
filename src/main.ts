@@ -1527,7 +1527,7 @@ function renderCard(s: Snapshot): string {
     !config.minimal && s.status === "ok"
       ? `<button class="share-btn" data-share="${escapeHtml(s.id)}" title="${escapeHtml(t("card.share"))}">⧉</button>`
       : "";
-  const planChip = config.minimal ? "" : plan;
+  const planChip = plan;
   return `
     <article class="provider${muted}" data-provider="${escapeHtml(s.id)}">
       <div class="provider-head">
