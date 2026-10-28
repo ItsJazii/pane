@@ -544,13 +544,10 @@ body.reduce-anim .bats {
 }
 
 /* ------------------------------------------------------- limit effects */
-/* A tiny ghost peeks off the end of a run-out bar. The thin dark outline
-   keeps it legible on the light theme too. Colors stay as usual — the
-   effect is the ghost, not a new palette. */
-@keyframes fx-ghostbob {
-  0%, 100% { transform: translateY(0); }
-  50%      { transform: translateY(-2px); }
-}
+/* A tiny ghost peeks off the end of a run-out bar — held static on purpose:
+   any running animation forces a full-window repaint every frame here. The
+   thin dark outline keeps it legible on the light theme too. Colors stay
+   as usual — the effect is the ghost, not a new palette. */
 :root[data-season="halloween"] .fill.low {
   position: relative;
 }
@@ -565,7 +562,6 @@ body.reduce-anim .bats {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 12'%3E%3Cpath d='M5 0.8c2.6 0 4.2 2 4.2 4.6V11l-1.4-1.1L6.4 11 5 9.9 3.6 11 2.2 9.9 0.8 11V5.4C0.8 2.8 2.4 0.8 5 0.8Z' fill='%23fdfdfd' stroke='%23343a46' stroke-width='0.7'/%3E%3Ccircle cx='3.6' cy='4.8' r='0.8' fill='%23222028'/%3E%3Ccircle cx='6.4' cy='4.8' r='0.8' fill='%23222028'/%3E%3C/svg%3E");
   background-size: contain;
   background-repeat: no-repeat;
-  animation: fx-ghostbob 2s ease-in-out infinite;
 }
 
 /* Jack-o'-lantern replaces the flame in running-out notes — pure CSS swap

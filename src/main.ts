@@ -2757,7 +2757,6 @@ function batSvg(id: number): string {
 let batsLayer: HTMLElement | null = null;
 const batTimers: number[] = [];
 let batFlightId = 0;
-const BAT_CYCLE_MS = 20_000;
 
 /// Halloween is Oct 20 - Nov 7 (the backend owns the window so the
 /// tray and the popover always agree). `data-season` on <html> activates
@@ -2809,13 +2808,19 @@ function flyBat(n: number): void {
   batsLayer.appendChild(el);
 }
 
-/// Today's choreography, driven by timers instead of parked animations:
-/// bat-1 at 0 s, bat-2 at 2 s, bat-3 at 11 s, every 20 s.
+/// One round per popover open — a flying bat forces a whole-window
+/// repaint every frame, so the flyby plays once and the window goes back
+/// to fully idle until the next open: bat-1 at 0 s, bat-2 at 2 s, the
+/// big near bat at 11 s. batsRoundDone stops syncBats from re-arming on
+/// visibilitychange/settings nudges while the popover stays open; it
+/// resets on blur so the next open plays a round again.
+let batsRoundDone = false;
+
 function startBats(): void {
+  batsRoundDone = true;
   batTimers.push(window.setTimeout(() => flyBat(1), 0));
   batTimers.push(window.setTimeout(() => flyBat(2), 2000));
   batTimers.push(window.setTimeout(() => flyBat(3), 11000));
-  batTimers.push(window.setTimeout(startBats, BAT_CYCLE_MS));
 }
 
 function stopBats(): void {
@@ -2826,7 +2831,7 @@ function stopBats(): void {
 
 function syncBats(): void {
   if (batsShouldRun()) {
-    if (batTimers.length === 0) startBats();
+    if (batTimers.length === 0 && !batsRoundDone) startBats();
   } else {
     stopBats();
   }
@@ -5949,6 +5954,7 @@ function syncSettingsControls(): void {
 window.addEventListener("DOMContentLoaded", () => {
   window.addEventListener("blur", () => {
     popoverOpen = false;
+    batsRoundDone = false;
     syncBats();
   });
   document.addEventListener("visibilitychange", () => syncBats());
