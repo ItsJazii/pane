@@ -2890,21 +2890,26 @@ async function applySeason(opts: { animate?: boolean; origin?: HTMLElement } = {
   // Ride the look change with the user's appearance: Halloween forces
   // dark (saved so we can restore it); ending the season restores the
   // saved mode — unless the user picked something else in the meantime.
+  // Only on a transition the user hasn't seen yet (not every startup), and
+  // computed up front: the reveal runs its apply callback asynchronously,
+  // after the save below.
+  const unseen = config.seasonShown !== target;
+  let appearance: Config["appearance"] = config.appearance;
+  let appearanceBeforeSeason = config.appearanceBeforeSeason;
+  if (unseen && target === "halloween") {
+    if (appearanceBeforeSeason === "") appearanceBeforeSeason = appearance;
+    appearance = "dark";
+  } else if (unseen && appearanceBeforeSeason !== "") {
+    if (appearance === "dark") appearance = appearanceBeforeSeason as Config["appearance"];
+    appearanceBeforeSeason = "";
+  }
+  // The save below already updates config in memory; this just paints it.
   const applyWithAppearance = () => {
-    let appearance: Config["appearance"] = config.appearance;
-    if (target === "halloween") {
-      if (config.appearanceBeforeSeason === "") config.appearanceBeforeSeason = appearance;
-      appearance = "dark";
-    } else if (config.appearanceBeforeSeason !== "") {
-      if (appearance === "dark") appearance = config.appearanceBeforeSeason as Config["appearance"];
-      config.appearanceBeforeSeason = "";
-    }
-    if (appearance !== config.appearance) {
-      config.appearance = appearance;
-      applyAppearance();
-      const select = document.querySelector<HTMLSelectElement>("#appearance");
-      if (select) select.value = appearance;
-    }
+    config.appearance = appearance;
+    config.appearanceBeforeSeason = appearanceBeforeSeason;
+    applyAppearance();
+    const select = document.querySelector<HTMLSelectElement>("#appearance");
+    if (select) select.value = appearance;
     setSeasonDom(season);
   };
   if (opts.animate && visible && !seasonWiping) {
@@ -2918,13 +2923,7 @@ async function applySeason(opts: { animate?: boolean; origin?: HTMLElement } = {
   } else {
     applyWithAppearance();
   }
-  if (config.seasonShown !== target) {
-    void patchConfig({
-      seasonShown: target,
-      appearance: config.appearance,
-      appearanceBeforeSeason: config.appearanceBeforeSeason,
-    });
-  }
+  if (unseen) void patchConfig({ seasonShown: target, appearance, appearanceBeforeSeason });
 }
 
 /// Pumpkin button in the sidebar: same flip as Settings -> Seasonal themes,
