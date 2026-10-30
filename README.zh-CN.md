@@ -28,7 +28,15 @@ Pane 把这些信息集中到系统托盘，每隔几分钟刷新一次，并在
 
 每个发布版本的安装包都由 GitHub Actions 直接从对应标签的源码构建并发布，构建日志公开，来源可核验。
 
-### 一行命令（PowerShell，推荐）
+### winget（推荐）
+
+```
+winget install Pane.Pane
+```
+
+Pane 已收录在 [Microsoft 官方 winget 社区仓库](https://github.com/microsoft/winget-pkgs/tree/master/manifests/p/Pane/Pane)：经过审核与哈希校验，不会触发 SmartScreen 提示。
+
+### 一行命令（PowerShell）
 
 ```powershell
 irm https://trypane.xyz/install.ps1 | iex
@@ -44,15 +52,7 @@ iwr https://trypane.xyz/install.ps1 -OutFile install.ps1
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-### winget
-
-```
-winget install Pane.Pane
-```
-
-Pane 已收录在 [Microsoft 官方 winget 社区仓库](https://github.com/microsoft/winget-pkgs/tree/master/manifests/p/Pane/Pane)：经过审核与哈希校验，不会触发 SmartScreen 提示。
-
-> **注意（2026 年 10 月）：** WinGet 中 `Pane.Pane` 的 0.8.0 及更高版本并非 Pane 官方版本——详见 [#297](https://github.com/ItsJazii/pane/issues/297)。在修复之前，请使用上方的一行命令。
+（也可以直接使用上面的 `winget install Pane.Pane`：Microsoft 的构建流程会校验哈希。）
 
 ### 安装程序（.exe）
 
