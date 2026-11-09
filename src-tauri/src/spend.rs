@@ -6496,6 +6496,18 @@ mod tests {
         assert!((total(&mix) - 0.825).abs() < 1e-9, "{}", total(&mix));
         assert!(mix.days.keys().all(|(_, m)| m == "MiniMax-M3.1-Flash"));
 
+        // A `tencent/`-prefixed hy4 on an aihubmix route still prices the
+        // gateway card ($0.8823 + $2.647 per MTok) in the aihubmix bucket.
+        let (ds, mix) = deepseek_harness_priced(vec![ev(
+            "2026-10-17T09:00:00Z",
+            "aihubmix",
+            "tencent/hy4",
+            0.0,
+        )]);
+        assert!(ds.days.is_empty());
+        assert!((total(&mix) - 3.5293).abs() < 1e-9, "{}", total(&mix));
+        assert!(mix.days.keys().all(|(_, m)| m == "tencent/hy4"));
+
         // A foreign provider contributes to neither bucket.
         let (ds, mix) = deepseek_harness_priced(vec![ev(
             "2026-10-17T09:00:00Z",
@@ -6575,6 +6587,25 @@ mod tests {
         let mix = take_tagged(&mut data, "aihubmix");
         assert_eq!(mix.days.values().map(|v| v.0).sum::<f64>(), 4.0);
         assert!(mix.days.keys().all(|(_, m)| m == "google/gemini-4-argon"));
+    }
+
+    /// A `tencent/`-prefixed hy4 on a verified AIHubMix route still bills
+    /// the gateway card ($0.8823 in / $2.647 out per MTok) — the narrow
+    /// scoped match is only for unprovenanced Claude rows.
+    #[test]
+    fn pi_aihubmix_tencent_hy4_prices_the_gateway_card() {
+        let mut seen = HashSet::new();
+        let mut data = FileData::default();
+        let line = json!({"type": "message", "id": "h9", "timestamp": "2026-10-14T12:00:00Z",
+            "message": {"role": "assistant", "provider": "aihubmix", "model": "tencent/hy4",
+                        "usage": {"input": 1000000.0, "output": 1000000.0, "cacheRead": 0.0,
+                                  "cacheWrite": 0.0, "totalTokens": 2000000.0}}})
+        .to_string();
+        pi_line(&mut seen, &line, &mut data);
+        let mix = take_tagged(&mut data, "aihubmix");
+        let total: f64 = mix.days.values().map(|v| v.0).sum();
+        assert!((total - 3.5293).abs() < 1e-9, "{total}");
+        assert!(mix.days.keys().all(|(_, m)| m == "tencent/hy4"));
     }
 
     /// Hermes rows price on the route-scoped slug end to end — the dated

@@ -306,6 +306,9 @@ pub fn aihubmix_gateway_slug(model: &str) -> String {
     if seg.eq_ignore_ascii_case("minimax-m3.1-flash") {
         return "aihubmix/minimax-m3.1-flash".to_string();
     }
+    if seg.eq_ignore_ascii_case("hy4") {
+        return "aihubmix/hy4".to_string();
+    }
     model.to_string()
 }
 
@@ -1740,6 +1743,10 @@ mod tests {
         );
         assert!(super::aihubmix_scoped("tencent/hy4").is_none());
         assert!(super::aihubmix_scoped("hy4-preview").is_none());
+        // Verified-AIHubMix callers (pi/omp, DSH routes) still map any
+        // prefixed hy4 spelling to the gateway SKU.
+        assert_eq!(super::aihubmix_gateway_slug("tencent/hy4"), "aihubmix/hy4");
+        assert_eq!(super::aihubmix_gateway_slug("HY4"), "aihubmix/hy4");
     }
 
     #[test]
