@@ -331,17 +331,10 @@ fn fast_multiplier_in(s: &Store, model: &str) -> f64 {
     if let Some(m) = s.fast_multipliers.get(model) {
         return *m;
     }
-    if let Some(base) = fable52_base(model) {
-        // A supplement multiplier for the base — or its dotted spelling —
+    if fable52_base(model).is_some() {
+        // The supplement's multiplier for the base (dash or dotted key)
         // wins; otherwise the documented fast tier is a flat 2×.
-        if let Some(m) = s.fast_multipliers.get(base) {
-            return *m;
-        }
-        let dotted = base.replace("5-2", "5.2");
-        if let Some(m) = s.fast_multipliers.get(dotted.as_str()) {
-            return *m;
-        }
-        return 2.0;
+        return fable52_supplement_mult(s, model).unwrap_or(2.0);
     }
     1.0
 }
@@ -820,7 +813,7 @@ fn fast_tier_mult(s: &Store, base: &str) -> f64 {
             .find_map(|suf| mkey.strip_suffix(suf))
         {
             Some(next) => mkey = next,
-            None => return 2.0,
+            None => return fable52_supplement_mult(s, base).unwrap_or(2.0),
         }
     }
 }
@@ -1113,6 +1106,16 @@ fn kimi_vendor_tail(canonical: &str) -> Option<&str> {
 /// platform.claude.com/docs/en/about-claude/pricing
 fn fable52_card() -> Price {
     Price { cache_write_1h: Some(16.0), ..Price::flat(8.0, 40.0, 0.20, 10.0) }
+}
+
+/// A supplement fast multiplier for a Fable/Mythos 5.2 spelling's base,
+/// under either its dash or dotted key.
+fn fable52_supplement_mult(s: &Store, model: &str) -> Option<f64> {
+    let base = fable52_base(model)?;
+    s.fast_multipliers
+        .get(base)
+        .or_else(|| s.fast_multipliers.get(base.replace("5-2", "5.2").as_str()))
+        .copied()
 }
 
 /// The canonical dash base for Claude Fable/Mythos 5.2 spellings across
@@ -2381,6 +2384,22 @@ mod tests {
             .insert("claude-fable-5-2-xhigh".into(), super::Price::flat(7.0, 35.0, 0.2, 9.0));
         let p = super::resolve(&s, "claude-fable-5-2-xhigh", 0).unwrap();
         assert_eq!((p.input, p.output), (7.0, 35.0));
+    }
+
+    /// The `-fast` SKU arm honors the same supplement fallback as
+    /// fast_multiplier_in: a dotted supplement key scales the whole card.
+    #[test]
+    fn fable52_fast_sku_reads_the_supplement_fallback() {
+        let mut s = super::Store::default();
+        s.fast_multipliers.insert("claude-fable-5.2".into(), 2.5);
+        for m in ["claude-fable-5-2-fast", "claude-fable-5-2-xhigh-fast"] {
+            let p = super::resolve(&s, m, 0).unwrap_or_else(|| panic!("{m} unpriced"));
+            assert_eq!((p.input, p.output), (20.0, 100.0), "{m}");
+        }
+        assert_eq!(super::fast_multiplier_in(&s, "claude-fable-5-2"), 2.5);
+        let empty = super::Store::default();
+        let p = super::resolve(&empty, "claude-fable-5-2-fast", 0).unwrap();
+        assert_eq!((p.input, p.output), (16.0, 80.0));
     }
 
     /// `-fast` on the Fable/Mythos 5.2 bases prices at 2× through the
