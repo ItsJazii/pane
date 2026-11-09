@@ -136,7 +136,9 @@ the pi coding agent and its oh-my-pi / Step Code forks, the Hermes
 desktop app), prices each
 request with live per-model rates (LiteLLM /
 models.dev, refreshed daily — hourly while unknown models are around, so
-brand-new models price within the hour), and draws the Today /
+brand-new models price within the hour — plus vendor-published rates
+built into Pane for models the catalogs haven't added yet, such as
+Claude Fable 5.2), and draws the Today /
 Yesterday / 30-day donut with a per-model breakdown. Click the ring to
 flip between dollars and tokens. On a flat-rate plan this shows what
 your usage *would* cost at API prices — the best ad for your
