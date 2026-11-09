@@ -457,6 +457,10 @@ mod tests {
             "aihubmix/hy4-preview"
         );
         assert_eq!(
+            price_lookup_slug("hy4", "aihubmix", "https://aihubmix.com/v1"),
+            "aihubmix/hy4"
+        );
+        assert_eq!(
             price_lookup_slug("qwen3.8-flash", "custom", "https://aihubmix.com/v1"),
             "aihubmix/qwen3.8-flash"
         );

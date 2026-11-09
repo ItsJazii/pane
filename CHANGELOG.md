@@ -7,6 +7,11 @@
 - **Claude Fable 5.2 and Mythos 5.2 are priced.** Devin, Claude Code and
   the other spend cards now count them at Anthropic's $8 / $40 per
   million tokens (fast mode 2×) instead of leaving them unpriced.
+- **Claude Code + Tencent Hy4 through AIHubMix.** Claude Code sessions
+  using `hy4` via AIHubMix were left unpriced on the Claude card. With
+  an AIHubMix key in Pane they now show on the AIHubMix card at
+  AIHubMix's price ($0.8823 in / $2.647 out / $0.4412 cache read per
+  million tokens).
 
 ## 0.5.0 — 2026-10-28
 

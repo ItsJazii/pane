@@ -1727,8 +1727,9 @@ fn cost_for(
 /// supplement's multiplier.
 fn claude_cost(model: &str, t: &ClaudeTokens, ts: DateTime<Utc>) -> Option<f64> {
     // Claude Code speaks the Anthropic Messages API — Gemini slugs in
-    // these logs crossed a gateway (AIHubMix, like the Qwen rows), and
-    // `deepseek-flash` is AIHubMix's own alias, so price them on the
+    // these logs crossed a gateway (AIHubMix, like the Qwen rows),
+    // `deepseek-flash` is AIHubMix's own alias, and bare `hy4` is
+    // Tencent's model on the same endpoint, so price them on the
     // gateway card (a V4.1 Flash spelling via DeepSeek's own endpoint
     // reads ~3% high). split_aihubmix_routed moves the rows when an
     // AihubMix key exists.
@@ -1879,12 +1880,12 @@ fn is_stepfun_model(m: &str) -> bool {
 
 /// Claude Code rows that AIHubMix billed. Qwen slugs mean the session
 /// ran against AIHubMix's Anthropic-compatible endpoint — always routed
-/// (that endpoint is the only way qwen slugs reach these logs). DeepSeek
-/// and Gemini rows move only when AIHubMix is actually configured:
-/// without a key the AihubMix card doesn't exist, and DeepSeek has its
-/// own Anthropic endpoint, so those rows would be wrongly moved and stay
-/// on Claude. Matching is by the last segment (gateways prefix slugs),
-/// case-insensitive.
+/// (that endpoint is the only way qwen slugs reach these logs). DeepSeek,
+/// Gemini and Hy4 rows move only when AIHubMix is actually configured:
+/// without a key the AihubMix card doesn't exist, and DeepSeek and
+/// Tencent have their own endpoints, so those rows would be wrongly
+/// moved and stay on Claude. Matching is by the last segment (gateways
+/// prefix slugs), case-insensitive.
 fn split_aihubmix_routed(all: &mut FileData, aihubmix_configured: bool) -> FileData {
     split_models_by(all, |m| {
         if m.to_ascii_lowercase().starts_with("qwen") {
@@ -1898,7 +1899,7 @@ fn split_aihubmix_routed(all: &mut FileData, aihubmix_configured: bool) -> FileD
             .next()
             .unwrap_or(m)
             .to_ascii_lowercase();
-        seg.starts_with("deepseek") || seg.starts_with("gemini")
+        seg.starts_with("deepseek") || seg.starts_with("gemini") || pricing::aihubmix_hy4_route(m)
     })
 }
 
@@ -1979,7 +1980,7 @@ fn split_kimi_routed(all: &mut FileData) -> FileData {
 ///
 /// Claude Code can also run against MiniMax's or AIHubMix's
 /// Anthropic-compatible endpoints (ANTHROPIC_BASE_URL); those sessions
-/// log MiniMax and qwen/deepseek/gemini models into the same files.
+/// log MiniMax and qwen/deepseek/gemini/hy4 models into the same files.
 /// That usage is split out and returned separately — it belongs on the
 /// MiniMax and AihubMix cards, not Claude's.
 fn claude(extra: FileData) -> (ProviderSpend, FileData, FileData, FileData, FileData) {
@@ -2013,8 +2014,8 @@ fn claude(extra: FileData) -> (ProviderSpend, FileData, FileData, FileData, File
     let minimax = split_models(&mut all, "MiniMax");
     // Qwen-family models in Claude Code logs mean the session ran
     // against AihubMix's Anthropic-compatible endpoint — those dollars
-    // belong on the AihubMix card. DeepSeek/Gemini slugs join them once
-    // an AihubMix key exists (see split_aihubmix_routed).
+    // belong on the AihubMix card. DeepSeek/Gemini/Hy4 slugs join them
+    // once an AihubMix key exists (see split_aihubmix_routed).
     let aihubmix_via_claude =
         split_aihubmix_routed(&mut all, providers::aihubmix::configured());
     // Kimi slugs likewise mean Moonshot billed the session (Anthropic-
@@ -6457,6 +6458,24 @@ mod tests {
         assert!(data.days.keys().all(|(_, m)| m == "gemini-4-argon"));
     }
 
+    /// `hy4` is Tencent's model on AIHubMix's Anthropic-compatible
+    /// endpoint — Claude Code logs it bare, so it prices the gateway
+    /// card ($0.8823 in / $2.647 out / $0.4412 cache read per MTok) and
+    /// stays on the Claude card until split_aihubmix_routed moves it.
+    #[test]
+    fn claude_hy4_rows_price_on_the_gateway_card() {
+        let line = json!({"type": "assistant", "timestamp": "2026-10-14T12:00:00Z",
+            "requestId": "req_h1",
+            "message": {"id": "msg_h1", "model": "hy4",
+                "usage": {"input_tokens": 1000000.0, "output_tokens": 1000000.0,
+                    "cache_read_input_tokens": 1000000.0}}})
+        .to_string();
+        let data = claude_run(std::slice::from_ref(&line));
+        let cost: f64 = data.days.values().map(|v| v.0).sum();
+        assert!((cost - 3.9705).abs() < 1e-9, "{cost}");
+        assert!(data.days.keys().all(|(_, m)| m == "hy4"));
+    }
+
     /// `deepseek-flash` is AIHubMix's alias for deepseek-v4.1-flash-1017 —
     /// the gateway card with the official weekday peak windows, not the
     /// flat catalog price for the alias.
@@ -6543,6 +6562,18 @@ mod tests {
         assert!((total(&mix) - 0.825).abs() < 1e-9, "{}", total(&mix));
         assert!(mix.days.keys().all(|(_, m)| m == "MiniMax-M3.1-Flash"));
 
+        // A `tencent/`-prefixed hy4 on an aihubmix route still prices the
+        // gateway card ($0.8823 + $2.647 per MTok) in the aihubmix bucket.
+        let (ds, mix) = deepseek_harness_priced(vec![ev(
+            "2026-10-17T09:00:00Z",
+            "aihubmix",
+            "tencent/hy4",
+            0.0,
+        )]);
+        assert!(ds.days.is_empty());
+        assert!((total(&mix) - 3.5293).abs() < 1e-9, "{}", total(&mix));
+        assert!(mix.days.keys().all(|(_, m)| m == "tencent/hy4"));
+
         // A foreign provider contributes to neither bucket.
         let (ds, mix) = deepseek_harness_priced(vec![ev(
             "2026-10-17T09:00:00Z",
@@ -6553,14 +6584,23 @@ mod tests {
         assert!(ds.days.is_empty() && mix.days.is_empty());
     }
 
-    /// DeepSeek and Gemini rows move to AihubMix only when a key exists —
-    /// otherwise they stay on Claude (DeepSeek has its own Anthropic
-    /// endpoint). Qwen always moves; its only path here is the gateway.
+    /// DeepSeek, Gemini and Hy4 rows move to AihubMix only when a key
+    /// exists — otherwise they stay on Claude (DeepSeek and Tencent have
+    /// their own endpoints). Qwen always moves; its only path here is
+    /// the gateway.
     #[test]
     fn aihubmix_routed_rows_split_by_configuration() {
         let build = || {
             let mut all = FileData::default();
-            for m in ["claude-opus-5-5", "deepseek-flash", "gemini-4-argon", "qwen3.8-max"] {
+            for m in [
+                "claude-opus-5-5",
+                "deepseek-flash",
+                "gemini-4-argon",
+                "hy4",
+                "tencent/hy4",
+                "aihubmix/hy4",
+                "qwen3.8-max",
+            ] {
                 all.days.insert((1, m.to_string()), (1.0, 1.0));
                 all.hours.insert((2, m.to_string()), (1.0, 1.0));
             }
@@ -6572,19 +6612,30 @@ mod tests {
             v.sort();
             v.join(",")
         };
-        // Unconfigured: only qwen moves.
+        // Unconfigured: only qwen moves; hy4 stays on Claude like
+        // deepseek and gemini.
         let mut all = build();
         let moved = split_aihubmix_routed(&mut all, false);
         assert_eq!(names(&moved), "qwen3.8-max");
         assert!(all.days.keys().any(|(_, m)| m == "deepseek-flash"));
-        // Configured: deepseek, gemini, qwen move — days, hours and the
-        // unpriced tally alike; claude stays.
+        assert!(all.days.keys().any(|(_, m)| m == "hy4"));
+        assert!(all.days.keys().any(|(_, m)| m == "tencent/hy4"));
+        assert!(all.days.keys().any(|(_, m)| m == "aihubmix/hy4"));
+        // Configured: deepseek, gemini, hy4 (bare or explicitly
+        // AIHubMix-prefixed), qwen move — days, hours and the unpriced
+        // tally alike; claude and tencent's own endpoint stay.
         let mut all = build();
         let moved = split_aihubmix_routed(&mut all, true);
-        assert_eq!(names(&moved), "deepseek-flash,gemini-4-argon,qwen3.8-max");
-        assert_eq!(moved.hours.len(), 3);
+        assert_eq!(
+            names(&moved),
+            "aihubmix/hy4,deepseek-flash,gemini-4-argon,hy4,qwen3.8-max"
+        );
+        assert_eq!(moved.hours.len(), 5);
         assert_eq!(moved.unpriced["deepseek-flash"], 1);
-        assert!(all.days.keys().all(|(_, m)| m == "claude-opus-5-5"));
+        assert!(all
+            .days
+            .keys()
+            .all(|(_, m)| m == "claude-opus-5-5" || m == "tencent/hy4"));
     }
 
     /// A prefixed Argon spelling on a verified AIHubMix route still
@@ -6602,6 +6653,25 @@ mod tests {
         let mix = take_tagged(&mut data, "aihubmix");
         assert_eq!(mix.days.values().map(|v| v.0).sum::<f64>(), 4.0);
         assert!(mix.days.keys().all(|(_, m)| m == "google/gemini-4-argon"));
+    }
+
+    /// A `tencent/`-prefixed hy4 on a verified AIHubMix route still bills
+    /// the gateway card ($0.8823 in / $2.647 out per MTok) — the narrow
+    /// scoped match is only for unprovenanced Claude rows.
+    #[test]
+    fn pi_aihubmix_tencent_hy4_prices_the_gateway_card() {
+        let mut seen = HashSet::new();
+        let mut data = FileData::default();
+        let line = json!({"type": "message", "id": "h9", "timestamp": "2026-10-14T12:00:00Z",
+            "message": {"role": "assistant", "provider": "aihubmix", "model": "tencent/hy4",
+                        "usage": {"input": 1000000.0, "output": 1000000.0, "cacheRead": 0.0,
+                                  "cacheWrite": 0.0, "totalTokens": 2000000.0}}})
+        .to_string();
+        pi_line(&mut seen, &line, &mut data);
+        let mix = take_tagged(&mut data, "aihubmix");
+        let total: f64 = mix.days.values().map(|v| v.0).sum();
+        assert!((total - 3.5293).abs() < 1e-9, "{total}");
+        assert!(mix.days.keys().all(|(_, m)| m == "tencent/hy4"));
     }
 
     /// Hermes rows price on the route-scoped slug end to end — the dated

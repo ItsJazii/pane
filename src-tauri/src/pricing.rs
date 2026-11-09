@@ -250,6 +250,22 @@ pub fn dated_card(model: &str, ts_ms: i64) -> Option<Price> {
         .or_else(|| argon_list_card(model, ts_ms))
 }
 
+/// Only two `hy4` spellings take the AIHubMix card: the bare slug
+/// (`hy4`/`HY4` — how Claude Code logs it on AIHubMix's Anthropic
+/// endpoint) and an explicit `aihubmix` prefix (`aihubmix/hy4`,
+/// `aihubmix\u{1}hy4`). `tencent/hy4` is Tencent's own endpoint and
+/// stays on its provider card.
+pub fn aihubmix_hy4_route(model: &str) -> bool {
+    if model.eq_ignore_ascii_case("hy4") {
+        return true;
+    }
+    if let Some(idx) = model.rfind(['/', '\u{1}']) {
+        return model[..idx].eq_ignore_ascii_case("aihubmix")
+            && model[idx + 1..].eq_ignore_ascii_case("hy4");
+    }
+    false
+}
+
 /// The AIHubMix spelling of a model that only reaches the caller through
 /// the gateway — callers have already established the route is AIHubMix.
 /// Argon slugs normalise as before (`google/gemini-4-argon`, bare).
@@ -257,11 +273,17 @@ pub fn dated_card(model: &str, ts_ms: i64) -> Option<Price> {
 /// its Anthropic endpoint (same published card), and any V4.1 Flash
 /// spelling maps to the gateway slug — the public catalog prices the
 /// bare `deepseek-flash` alias flat with no peak logic, which is wrong.
-/// Everything else is not an AIHubMix route.
+/// Tencent's `hy4` — which Claude Code logs bare on that same endpoint —
+/// maps to the `aihubmix/hy4` card (exactly `hy4`; `hy4-preview` is a
+/// different SKU the callers route themselves). Everything else is not
+/// an AIHubMix route.
 pub fn aihubmix_scoped(model: &str) -> Option<String> {
     let seg = model.rsplit(['/', '\u{1}']).next().unwrap_or(model);
     if seg.eq_ignore_ascii_case("deepseek-flash") {
         return Some("aihubmix/deepseek-v4.1-flash".into());
+    }
+    if aihubmix_hy4_route(model) {
+        return Some("aihubmix/hy4".into());
     }
     if v41_flash_slug(model) {
         return Some(format!("aihubmix/{seg}"));
@@ -283,6 +305,9 @@ pub fn aihubmix_gateway_slug(model: &str) -> String {
     let seg = model.rsplit(['/', '\u{1}']).next().unwrap_or(model);
     if seg.eq_ignore_ascii_case("minimax-m3.1-flash") {
         return "aihubmix/minimax-m3.1-flash".to_string();
+    }
+    if seg.eq_ignore_ascii_case("hy4") {
+        return "aihubmix/hy4".to_string();
     }
     model.to_string()
 }
@@ -396,7 +421,7 @@ pub fn generation() -> u64 {
 /// fingerprinted below — an app update that reprices the same files would
 /// otherwise leave history at the old dollars until upstream happens to
 /// rewrite a catalog.
-const CORRECTIONS_REV: u32 = 25; // 19: Antigravity `-trial` ids (gemini-4-argon-trial) price like the base card; 20: Argon post-intro list card enforced over catalogs; 21: Claude Code deepseek-flash / V4.1 Flash priced on AIHubMix's card; 22: `deepseek/` spellings take the baked official card over models.dev's same-prefix reseller ids; 23: AIHubMix MiniMax M3.1 Flash card; 24: Moonshot Kimi K3.1 Pro + Highspeed cards; 25: Claude Fable/Mythos 5.2 card + 2× fast mode
+const CORRECTIONS_REV: u32 = 26; // 19: Antigravity `-trial` ids (gemini-4-argon-trial) price like the base card; 20: Argon post-intro list card enforced over catalogs; 21: Claude Code deepseek-flash / V4.1 Flash priced on AIHubMix's card; 22: `deepseek/` spellings take the baked official card over models.dev's same-prefix reseller ids; 23: AIHubMix MiniMax M3.1 Flash card; 24: Moonshot Kimi K3.1 Pro + Highspeed cards; 25: Claude Fable/Mythos 5.2 card + 2× fast mode; 26: AIHubMix Tencent Hy4 card (Claude Code `hy4` rows)
 
 /// The corrections revision on its own — the spend cache treats a changed
 /// revision as a hard discard (the *code* that prices changed), while a
@@ -1199,6 +1224,10 @@ fn builtin_price(canonical: &str) -> Option<Price> {
     }
     match canonical {
         "aihubmix/hy4-preview" => return Some(Price::flat(0.845, 2.535, 0.04225, 0.845)),
+        // AihubMix Tencent Hy4 (aihubmix.com/model/hy4): $0.8823 in /
+        // $2.647 out / $0.4412 cache read; no published cache write →
+        // billed at the input rate like the other AihubMix arms.
+        "aihubmix/hy4" => return Some(Price::flat(0.8823, 2.647, 0.4412, 0.8823)),
         "aihubmix/qwen3.8-flash" => {
             return Some(Price::flat(0.1126, 0.380025, 0.014075, 0.175937));
         }
@@ -1627,6 +1656,8 @@ mod tests {
     fn aihubmix_hy4_and_qwen38_flash_launch_prices_stay_scoped() {
         let store = super::Store::default();
         for slug in [
+            "hy4",
+            "tencent/hy4",
             "hy4-preview",
             "tencent/hy4-preview",
             "qwen3.8-flash",
@@ -1635,6 +1666,11 @@ mod tests {
             assert!(super::resolve(&store, slug, 0).is_none(), "{slug}");
         }
 
+        let hy4 = super::resolve(&store, "aihubmix/hy4", 0).unwrap();
+        assert_eq!(
+            (hy4.input, hy4.output, hy4.cache_read, hy4.cache_write),
+            (0.8823, 2.647, 0.4412, 0.8823)
+        );
         let hy4 = super::resolve(&store, "aihubmix/hy4-preview", 0).unwrap();
         assert_eq!((hy4.input, hy4.output, hy4.cache_read), (0.845, 2.535, 0.04225));
         let qwen = super::resolve(&store, "aihubmix/qwen3.8-flash", 0).unwrap();
@@ -1811,6 +1847,25 @@ mod tests {
         assert!(super::devin_argon_card("gpt-6.1-sol", ms("2026-10-14T12:00:00Z")).is_none());
     }
 
+    /// `hy4` prices on the AIHubMix card only when Claude Code logged it
+    /// bare or explicitly AIHubMix-prefixed — `tencent/hy4` is Tencent's
+    /// own endpoint and must not take the gateway rate.
+    #[test]
+    fn aihubmix_scoped_hy4_needs_a_bare_or_aihubmix_spelling() {
+        assert_eq!(super::aihubmix_scoped("hy4").as_deref(), Some("aihubmix/hy4"));
+        assert_eq!(super::aihubmix_scoped("HY4").as_deref(), Some("aihubmix/hy4"));
+        assert_eq!(
+            super::aihubmix_scoped("aihubmix/hy4").as_deref(),
+            Some("aihubmix/hy4")
+        );
+        assert!(super::aihubmix_scoped("tencent/hy4").is_none());
+        assert!(super::aihubmix_scoped("hy4-preview").is_none());
+        // Verified-AIHubMix callers (pi/omp, DSH routes) still map any
+        // prefixed hy4 spelling to the gateway SKU.
+        assert_eq!(super::aihubmix_gateway_slug("tencent/hy4"), "aihubmix/hy4");
+        assert_eq!(super::aihubmix_gateway_slug("HY4"), "aihubmix/hy4");
+    }
+
     #[test]
     fn aihubmix_scoped_normalises_any_argon_spelling() {
         assert_eq!(
@@ -1887,6 +1942,18 @@ mod tests {
         // Other deepseek slugs are not AIHubMix routes.
         assert!(super::aihubmix_scoped("deepseek-v4-flash").is_none());
         assert!(super::aihubmix_scoped("deepseek-v4-pro").is_none());
+        // Tencent Hy4 — exactly `hy4` on a verified AIHubMix route takes
+        // the gateway card; the `-preview` SKU stays unrouted (hermes
+        // maps it to `aihubmix/hy4-preview` itself).
+        assert_eq!(
+            super::aihubmix_scoped("hy4").as_deref(),
+            Some("aihubmix/hy4")
+        );
+        assert_eq!(
+            super::aihubmix_scoped("HY4").as_deref(),
+            Some("aihubmix/hy4")
+        );
+        assert!(super::aihubmix_scoped("hy4-preview").is_none());
     }
 
     #[test]
