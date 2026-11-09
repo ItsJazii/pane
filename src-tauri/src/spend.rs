@@ -1899,7 +1899,7 @@ fn split_aihubmix_routed(all: &mut FileData, aihubmix_configured: bool) -> FileD
             .next()
             .unwrap_or(m)
             .to_ascii_lowercase();
-        seg.starts_with("deepseek") || seg.starts_with("gemini") || seg == "hy4"
+        seg.starts_with("deepseek") || seg.starts_with("gemini") || pricing::aihubmix_hy4_route(m)
     })
 }
 
@@ -6519,6 +6519,8 @@ mod tests {
                 "deepseek-flash",
                 "gemini-4-argon",
                 "hy4",
+                "tencent/hy4",
+                "aihubmix/hy4",
                 "qwen3.8-max",
             ] {
                 all.days.insert((1, m.to_string()), (1.0, 1.0));
@@ -6539,14 +6541,23 @@ mod tests {
         assert_eq!(names(&moved), "qwen3.8-max");
         assert!(all.days.keys().any(|(_, m)| m == "deepseek-flash"));
         assert!(all.days.keys().any(|(_, m)| m == "hy4"));
-        // Configured: deepseek, gemini, hy4, qwen move — days, hours and
-        // the unpriced tally alike; claude stays.
+        assert!(all.days.keys().any(|(_, m)| m == "tencent/hy4"));
+        assert!(all.days.keys().any(|(_, m)| m == "aihubmix/hy4"));
+        // Configured: deepseek, gemini, hy4 (bare or explicitly
+        // AIHubMix-prefixed), qwen move — days, hours and the unpriced
+        // tally alike; claude and tencent's own endpoint stay.
         let mut all = build();
         let moved = split_aihubmix_routed(&mut all, true);
-        assert_eq!(names(&moved), "deepseek-flash,gemini-4-argon,hy4,qwen3.8-max");
-        assert_eq!(moved.hours.len(), 4);
+        assert_eq!(
+            names(&moved),
+            "aihubmix/hy4,deepseek-flash,gemini-4-argon,hy4,qwen3.8-max"
+        );
+        assert_eq!(moved.hours.len(), 5);
         assert_eq!(moved.unpriced["deepseek-flash"], 1);
-        assert!(all.days.keys().all(|(_, m)| m == "claude-opus-5-5"));
+        assert!(all
+            .days
+            .keys()
+            .all(|(_, m)| m == "claude-opus-5-5" || m == "tencent/hy4"));
     }
 
     /// A prefixed Argon spelling on a verified AIHubMix route still

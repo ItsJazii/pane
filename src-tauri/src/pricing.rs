@@ -250,6 +250,22 @@ pub fn dated_card(model: &str, ts_ms: i64) -> Option<Price> {
         .or_else(|| argon_list_card(model, ts_ms))
 }
 
+/// Only two `hy4` spellings take the AIHubMix card: the bare slug
+/// (`hy4`/`HY4` — how Claude Code logs it on AIHubMix's Anthropic
+/// endpoint) and an explicit `aihubmix` prefix (`aihubmix/hy4`,
+/// `aihubmix\u{1}hy4`). `tencent/hy4` is Tencent's own endpoint and
+/// stays on its provider card.
+pub fn aihubmix_hy4_route(model: &str) -> bool {
+    if model.eq_ignore_ascii_case("hy4") {
+        return true;
+    }
+    if let Some(idx) = model.rfind(['/', '\u{1}']) {
+        return model[..idx].eq_ignore_ascii_case("aihubmix")
+            && model[idx + 1..].eq_ignore_ascii_case("hy4");
+    }
+    false
+}
+
 /// The AIHubMix spelling of a model that only reaches the caller through
 /// the gateway — callers have already established the route is AIHubMix.
 /// Argon slugs normalise as before (`google/gemini-4-argon`, bare).
@@ -266,7 +282,7 @@ pub fn aihubmix_scoped(model: &str) -> Option<String> {
     if seg.eq_ignore_ascii_case("deepseek-flash") {
         return Some("aihubmix/deepseek-v4.1-flash".into());
     }
-    if seg.eq_ignore_ascii_case("hy4") {
+    if aihubmix_hy4_route(model) {
         return Some("aihubmix/hy4".into());
     }
     if v41_flash_slug(model) {
@@ -1709,6 +1725,21 @@ mod tests {
         assert!(super::devin_argon_card("gemini-4-argon", ms("2026-12-01T07:59:59Z")).is_some());
         assert!(super::devin_argon_card("gemini-4-argon", ms("2026-12-01T08:00:00Z")).is_none());
         assert!(super::devin_argon_card("gpt-6.1-sol", ms("2026-10-14T12:00:00Z")).is_none());
+    }
+
+    /// `hy4` prices on the AIHubMix card only when Claude Code logged it
+    /// bare or explicitly AIHubMix-prefixed — `tencent/hy4` is Tencent's
+    /// own endpoint and must not take the gateway rate.
+    #[test]
+    fn aihubmix_scoped_hy4_needs_a_bare_or_aihubmix_spelling() {
+        assert_eq!(super::aihubmix_scoped("hy4").as_deref(), Some("aihubmix/hy4"));
+        assert_eq!(super::aihubmix_scoped("HY4").as_deref(), Some("aihubmix/hy4"));
+        assert_eq!(
+            super::aihubmix_scoped("aihubmix/hy4").as_deref(),
+            Some("aihubmix/hy4")
+        );
+        assert!(super::aihubmix_scoped("tencent/hy4").is_none());
+        assert!(super::aihubmix_scoped("hy4-preview").is_none());
     }
 
     #[test]
