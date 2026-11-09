@@ -4,6 +4,9 @@
 
 - Updated the secure-connection (rustls), DeepSeek Harness log reader
   (zstd) and build (Vite) libraries to fix known security advisories.
+- **Claude Fable 5.2 and Mythos 5.2 are priced.** Devin, Claude Code and
+  the other spend cards now count them at Anthropic's $8 / $40 per
+  million tokens (fast mode 2×) instead of leaving them unpriced.
 
 ## 0.5.0 — 2026-10-28
 

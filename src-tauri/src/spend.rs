@@ -3706,6 +3706,24 @@ fn agy_priced(candidate: &str) -> Option<(pricing::Price, String)> {
     None
 }
 
+/// Devin reorders Fable/Mythos slugs ("claude-5-fable", "claude-5-2-
+/// fable") where LiteLLM puts the name first ("claude-fable-5-2").
+fn fable_reorder(base: &str) -> Option<String> {
+    let rest = base.strip_prefix("claude-")?;
+    for name in ["fable", "mythos"] {
+        if let Some(ver) = rest.strip_suffix(&format!("-{name}")) {
+            if ver == "5"
+                || ver
+                    .strip_prefix("5-")
+                    .is_some_and(|t| !t.is_empty() && t.chars().all(|c| c.is_ascii_digit()))
+            {
+                return Some(format!("claude-{name}-{ver}"));
+            }
+        }
+    }
+    None
+}
+
 /// Windsurf-style slugs append a reasoning effort ("claude-opus-4-8-medium")
 /// that no catalog knows; price and display the base model. Some slugs also
 /// spell the model differently than the catalogs: version dots become
@@ -3722,14 +3740,26 @@ fn devin_model(raw: &str) -> String {
     for suffix in ["-xhigh", "-light", "-low", "-medium", "-high", "-max", "-ultra", "-fast"] {
         if let Some(b) = raw.strip_suffix(suffix) {
             if suffix == "-fast" && !cognition_stem(b) {
+                // `-fast` is the premium SKU — it stays, but a Fable/
+                // Mythos reorder still applies to the stem so
+                // `claude-5-2-fable-fast` prices as `claude-fable-5-2-fast`.
+                let mut stem = b;
+                for suf in ["-xhigh", "-light", "-low", "-medium", "-high", "-max", "-ultra"] {
+                    if let Some(next) = stem.strip_suffix(suf) {
+                        stem = next;
+                    }
+                }
+                if let Some(reordered) = fable_reorder(stem) {
+                    return format!("{reordered}-fast");
+                }
                 break;
             }
             base = b;
             break;
         }
     }
-    if base == "claude-5-fable" {
-        return "claude-fable-5".into(); // LiteLLM's slug order
+    if let Some(reordered) = fable_reorder(base) {
+        return reordered;
     }
     if let Some(rest) = base.strip_prefix("gpt-") {
         let parts: Vec<&str> = rest.splitn(3, '-').collect();
@@ -5915,6 +5945,36 @@ mod tests {
         assert_eq!(tokens_sum(&twice), 1_509.0);
     }
 
+    /// Claude Code end-to-end: `claude-fable-5-2` prices on the baked
+    /// Anthropic card ($8/$40) and a `"speed":"fast"` turn bills exactly
+    /// 2× the same usage at standard speed.
+    #[test]
+    fn claude_fable52_fast_bills_two_x() {
+        let mk = |speed: &str| {
+            json!({"type": "assistant", "timestamp": "2026-11-10T10:00:00Z",
+                "requestId": format!("req_{speed}"),
+                "message": {"id": format!("msg_{speed}"), "model": "claude-fable-5-2",
+                    "usage": {"input_tokens": 1000.0, "output_tokens": 500.0, "speed": speed}}})
+            .to_string()
+        };
+        let standard = claude_run(&[mk("standard")]);
+        let fast = claude_run(&[mk("fast")]);
+        assert!(standard.unpriced.is_empty(), "standard unpriced: {:?}", standard.unpriced);
+        assert!(fast.unpriced.is_empty(), "fast unpriced: {:?}", fast.unpriced);
+        let expect = (1000.0 * 8.0 + 500.0 * 40.0) / 1e6;
+        assert!(
+            (cost_sum(&standard) - expect).abs() < 1e-9,
+            "standard {} want {}",
+            cost_sum(&standard),
+            expect
+        );
+        assert!(
+            (cost_sum(&fast) / cost_sum(&standard) - 2.0).abs() < 1e-9,
+            "fast/standard ratio {}",
+            cost_sum(&fast) / cost_sum(&standard)
+        );
+    }
+
     #[test]
     fn claude_sidechain_replay_is_deduped() {
         let parent = json!({"type": "assistant", "timestamp": "2026-07-10T10:00:00Z",
@@ -5966,6 +6026,12 @@ mod tests {
         assert_eq!(devin_model("claude-5-fable-medium"), "claude-fable-5");
         assert_eq!(devin_model("claude-5-fable-max"), "claude-fable-5");
         assert_eq!(devin_model("claude-5-fable-high"), "claude-fable-5");
+        assert_eq!(devin_model("claude-fable-5-2-xhigh"), "claude-fable-5-2");
+        assert_eq!(devin_model("claude-5-2-fable-high"), "claude-fable-5-2");
+        assert_eq!(devin_model("claude-5-2-fable-fast"), "claude-fable-5-2-fast");
+        assert_eq!(devin_model("claude-5-2-mythos-high-fast"), "claude-mythos-5-2-fast");
+        assert_eq!(devin_model("claude-5-fable-fast"), "claude-fable-5-fast");
+        assert_eq!(devin_model("claude-opus-5-5-fast"), "claude-opus-5-5-fast");
         assert_eq!(devin_model("gpt-5-6-sol-max"), "gpt-5.6-sol");
         assert_eq!(devin_model("claude-opus-4-8-medium"), "claude-opus-4-8");
         assert_eq!(devin_model("gpt-4-0125-preview"), "gpt-4-0125-preview");

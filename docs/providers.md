@@ -56,7 +56,10 @@ Ground rules that apply to every provider:
   oh-my-pi writes the same format under `~\.omp\agent\sessions`, and
   Step Code under `~\.stepcode\agent\sessions`)
   fold into this card's spend — pi's own recorded cost when present,
-  catalog pricing otherwise.
+  catalog pricing otherwise. Claude Fable 5.2 / Mythos 5.2 price at
+  Anthropic's published card ($8 in / $40 out / $0.20 cache read /
+  $10 5-min and $16 1-hour cache writes; fast mode 2×) until the
+  catalogs carry them.
 - **Weekly capacity row:** while the Weekly window runs, Pane sums what
   this card's logs recorded inside it and estimates what 100% of the
   limit is worth — tokens plus API-equivalent dollars (list prices, not
@@ -198,7 +201,9 @@ Ground rules that apply to every provider:
 - **Calls:** Devin's `GetUserStatus` RPC.
 - **Shows:** weekly/daily quota, extra balance, plan; local spend from
   Devin CLI and Devin Next sessions (cloud Devin sessions bill ACUs and
-  keep no local logs, so they can't be priced).
+  keep no local logs, so they can't be priced). Effort tails
+  (`claude-fable-5-2-xhigh`) price at the base model's rates; Fable 5.2
+  uses the same built-in Anthropic card as the Claude card.
 
 ## Droid (Factory)
 

@@ -319,10 +319,24 @@ pub fn peak_overlap_ms(start_ms: i64, end_ms: i64) -> i64 {
 
 /// The supplement's fast multiplier for a model, 1.0 when none is
 /// published — a fast-flagged request without data bills at standard
-/// rates rather than a guessed premium (Mac behavior).
+/// rates rather than a guessed premium (Mac behavior). Claude Fable/
+/// Mythos 5.2's documented fast tier is a flat 2×, so it is the one
+/// built-in default until the supplement carries it.
 pub fn fast_multiplier(model: &str) -> f64 {
     let s = store().lock().unwrap();
-    s.fast_multipliers.get(model).copied().unwrap_or(1.0)
+    fast_multiplier_in(&s, model)
+}
+
+fn fast_multiplier_in(s: &Store, model: &str) -> f64 {
+    if let Some(m) = s.fast_multipliers.get(model) {
+        return *m;
+    }
+    if fable52_base(model).is_some() {
+        // The supplement's multiplier for the base (dash or dotted key)
+        // wins; otherwise the documented fast tier is a flat 2×.
+        return fable52_supplement_mult(s, model).unwrap_or(2.0);
+    }
+    1.0
 }
 
 const SOURCES: [(&str, &str); 3] = [
@@ -382,7 +396,7 @@ pub fn generation() -> u64 {
 /// fingerprinted below — an app update that reprices the same files would
 /// otherwise leave history at the old dollars until upstream happens to
 /// rewrite a catalog.
-const CORRECTIONS_REV: u32 = 24; // 19: Antigravity `-trial` ids (gemini-4-argon-trial) price like the base card; 20: Argon post-intro list card enforced over catalogs; 21: Claude Code deepseek-flash / V4.1 Flash priced on AIHubMix's card; 22: `deepseek/` spellings take the baked official card over models.dev's same-prefix reseller ids; 23: AIHubMix MiniMax M3.1 Flash card; 24: Moonshot Kimi K3.1 Pro + Highspeed cards
+const CORRECTIONS_REV: u32 = 25; // 19: Antigravity `-trial` ids (gemini-4-argon-trial) price like the base card; 20: Argon post-intro list card enforced over catalogs; 21: Claude Code deepseek-flash / V4.1 Flash priced on AIHubMix's card; 22: `deepseek/` spellings take the baked official card over models.dev's same-prefix reseller ids; 23: AIHubMix MiniMax M3.1 Flash card; 24: Moonshot Kimi K3.1 Pro + Highspeed cards; 25: Claude Fable/Mythos 5.2 card + 2× fast mode
 
 /// The corrections revision on its own — the spend cache treats a changed
 /// revision as a hard discard (the *code* that prices changed), while a
@@ -799,7 +813,7 @@ fn fast_tier_mult(s: &Store, base: &str) -> f64 {
             .find_map(|suf| mkey.strip_suffix(suf))
         {
             Some(next) => mkey = next,
-            None => return 2.0,
+            None => return fable52_supplement_mult(s, base).unwrap_or(2.0),
         }
     }
 }
@@ -936,6 +950,18 @@ fn resolve(s: &Store, model: &str, depth: u8) -> Option<Price> {
     if let Some(p) = s.modelsdev.get(&canonical).filter(real) {
         return Some(*p);
     }
+    // Fable/Mythos 5.2 variants (suffixed, dotted, prefixed, dated) defer
+    // to a catalog row for the plain base — an upstream `claude-fable-5-2`
+    // entry outranks the baked card for every spelling, while an exact
+    // variant row still wins above. Only the base itself falls to
+    // builtin_price.
+    if let Some(base) = fable52_base(&canonical) {
+        if base != canonical.as_str() {
+            if let Some(p) = resolve(s, base, depth + 1) {
+                return Some(p);
+            }
+        }
+    }
     // Vendor-documented rates for models the live catalogs haven't learned
     // yet — consulted after every online source so a real catalog entry
     // always wins the moment one ships. Keep this list tiny and sourced.
@@ -1071,6 +1097,94 @@ fn kimi_vendor_tail(canonical: &str) -> Option<&str> {
     }
 }
 
+/// Claude Fable 5.2 / Mythos 5.2 (launched 2026-11-09): one shared card —
+/// $8 in / $40 out / $0.20 cache read / $10 5-min write / $16 1h write,
+/// full 1M context at standard price (no >200k tier). Fast mode is a
+/// flat 2×. LiteLLM, models.dev and the supplement don't carry it yet;
+/// sitting in builtin_price means a real catalog entry wins the moment
+/// one ships.
+/// platform.claude.com/docs/en/about-claude/pricing
+fn fable52_card() -> Price {
+    Price { cache_write_1h: Some(16.0), ..Price::flat(8.0, 40.0, 0.20, 10.0) }
+}
+
+/// A supplement fast multiplier for a Fable/Mythos 5.2 spelling's base,
+/// under either its dash or dotted key.
+fn fable52_supplement_mult(s: &Store, model: &str) -> Option<f64> {
+    let base = fable52_base(model)?;
+    s.fast_multipliers
+        .get(base)
+        .or_else(|| s.fast_multipliers.get(base.replace("5-2", "5.2").as_str()))
+        .copied()
+}
+
+/// The canonical dash base for Claude Fable/Mythos 5.2 spellings across
+/// gateway spellings (`anthropic/…`, `vertex_ai/…@default`, Bedrock
+/// `us.anthropic.…-v1:0`, `[1m]`, dated `-20261109` snapshots, effort
+/// tails, Cursor's `Fable 5.2 (Auto)` prose). `-fast` is deliberately
+/// NOT stripped — resolve()'s `-fast` arm owns the 2× tier. `5`, `5.1`,
+/// `5-1`, `5-20`, `5.25` etc. must not match.
+fn fable52_base(model: &str) -> Option<&'static str> {
+    let mut m = model.to_ascii_lowercase();
+    let last = m.rsplit('/').next().unwrap_or(&m).to_string();
+    m = last;
+    // Cursor-style prose: "fable 5.2" / "claude mythos 5.2" (+ optional
+    // " (Auto)") — spaces instead of dashes.
+    let bare = m.split(" (").next().unwrap_or(&m).trim().to_string();
+    match bare.as_str() {
+        "fable 5.2" | "claude fable 5.2" => return Some("claude-fable-5-2"),
+        "mythos 5.2" | "claude mythos 5.2" => return Some("claude-mythos-5-2"),
+        _ => {}
+    }
+    // Bedrock prefixes: [region.]anthropic.claude-…
+    for region in ["us.", "eu.", "apac.", "global.", "us-gov."] {
+        if let Some(rest) = m.strip_prefix(region) {
+            m = rest.to_string();
+            break;
+        }
+    }
+    if let Some(rest) = m.strip_prefix("anthropic.") {
+        m = rest.to_string();
+    }
+    // Vertex `@default`, Bedrock `-vN:M`, context tag `[1m]`.
+    if let Some(at) = m.find('@') {
+        m.truncate(at);
+    }
+    if let Some(b) = m.find("[1m]") {
+        m.truncate(b);
+    }
+    if let Some(idx) = m.rfind("-v") {
+        let tail = &m[idx + 2..];
+        if tail.chars().all(|c| c.is_ascii_digit() || c == ':') && tail.contains(':') {
+            m.truncate(idx);
+        }
+    }
+    // Effort / reasoning tails repeat on some gateways.
+    loop {
+        match [
+            "-xhigh", "-light", "-low", "-medium", "-high", "-max", "-ultra", "-thinking",
+        ]
+        .iter()
+        .find_map(|suf| m.strip_suffix(suf))
+        {
+            Some(next) => m = next.to_string(),
+            None => break,
+        }
+    }
+    // One trailing 8-digit date stamp.
+    if m.len() > 9 && m.as_bytes()[m.len() - 9] == b'-' {
+        let d = &m[m.len() - 8..];
+        if d.chars().all(|c| c.is_ascii_digit()) {
+            m.truncate(m.len() - 9);
+        }
+    }
+    match m.as_str() {
+        "claude-fable-5-2" | "claude-fable-5.2" => Some("claude-fable-5-2"),
+        "claude-mythos-5-2" | "claude-mythos-5.2" => Some("claude-mythos-5-2"),
+        _ => None,
+    }
+}
+
 fn builtin_price(canonical: &str) -> Option<Price> {
     // Gateways prefix the vendor slug (`xai/grok-4.6`, `deepseek/…`,
     // `accounts/fireworks/models/deepseek-v4-pro`). Peel to the last
@@ -1079,6 +1193,9 @@ fn builtin_price(canonical: &str) -> Option<Price> {
     // resolve() consults them first.
     if let Some(p) = kimi_vendor_price(canonical) {
         return Some(p);
+    }
+    if fable52_base(canonical).is_some_and(|b| b == canonical) {
+        return Some(fable52_card());
     }
     match canonical {
         "aihubmix/hy4-preview" => return Some(Price::flat(0.845, 2.535, 0.04225, 0.845)),
@@ -2170,6 +2287,129 @@ mod tests {
                 None => format!("{model}: UNPRICED"),
             };
             eprintln!("{line:.200}");
+        }
+    }
+
+    #[test]
+    fn fable52_builtin_card_covers_every_spelling() {
+        let s = super::Store::default();
+        for m in [
+            "claude-fable-5-2",
+            "claude-fable-5.2",
+            "claude-fable-5-2-xhigh",
+            "claude-fable-5-2-20261109",
+            "anthropic/claude-fable-5-2",
+            "us.anthropic.claude-fable-5-2-v1:0",
+            "vertex_ai/claude-fable-5-2@default",
+            "claude-fable-5.2-thinking-high",
+            "claude-fable-5-2[1m]",
+            "claude-mythos-5-2",
+            "Fable 5.2 (Auto)",
+        ] {
+            let p = super::resolve(&s, m, 0).unwrap_or_else(|| panic!("{m} unpriced"));
+            assert_eq!((p.input, p.output, p.cache_read, p.cache_write), (8.0, 40.0, 0.2, 10.0), "{m}");
+            assert_eq!(p.cache_write_1h, Some(16.0), "{m}");
+            assert_eq!(p.input_200k, None, "{m}");
+        }
+    }
+
+    #[test]
+    fn fable52_fast_bills_two_x() {
+        let s = super::Store::default();
+        let p = super::resolve(&s, "claude-fable-5-2-xhigh-fast", 0).unwrap();
+        assert_eq!((p.input, p.output, p.cache_read, p.cache_write), (16.0, 80.0, 0.4, 20.0));
+        assert_eq!(p.cache_write_1h, Some(32.0));
+    }
+
+    #[test]
+    fn fable52_lookalikes_stay_unpriced() {
+        let s = super::Store::default();
+        for m in [
+            "claude-fable-5-1",
+            "claude-fable-5",
+            "claude-fable-5-20",
+            "claude-fable-5-21",
+            "claude-fable-5.25",
+            "claude-opus-5-5",
+        ] {
+            assert!(super::resolve(&s, m, 0).is_none(), "{m} must not price");
+        }
+    }
+
+    #[test]
+    fn fable52_catalog_entry_outranks_the_builtin() {
+        let mut s = super::Store::default();
+        s.litellm
+            .insert("claude-fable-5-2".into(), super::Price::flat(1.0, 2.0, 0.1, 1.5));
+        let p = super::resolve(&s, "claude-fable-5-2", 0).unwrap();
+        assert_eq!((p.input, p.output, p.cache_read, p.cache_write), (1.0, 2.0, 0.1, 1.5));
+    }
+
+    #[test]
+    fn fable52_fast_multiplier_is_2x_unless_the_supplement_speaks() {
+        let mut s = super::Store::default();
+        assert_eq!(super::fast_multiplier_in(&s, "claude-fable-5-2"), 2.0);
+        assert_eq!(super::fast_multiplier_in(&s, "claude-opus-9"), 1.0);
+        s.fast_multipliers.insert("claude-fable-5-2".into(), 3.0);
+        assert_eq!(super::fast_multiplier_in(&s, "claude-fable-5-2"), 3.0);
+        // A suffixed spelling reads the base's multiplier; the dotted
+        // supplement key works too.
+        assert_eq!(super::fast_multiplier_in(&s, "claude-fable-5-2-xhigh"), 3.0);
+        let mut s2 = super::Store::default();
+        s2.fast_multipliers.insert("claude-fable-5.2".into(), 2.5);
+        assert_eq!(super::fast_multiplier_in(&s2, "claude-fable-5-2-high"), 2.5);
+    }
+
+    /// A catalog row for the plain base outranks the baked card for every
+    /// variant spelling — the builtin self-retires for the whole family.
+    #[test]
+    fn fable52_variants_defer_to_a_catalog_base() {
+        let mut s = super::Store::default();
+        s.litellm
+            .insert("claude-fable-5-2".into(), super::Price::flat(9.0, 45.0, 0.3, 11.0));
+        for m in [
+            "claude-fable-5-2-xhigh",
+            "claude-fable-5.2",
+            "anthropic/claude-fable-5-2",
+            "claude-fable-5-2-20261109",
+        ] {
+            let p = super::resolve(&s, m, 0).unwrap_or_else(|| panic!("{m} unpriced"));
+            assert_eq!((p.input, p.output), (9.0, 45.0), "{m}");
+        }
+        let fast = super::resolve(&s, "claude-fable-5-2-xhigh-fast", 0).unwrap();
+        assert_eq!((fast.input, fast.output), (18.0, 90.0));
+        // An exact-variant catalog row still outranks the base for that
+        // variant.
+        s.litellm
+            .insert("claude-fable-5-2-xhigh".into(), super::Price::flat(7.0, 35.0, 0.2, 9.0));
+        let p = super::resolve(&s, "claude-fable-5-2-xhigh", 0).unwrap();
+        assert_eq!((p.input, p.output), (7.0, 35.0));
+    }
+
+    /// The `-fast` SKU arm honors the same supplement fallback as
+    /// fast_multiplier_in: a dotted supplement key scales the whole card.
+    #[test]
+    fn fable52_fast_sku_reads_the_supplement_fallback() {
+        let mut s = super::Store::default();
+        s.fast_multipliers.insert("claude-fable-5.2".into(), 2.5);
+        for m in ["claude-fable-5-2-fast", "claude-fable-5-2-xhigh-fast"] {
+            let p = super::resolve(&s, m, 0).unwrap_or_else(|| panic!("{m} unpriced"));
+            assert_eq!((p.input, p.output), (20.0, 100.0), "{m}");
+        }
+        assert_eq!(super::fast_multiplier_in(&s, "claude-fable-5-2"), 2.5);
+        let empty = super::Store::default();
+        let p = super::resolve(&empty, "claude-fable-5-2-fast", 0).unwrap();
+        assert_eq!((p.input, p.output), (16.0, 80.0));
+    }
+
+    /// `-fast` on the Fable/Mythos 5.2 bases prices at 2× through the
+    /// existing fast arm (Devin keeps the SKU after reordering).
+    #[test]
+    fn fable52_base_fast_spellings_price_two_x() {
+        let s = super::Store::default();
+        for m in ["claude-fable-5-2-fast", "claude-mythos-5-2-fast"] {
+            let p = super::resolve(&s, m, 0).unwrap_or_else(|| panic!("{m} unpriced"));
+            assert_eq!((p.input, p.output), (16.0, 80.0), "{m}");
         }
     }
 }
