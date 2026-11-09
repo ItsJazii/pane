@@ -331,7 +331,16 @@ fn fast_multiplier_in(s: &Store, model: &str) -> f64 {
     if let Some(m) = s.fast_multipliers.get(model) {
         return *m;
     }
-    if fable52_slug(model) {
+    if let Some(base) = fable52_base(model) {
+        // A supplement multiplier for the base — or its dotted spelling —
+        // wins; otherwise the documented fast tier is a flat 2×.
+        if let Some(m) = s.fast_multipliers.get(base) {
+            return *m;
+        }
+        let dotted = base.replace("5-2", "5.2");
+        if let Some(m) = s.fast_multipliers.get(dotted.as_str()) {
+            return *m;
+        }
         return 2.0;
     }
     1.0
@@ -948,6 +957,18 @@ fn resolve(s: &Store, model: &str, depth: u8) -> Option<Price> {
     if let Some(p) = s.modelsdev.get(&canonical).filter(real) {
         return Some(*p);
     }
+    // Fable/Mythos 5.2 variants (suffixed, dotted, prefixed, dated) defer
+    // to a catalog row for the plain base — an upstream `claude-fable-5-2`
+    // entry outranks the baked card for every spelling, while an exact
+    // variant row still wins above. Only the base itself falls to
+    // builtin_price.
+    if let Some(base) = fable52_base(&canonical) {
+        if base != canonical.as_str() {
+            if let Some(p) = resolve(s, base, depth + 1) {
+                return Some(p);
+            }
+        }
+    }
     // Vendor-documented rates for models the live catalogs haven't learned
     // yet — consulted after every online source so a real catalog entry
     // always wins the moment one ships. Keep this list tiny and sourced.
@@ -1094,24 +1115,23 @@ fn fable52_card() -> Price {
     Price { cache_write_1h: Some(16.0), ..Price::flat(8.0, 40.0, 0.20, 10.0) }
 }
 
-/// Normalized last-segment match for Claude Fable/Mythos 5.2 across
+/// The canonical dash base for Claude Fable/Mythos 5.2 spellings across
 /// gateway spellings (`anthropic/…`, `vertex_ai/…@default`, Bedrock
 /// `us.anthropic.…-v1:0`, `[1m]`, dated `-20261109` snapshots, effort
 /// tails, Cursor's `Fable 5.2 (Auto)` prose). `-fast` is deliberately
 /// NOT stripped — resolve()'s `-fast` arm owns the 2× tier. `5`, `5.1`,
 /// `5-1`, `5-20`, `5.25` etc. must not match.
-fn fable52_slug(model: &str) -> bool {
+fn fable52_base(model: &str) -> Option<&'static str> {
     let mut m = model.to_ascii_lowercase();
     let last = m.rsplit('/').next().unwrap_or(&m).to_string();
     m = last;
     // Cursor-style prose: "fable 5.2" / "claude mythos 5.2" (+ optional
     // " (Auto)") — spaces instead of dashes.
     let bare = m.split(" (").next().unwrap_or(&m).trim().to_string();
-    if matches!(
-        bare.as_str(),
-        "fable 5.2" | "claude fable 5.2" | "mythos 5.2" | "claude mythos 5.2"
-    ) {
-        return true;
+    match bare.as_str() {
+        "fable 5.2" | "claude fable 5.2" => return Some("claude-fable-5-2"),
+        "mythos 5.2" | "claude mythos 5.2" => return Some("claude-mythos-5-2"),
+        _ => {}
     }
     // Bedrock prefixes: [region.]anthropic.claude-…
     for region in ["us.", "eu.", "apac.", "global.", "us-gov."] {
@@ -1155,10 +1175,11 @@ fn fable52_slug(model: &str) -> bool {
             m.truncate(m.len() - 9);
         }
     }
-    matches!(
-        m.as_str(),
-        "claude-fable-5-2" | "claude-fable-5.2" | "claude-mythos-5-2" | "claude-mythos-5.2"
-    )
+    match m.as_str() {
+        "claude-fable-5-2" | "claude-fable-5.2" => Some("claude-fable-5-2"),
+        "claude-mythos-5-2" | "claude-mythos-5.2" => Some("claude-mythos-5-2"),
+        _ => None,
+    }
 }
 
 fn builtin_price(canonical: &str) -> Option<Price> {
@@ -1170,7 +1191,7 @@ fn builtin_price(canonical: &str) -> Option<Price> {
     if let Some(p) = kimi_vendor_price(canonical) {
         return Some(p);
     }
-    if fable52_slug(canonical) {
+    if fable52_base(canonical).is_some_and(|b| b == canonical) {
         return Some(fable52_card());
     }
     match canonical {
@@ -2328,5 +2349,48 @@ mod tests {
         assert_eq!(super::fast_multiplier_in(&s, "claude-opus-9"), 1.0);
         s.fast_multipliers.insert("claude-fable-5-2".into(), 3.0);
         assert_eq!(super::fast_multiplier_in(&s, "claude-fable-5-2"), 3.0);
+        // A suffixed spelling reads the base's multiplier; the dotted
+        // supplement key works too.
+        assert_eq!(super::fast_multiplier_in(&s, "claude-fable-5-2-xhigh"), 3.0);
+        let mut s2 = super::Store::default();
+        s2.fast_multipliers.insert("claude-fable-5.2".into(), 2.5);
+        assert_eq!(super::fast_multiplier_in(&s2, "claude-fable-5-2-high"), 2.5);
+    }
+
+    /// A catalog row for the plain base outranks the baked card for every
+    /// variant spelling — the builtin self-retires for the whole family.
+    #[test]
+    fn fable52_variants_defer_to_a_catalog_base() {
+        let mut s = super::Store::default();
+        s.litellm
+            .insert("claude-fable-5-2".into(), super::Price::flat(9.0, 45.0, 0.3, 11.0));
+        for m in [
+            "claude-fable-5-2-xhigh",
+            "claude-fable-5.2",
+            "anthropic/claude-fable-5-2",
+            "claude-fable-5-2-20261109",
+        ] {
+            let p = super::resolve(&s, m, 0).unwrap_or_else(|| panic!("{m} unpriced"));
+            assert_eq!((p.input, p.output), (9.0, 45.0), "{m}");
+        }
+        let fast = super::resolve(&s, "claude-fable-5-2-xhigh-fast", 0).unwrap();
+        assert_eq!((fast.input, fast.output), (18.0, 90.0));
+        // An exact-variant catalog row still outranks the base for that
+        // variant.
+        s.litellm
+            .insert("claude-fable-5-2-xhigh".into(), super::Price::flat(7.0, 35.0, 0.2, 9.0));
+        let p = super::resolve(&s, "claude-fable-5-2-xhigh", 0).unwrap();
+        assert_eq!((p.input, p.output), (7.0, 35.0));
+    }
+
+    /// `-fast` on the Fable/Mythos 5.2 bases prices at 2× through the
+    /// existing fast arm (Devin keeps the SKU after reordering).
+    #[test]
+    fn fable52_base_fast_spellings_price_two_x() {
+        let s = super::Store::default();
+        for m in ["claude-fable-5-2-fast", "claude-mythos-5-2-fast"] {
+            let p = super::resolve(&s, m, 0).unwrap_or_else(|| panic!("{m} unpriced"));
+            assert_eq!((p.input, p.output), (16.0, 80.0), "{m}");
+        }
     }
 }
