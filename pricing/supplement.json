@@ -544,7 +544,7 @@
       "canonical": "gemini-4-argon"
     },
     {
-      "pattern": "^gemini-3-pro(?=-)(?:-preview)?(?:-(?:none|n|low|medium|high|xhigh))?(?:-preview)?$",
+      "pattern": "^gemini-3-pro-(?:preview(?:-(?:none|n|low|medium|high|xhigh))?(?:-preview)?|(?:none|n|low|medium|high|xhigh)(?:-preview)?)$",
       "canonical": "gemini-3-pro-preview"
     },
     {

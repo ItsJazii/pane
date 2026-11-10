@@ -6392,7 +6392,7 @@ mod tests {
     /// never does. Both resolve to the same resolved card — only the
     /// effective-dated overlay differs.
     #[test]
-    fn argon_intro_card_applies_by_route_and_date() {
+    fn gemini4_intro_card_applies_by_route_and_date() {
         let card = pricing::Price::flat(4.0, 20.0, 0.20, 4.0);
         let u = pricing::Usage {
             input: 1_000_000.0,

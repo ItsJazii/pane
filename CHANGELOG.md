@@ -5,8 +5,8 @@
 ### Added
 - **New models get priced sooner.** OpenRouter's model list is now a
   price source alongside LiteLLM and models.dev, and Pane's own price
-  list (pricing/supplement.json) updates without an app update — promos
-  and price changes ship by PR and reach users within hours.
+  list updates without an app update — new prices and promos reach you
+  within hours.
 
 ### Fixed
 - **Gemini 4 Carbon is priced.** Google's intro $2 / $10 per million
