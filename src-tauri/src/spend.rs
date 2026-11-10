@@ -3449,13 +3449,9 @@ fn devin() -> ProviderSpend {
     build_spend("devin", "Devin", data)
 }
 
-/// Devin CLI events price on Devin's own Argon promo card while it runs —
-/// it must win over cost_for's dated overlay (Google's intro card is a
-/// different rate). Every other model resolves normally.
+/// Devin CLI events price on the resolved card — Devin bills Argon and
+/// Carbon at Google's price, so cost_for's dated overlay covers them.
 fn devin_cost(model: &str, p: &pricing::Price, u: &pricing::Usage, ts: DateTime<Utc>) -> f64 {
-    if let Some(card) = pricing::devin_argon_card(model, ts.timestamp_millis()) {
-        return pricing::request_cost_at(&card, u, 200_000.0);
-    }
     cost_for(model, p, u, 200_000.0, ts)
 }
 
@@ -6721,18 +6717,31 @@ mod tests {
             cache_write_5m: 0.0,
             cache_write_1h: 0.0,
         };
-        // Promo window: $1 in + $5 out = $6; 1M cached input = $0.05.
+        // Devin bills Argon and Carbon at Google's price: intro window
+        // $2 in + $10 out = $12; 1M cached input = $0.10.
         assert_eq!(
             devin_cost("gemini-4-argon", &card, &io, ts("2026-10-14T12:00:00Z")),
-            6.0
+            12.0
         );
         assert_eq!(
             devin_cost("gemini-4-argon", &card, &cr, ts("2026-10-14T12:00:00Z")),
-            0.05
+            0.10
+        );
+        assert_eq!(
+            devin_cost("gemini-4-carbon", &card, &io, ts("2026-10-14T12:00:00Z")),
+            12.0
+        );
+        assert_eq!(
+            devin_cost("gemini-4-carbon", &card, &cr, ts("2026-10-14T12:00:00Z")),
+            0.10
         );
         // After the promo the resolved card applies ($4 + $20).
         assert_eq!(
             devin_cost("gemini-4-argon", &card, &io, ts("2026-12-02T12:00:00Z")),
+            24.0
+        );
+        assert_eq!(
+            devin_cost("gemini-4-carbon", &card, &io, ts("2026-12-02T12:00:00Z")),
             24.0
         );
         // Non-Argon slugs fall through to cost_for untouched.
