@@ -1908,18 +1908,17 @@ fn is_stepfun_model(m: &str) -> bool {
 /// prefix slugs), case-insensitive.
 fn split_aihubmix_routed(all: &mut FileData, aihubmix_configured: bool) -> FileData {
     split_models_by(all, |m| {
-        let lower = m.to_ascii_lowercase();
-        if lower.starts_with("qwen") || lower.starts_with("coding-qwen") {
-            return true;
-        }
-        if !aihubmix_configured {
-            return false;
-        }
         let seg = m
             .rsplit(['/', '\u{1}'])
             .next()
             .unwrap_or(m)
             .to_ascii_lowercase();
+        if m.to_ascii_lowercase().starts_with("qwen") || seg.starts_with("coding-qwen") {
+            return true;
+        }
+        if !aihubmix_configured {
+            return false;
+        }
         seg.starts_with("deepseek") || seg.starts_with("gemini") || pricing::aihubmix_hy4_route(m)
     })
 }
@@ -6653,6 +6652,7 @@ mod tests {
                 "aihubmix/hy4",
                 "qwen3.8-max",
                 "coding-qwen4-max-preview",
+                "aihubmix/coding-qwen4-max-preview",
             ] {
                 all.days.insert((1, m.to_string()), (1.0, 1.0));
                 all.hours.insert((2, m.to_string()), (1.0, 1.0));
@@ -6669,7 +6669,10 @@ mod tests {
         // deepseek and gemini.
         let mut all = build();
         let moved = split_aihubmix_routed(&mut all, false);
-        assert_eq!(names(&moved), "coding-qwen4-max-preview,qwen3.8-max");
+        assert_eq!(
+            names(&moved),
+            "aihubmix/coding-qwen4-max-preview,coding-qwen4-max-preview,qwen3.8-max"
+        );
         assert!(all.days.keys().any(|(_, m)| m == "deepseek-flash"));
         assert!(all.days.keys().any(|(_, m)| m == "hy4"));
         assert!(all.days.keys().any(|(_, m)| m == "tencent/hy4"));
@@ -6681,9 +6684,9 @@ mod tests {
         let moved = split_aihubmix_routed(&mut all, true);
         assert_eq!(
             names(&moved),
-            "aihubmix/hy4,coding-qwen4-max-preview,deepseek-flash,gemini-4-argon,hy4,qwen3.8-max"
+            "aihubmix/coding-qwen4-max-preview,aihubmix/hy4,coding-qwen4-max-preview,deepseek-flash,gemini-4-argon,hy4,qwen3.8-max"
         );
-        assert_eq!(moved.hours.len(), 6);
+        assert_eq!(moved.hours.len(), 7);
         assert_eq!(moved.unpriced["deepseek-flash"], 1);
         assert!(all
             .days
