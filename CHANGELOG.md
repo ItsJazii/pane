@@ -1,21 +1,22 @@
 # Changelog
 
-## Unreleased
+## 0.5.2 — 2026-11-11
 
 ### Added
-- **New models get priced sooner.** OpenRouter's model list is now a
-  price source alongside LiteLLM and models.dev, and Pane's own price
-  list updates without an app update — new prices and promos reach you
-  within hours.
+- **New models get priced sooner (#311).** OpenRouter's model list is
+  now a price source alongside LiteLLM and models.dev, and Pane's own
+  price list updates without an app update — new prices and promos
+  reach you within hours.
 
 ### Fixed
-- **Gemini 4 Carbon is priced.** Google's intro $2 / $10 per million
-  tokens ($0.10 cache read) applies through Nov 30, then the standard
-  $4 / $20 card takes over on Dec 1 — same promo Google runs for Argon.
-- **Devin's Gemini 4 Argon bills at Google's price.** Devin charges
-  Argon and Carbon at Google's rates, so its turns now price at
+- **Gemini 4 Carbon is priced (#311).** Google's intro $2 / $10 per
+  million tokens ($0.10 cache read) applies through Nov 30, then the
+  standard $4 / $20 card takes over on Dec 1 — same promo Google runs
+  for Argon.
+- **Devin's Gemini 4 Argon bills at Google's price (#311).** Devin
+  charges Argon and Carbon at Google's rates, so its turns now price at
   $2 / $10 instead of Devin's old $1 / $5 picker card.
-- **Coding Qwen4 Max Preview through AIHubMix.** Claude Code sessions
+- **Coding Qwen4 Max Preview through AIHubMix (#312).** Claude Code sessions
   using `coding-qwen4-max-preview` were left unpriced on the Claude
   card. They now show on the AIHubMix card at AIHubMix's price
   ($0.353 in / $1.059 out / $0.0441 cache read / $0.4412 cache write
