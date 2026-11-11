@@ -1,9 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.5.3 — 2026-11-11
 
 ### Added
-- **New AIHubMix models price themselves.** When you use a model
+- **New AIHubMix models price themselves (#317).** When you use a model
   through AIHubMix that no price list knows yet, Pane now looks it up
   in AIHubMix's own public price list and prices it at what AIHubMix
   charges, instead of showing tokens with no dollar amount. This covers
@@ -12,17 +12,17 @@
   AIHubMix.
 
 ### Fixed
-- **Qwen4 Max Preview via AIHubMix in Claude Code is priced.** AIHubMix
+- **Qwen4 Max Preview via AIHubMix in Claude Code is priced (#314).** AIHubMix
   answers `coding-qwen4-max-preview` requests as `qwen4-max-preview`,
   which has no price, so the AIHubMix card counted the tokens at $0.
   When the logged model can't be priced, Pane now prices the row by the
   model Claude Code asked for.
 
 ### Security
-- Updated the auto-updater and the Tauri app framework to fix known
-  security advisories in the zip library they include. Pane's updates
-  are a signed installer rather than a zip file, so this was a
-  precaution.
+- **Updater and framework update (#315).** Updated the auto-updater and
+  the Tauri app framework to fix known security advisories in the zip
+  library they include. Pane's updates are a signed installer rather
+  than a zip file, so this was a precaution.
 
 ## 0.5.2 — 2026-11-11
 

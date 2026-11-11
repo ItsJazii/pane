@@ -116,7 +116,7 @@ Pane 是一款轻量的 Tauri v2 应用：Rust 核心负责数据处理，原生
 | Ollama | 本地 `:11434` 服务 → 已安装及已加载的模型，无需 Key |
 | Codebuff | `codebuff login` 凭据文件或 API Key → 积分和每周额度 |
 | Kilo | Kilo CLI 登录文件或 API Key → 积分包和 Kilo Pass |
-| AihubMix | API Key（设置或从 OpenCode 自动发现）→ 用量与花费上限对比 |
+| AihubMix | API Key（设置或从 OpenCode 自动发现）→ 用量与花费上限对比；新模型按 AihubMix 公开价格表计价 |
 | One/New API | 在设置中添加多个兼容站点及每站多个 Key；每个 Key 对应一张额度卡片，密钥仅在本机供文件所有者读取 |
 | Sub2API | 在“设置 → Sub2API”中添加多个站点及每站多个 Key；每个 Key 对应一张卡片，数据来自该站点的 `GET /v1/usage`；密钥仅本机文件所有者可读，只发送到配置的站点源地址 |
 | Qwen Code | Coding Plan Key（设置或环境变量）→ 5 小时、每周、每月请求额度及本地花费 |

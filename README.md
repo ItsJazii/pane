@@ -180,7 +180,7 @@ error text) — see [Privacy](#privacy--security) for the full contract.
 | Ollama | Local server on :11434 — installed + loaded models, no key |
 | Codebuff | `codebuff login` credentials file or API key → credits + weekly limit |
 | Kilo | Kilo CLI login file or API key → credit blocks + Kilo Pass |
-| AihubMix | API key (Settings or auto-detected from OpenCode) → usage vs spending limit |
+| AihubMix | API key (Settings or auto-detected from OpenCode) → usage vs spending limit; new models are priced from AihubMix's own public price list |
 | One/New API | Add multiple compatible sites and keys in Settings; one quota card per key, with owner-only local secret storage |
 | Sub2API | Add multiple Sub2API sites and keys in Settings; one card per key from each site's `GET /v1/usage` — keys stay owner-only local and are sent only to the configured origin |
 | Qwen Code | Coding Plan key (Settings or env) → 5h/weekly/monthly request quotas + local spend |
