@@ -15,6 +15,11 @@
 - **Devin's Gemini 4 Argon bills at Google's price.** Devin charges
   Argon and Carbon at Google's rates, so its turns now price at
   $2 / $10 instead of Devin's old $1 / $5 picker card.
+- **Coding Qwen4 Max Preview through AIHubMix.** Claude Code sessions
+  using `coding-qwen4-max-preview` were left unpriced on the Claude
+  card. They now show on the AIHubMix card at AIHubMix's price
+  ($0.353 in / $1.059 out / $0.0441 cache read / $0.4412 cache write
+  per million tokens).
 
 ## 0.5.1 — 2026-11-10
 

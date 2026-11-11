@@ -332,12 +332,16 @@ pub fn aihubmix_hy4_route(model: &str) -> bool {
 /// bare `deepseek-flash` alias flat with no peak logic, which is wrong.
 /// Tencent's `hy4` — which Claude Code logs bare on that same endpoint —
 /// maps to the `aihubmix/hy4` card (exactly `hy4`; `hy4-preview` is a
-/// different SKU the callers route themselves). Everything else is not
-/// an AIHubMix route.
+/// different SKU the callers route themselves). `coding-qwen4-max-preview`
+/// is AIHubMix's own Token Plan SKU name, so it always maps to its card.
+/// Everything else is not an AIHubMix route.
 pub fn aihubmix_scoped(model: &str) -> Option<String> {
     let seg = model.rsplit(['/', '\u{1}']).next().unwrap_or(model);
     if seg.eq_ignore_ascii_case("deepseek-flash") {
         return Some("aihubmix/deepseek-v4.1-flash".into());
+    }
+    if seg.eq_ignore_ascii_case("coding-qwen4-max-preview") {
+        return Some("aihubmix/coding-qwen4-max-preview".into());
     }
     if aihubmix_hy4_route(model) {
         return Some("aihubmix/hy4".into());
@@ -515,7 +519,7 @@ pub fn generation() -> u64 {
 /// fingerprinted below — an app update that reprices the same files would
 /// otherwise leave history at the old dollars until upstream happens to
 /// rewrite a catalog.
-const CORRECTIONS_REV: u32 = 27; // 19: Antigravity `-trial` ids (gemini-4-argon-trial) price like the base card; 20: Argon post-intro list card enforced over catalogs; 21: Claude Code deepseek-flash / V4.1 Flash priced on AIHubMix's card; 22: `deepseek/` spellings take the baked official card over models.dev's same-prefix reseller ids; 23: AIHubMix MiniMax M3.1 Flash card; 24: Moonshot Kimi K3.1 Pro + Highspeed cards; 25: Claude Fable/Mythos 5.2 card + 2× fast mode; 26: AIHubMix Tencent Hy4 card (Claude Code `hy4` rows); 27: Gemini 4 Carbon dated card, Devin Argon at Google's price, OpenRouter source, Pane-owned feed + dated_pricing
+const CORRECTIONS_REV: u32 = 28; // 19: Antigravity `-trial` ids (gemini-4-argon-trial) price like the base card; 20: Argon post-intro list card enforced over catalogs; 21: Claude Code deepseek-flash / V4.1 Flash priced on AIHubMix's card; 22: `deepseek/` spellings take the baked official card over models.dev's same-prefix reseller ids; 23: AIHubMix MiniMax M3.1 Flash card; 24: Moonshot Kimi K3.1 Pro + Highspeed cards; 25: Claude Fable/Mythos 5.2 card + 2× fast mode; 26: AIHubMix Tencent Hy4 card (Claude Code `hy4` rows); 27: Gemini 4 Carbon dated card, Devin Argon at Google's price, OpenRouter source, Pane-owned feed + dated_pricing; 28: AIHubMix Coding Qwen4 Max Preview card
 
 /// The corrections revision on its own — the spend cache treats a changed
 /// revision as a hard discard (the *code* that prices changed), while a
@@ -1610,6 +1614,12 @@ fn builtin_price(canonical: &str) -> Option<Price> {
         "aihubmix/minimax-m3.1-flash" => {
             return Some(Price::flat(0.165, 0.66, 0.0165, 0.165));
         }
+        // AihubMix Coding Qwen4 Max Preview
+        // (aihubmix.com/model/coding-qwen4-max-preview): $0.353 in /
+        // $1.059 out / $0.0441 cache read / $0.4412 cache write.
+        "aihubmix/coding-qwen4-max-preview" => {
+            return Some(Price::flat(0.353, 1.059, 0.0441, 0.4412));
+        }
         _ => {}
     }
     let bare = canonical.rsplit('/').next().unwrap_or(canonical);
@@ -2262,6 +2272,30 @@ mod tests {
         );
         assert!(super::aihubmix_scoped("qwen3.8-max").is_none());
         assert!(super::aihubmix_scoped("google/qwen3.8-max").is_none());
+    }
+
+    #[test]
+    fn aihubmix_coding_qwen4_max_preview_card_and_slug() {
+        let store = super::Store::default();
+        let p = super::resolve(&store, "aihubmix/coding-qwen4-max-preview", 0).unwrap();
+        assert_eq!(
+            (p.input, p.output, p.cache_read, p.cache_write),
+            (0.353, 1.059, 0.0441, 0.4412)
+        );
+        for model in [
+            "coding-qwen4-max-preview",
+            "Coding-Qwen4-Max-Preview",
+            "aihubmix/coding-qwen4-max-preview",
+        ] {
+            assert_eq!(
+                super::aihubmix_scoped(model).as_deref(),
+                Some("aihubmix/coding-qwen4-max-preview"),
+                "{model}"
+            );
+            assert_eq!(super::aihubmix_gateway_slug(model), "aihubmix/coding-qwen4-max-preview");
+        }
+        // Alibaba's own preview slug stays off the gateway card.
+        assert!(super::aihubmix_scoped("qwen4-max-preview").is_none());
     }
 
     #[test]
