@@ -25,7 +25,8 @@ this repo every 6 hours), then the LiteLLM and models.dev catalogs, then
 vendor-published rates built into Pane, then OpenRouter's public model
 list for models none of the others know yet. One exception: Kimi /
 Moonshot models use Moonshot's published rates built into Pane ahead of
-the public catalogs, which mix in reseller prices. Catalogs refresh daily, and
+the public catalogs, which mix in reseller prices. Rows billed by
+AihubMix have one more fallback — see [AihubMix](#aihubmix). Catalogs refresh daily, and
 hourly while an unpriced model is around. Dated prices (promos, announced
 price changes) are applied by each request's own timestamp. A model no
 source can price keeps its token count and shows as unpriced — never a
@@ -556,6 +557,15 @@ guessed dollar amount.
   the Claude card.
   pi / oh-my-pi session rows carrying `provider: "aihubmix"` fold in
   the same way.
+- **New models:** when a row AihubMix billed uses a model no other
+  source can price, Pane prices it from AihubMix's own public price
+  list (`aihubmix.com/api/v1/models`, fetched without a key, about once
+  a day and only on PCs that use AihubMix). This applies to pi /
+  oh-my-pi, Hermes and DeepSeek Harness rows on the `aihubmix` route,
+  and to Claude Code rows whose model nothing else knows — those are
+  named `aihubmix/<model>` and move to this card when a key is set up.
+  Prices Pane already has are never replaced by this list, and
+  image / video / embedding models are not priced from it.
 
 ## One/New API
 

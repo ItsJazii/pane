@@ -146,6 +146,12 @@ fn route_blob(provider: &str, base_url: &str) -> String {
     format!("{} {}", provider, base_url).to_lowercase()
 }
 
+/// Whether AihubMix billed this row (named provider or a custom URL
+/// pointed at it).
+pub fn is_aihubmix_route(provider: &str, base_url: &str) -> bool {
+    route_blob(provider, base_url).contains("aihubmix")
+}
+
 /// Human name for the backend that billed the row. A `custom` OpenAI-
 /// compatible URL that points at a known gateway still shows that gateway
 /// (Hermes labels AihubMix as `custom` when you paste the URL yourself).
