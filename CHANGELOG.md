@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Qwen4 Max Preview via AIHubMix in Claude Code is priced.** AIHubMix
+  answers `coding-qwen4-max-preview` requests as `qwen4-max-preview`,
+  which has no price, so the AIHubMix card counted the tokens at $0.
+  When the logged model can't be priced, Pane now prices the row by the
+  model Claude Code asked for.
+
 ## 0.5.2 — 2026-11-11
 
 ### Added
