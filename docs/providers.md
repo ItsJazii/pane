@@ -18,6 +18,17 @@ Ground rules that apply to every provider:
   endpoint and written back to the CLI's credential file, keeping the CLI
   signed in — identical to what the CLI does itself.
 
+Where local spend prices come from, for every card below: Pane's own
+price list
+([`pricing/supplement.json`](../pricing/supplement.json), fetched from
+this repo every 6 hours), then the LiteLLM and models.dev catalogs, then
+vendor-published rates built into Pane, then OpenRouter's public model
+list for models none of the others know yet. Catalogs refresh daily, and
+hourly while an unpriced model is around. Dated prices (promos, announced
+price changes) are applied by each request's own timestamp. A model no
+source can price keeps its token count and shows as unpriced — never a
+guessed dollar amount.
+
 ---
 
 ## Claude (Claude Code)
@@ -59,7 +70,10 @@ Ground rules that apply to every provider:
   catalog pricing otherwise. Claude Fable 5.2 / Mythos 5.2 price at
   Anthropic's published card ($8 in / $40 out / $0.20 cache read /
   $10 5-min and $16 1-hour cache writes; fast mode 2×) until the
-  catalogs carry them.
+  catalogs carry them. A gateway can answer under a different model
+  name than the one Claude Code asked for; when the logged name has no
+  price, the row is priced and named by the log line's
+  `requestedModel` instead.
 - **Weekly capacity row:** while the Weekly window runs, Pane sums what
   this card's logs recorded inside it and estimates what 100% of the
   limit is worth — tokens plus API-equivalent dollars (list prices, not
@@ -203,7 +217,9 @@ Ground rules that apply to every provider:
   Devin CLI and Devin Next sessions (cloud Devin sessions bill ACUs and
   keep no local logs, so they can't be priced). Effort tails
   (`claude-fable-5-2-xhigh`) price at the base model's rates; Fable 5.2
-  uses the same built-in Anthropic card as the Claude card.
+  uses the same built-in Anthropic card as the Claude card. Gemini 4
+  Argon and Carbon price at Google's rates: $2 in / $10 out / $0.10
+  cache read through Nov 30, 2026 (Pacific time), then $4 / $20 / $0.20.
 
 ## Droid (Factory)
 
@@ -519,7 +535,12 @@ Ground rules that apply to every provider:
   Code sessions pointed at AihubMix's Anthropic-compatible endpoint
   (qwen-family models in `~\.claude\projects\` logs, matched
   case-insensitively) are re-routed here from the Claude card, the same
-  way MiniMax-routed sessions are. When an AihubMix key is configured,
+  way MiniMax-routed sessions are. That includes AihubMix's
+  `coding-qwen4-max-preview` Token Plan model, priced at AihubMix's
+  published card ($0.353 in / $1.059 out / $0.0441 cache read /
+  $0.4412 cache write); AihubMix logs those replies as
+  `qwen4-max-preview`, so Pane prices them by the requested model.
+  When an AihubMix key is configured,
   DeepSeek, Gemini and Hy4 (`hy4`) rows move the same way (e.g. the
   `deepseek-flash` alias for deepseek-v4.1-flash, and Gemini 4 Argon).
   Claude Code logs don't record which gateway served a request, so this
