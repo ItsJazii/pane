@@ -1897,9 +1897,10 @@ fn is_stepfun_model(m: &str) -> bool {
     m.starts_with("step-") || m.starts_with("stepaudio-")
 }
 
-/// Claude Code rows that AIHubMix billed. Qwen slugs mean the session
-/// ran against AIHubMix's Anthropic-compatible endpoint — always routed
-/// (that endpoint is the only way qwen slugs reach these logs). DeepSeek,
+/// Claude Code rows that AIHubMix billed. Qwen slugs (and AIHubMix's own
+/// `coding-qwen…` Token Plan SKUs) mean the session ran against
+/// AIHubMix's Anthropic-compatible endpoint — always routed (that
+/// endpoint is the only way qwen slugs reach these logs). DeepSeek,
 /// Gemini and Hy4 rows move only when AIHubMix is actually configured:
 /// without a key the AihubMix card doesn't exist, and DeepSeek and
 /// Tencent have their own endpoints, so those rows would be wrongly
@@ -1907,17 +1908,17 @@ fn is_stepfun_model(m: &str) -> bool {
 /// prefix slugs), case-insensitive.
 fn split_aihubmix_routed(all: &mut FileData, aihubmix_configured: bool) -> FileData {
     split_models_by(all, |m| {
-        if m.to_ascii_lowercase().starts_with("qwen") {
-            return true;
-        }
-        if !aihubmix_configured {
-            return false;
-        }
         let seg = m
             .rsplit(['/', '\u{1}'])
             .next()
             .unwrap_or(m)
             .to_ascii_lowercase();
+        if m.to_ascii_lowercase().starts_with("qwen") || seg.starts_with("coding-qwen") {
+            return true;
+        }
+        if !aihubmix_configured {
+            return false;
+        }
         seg.starts_with("deepseek") || seg.starts_with("gemini") || pricing::aihubmix_hy4_route(m)
     })
 }
@@ -6650,6 +6651,8 @@ mod tests {
                 "tencent/hy4",
                 "aihubmix/hy4",
                 "qwen3.8-max",
+                "coding-qwen4-max-preview",
+                "aihubmix/coding-qwen4-max-preview",
             ] {
                 all.days.insert((1, m.to_string()), (1.0, 1.0));
                 all.hours.insert((2, m.to_string()), (1.0, 1.0));
@@ -6666,7 +6669,10 @@ mod tests {
         // deepseek and gemini.
         let mut all = build();
         let moved = split_aihubmix_routed(&mut all, false);
-        assert_eq!(names(&moved), "qwen3.8-max");
+        assert_eq!(
+            names(&moved),
+            "aihubmix/coding-qwen4-max-preview,coding-qwen4-max-preview,qwen3.8-max"
+        );
         assert!(all.days.keys().any(|(_, m)| m == "deepseek-flash"));
         assert!(all.days.keys().any(|(_, m)| m == "hy4"));
         assert!(all.days.keys().any(|(_, m)| m == "tencent/hy4"));
@@ -6678,9 +6684,9 @@ mod tests {
         let moved = split_aihubmix_routed(&mut all, true);
         assert_eq!(
             names(&moved),
-            "aihubmix/hy4,deepseek-flash,gemini-4-argon,hy4,qwen3.8-max"
+            "aihubmix/coding-qwen4-max-preview,aihubmix/hy4,coding-qwen4-max-preview,deepseek-flash,gemini-4-argon,hy4,qwen3.8-max"
         );
-        assert_eq!(moved.hours.len(), 5);
+        assert_eq!(moved.hours.len(), 7);
         assert_eq!(moved.unpriced["deepseek-flash"], 1);
         assert!(all
             .days
