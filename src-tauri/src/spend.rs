@@ -1832,18 +1832,32 @@ fn claude_line(st: &mut ClaudeFileState, line: &str, data: &mut FileData) {
             }
         }
         None if synthetic => {}
-        None => match claude_cost(&model, &t, ts) {
-            Some(c) => {
-                if t.total() > 0.0 || c > 0.0 {
-                    add_event(data, ts, &model, c, t.total());
+        None => {
+            // Gateways can answer under a different name than the one
+            // requested: AIHubMix serves `coding-qwen4-max-preview` and
+            // logs `qwen4-max-preview`, which has no card. When the logged
+            // name can't be priced, the requested SKU (what was billed)
+            // prices the row and names it.
+            let requested = v
+                .get("requestedModel")
+                .and_then(Value::as_str)
+                .filter(|r| !r.is_empty() && *r != model);
+            let priced = claude_cost(&model, &t, ts)
+                .map(|c| (model.as_str(), c))
+                .or_else(|| requested.and_then(|r| claude_cost(r, &t, ts).map(|c| (r, c))));
+            match priced {
+                Some((name, c)) => {
+                    if t.total() > 0.0 || c > 0.0 {
+                        add_event(data, ts, name, c, t.total());
+                    }
+                }
+                None => {
+                    if t.total() > 0.0 {
+                        note_unpriced(data, ts, &model, t.total());
+                    }
                 }
             }
-            None => {
-                if t.total() > 0.0 {
-                    note_unpriced(data, ts, &model, t.total());
-                }
-            }
-        },
+        }
     }
 
     // Fable-era logs nest advisor work in `usage.iterations`. Only
@@ -6492,6 +6506,41 @@ mod tests {
         let mix = take_tagged(&mut data, "aihubmix");
         assert_eq!(mix.days.values().map(|v| v.0).sum::<f64>(), 4.0);
         assert!(mix.days.keys().all(|(_, m)| m == "gemini-4-argon"));
+    }
+
+    #[test]
+    fn claude_unpriced_logged_model_falls_back_to_requested_model() {
+        // AIHubMix answers coding-qwen4-max-preview as qwen4-max-preview.
+        let line = json!({"type": "assistant", "timestamp": "2026-11-11T12:00:00Z",
+            "requestId": "req_q1", "requestedModel": "coding-qwen4-max-preview",
+            "message": {"id": "msg_q1", "model": "qwen4-max-preview",
+                "usage": {"input_tokens": 1000000.0, "output_tokens": 1000000.0,
+                    "cache_read_input_tokens": 1000000.0}}})
+        .to_string();
+        let data = claude_run(std::slice::from_ref(&line));
+        let cost: f64 = data.days.values().map(|v| v.0).sum();
+        assert!((cost - 1.4561).abs() < 1e-9, "{cost}");
+        assert!(data.days.keys().all(|(_, m)| m == "coding-qwen4-max-preview"));
+        assert!(data.unpriced.is_empty());
+
+        // A priced logged model keeps its own name and card.
+        let line = json!({"type": "assistant", "timestamp": "2026-11-11T12:00:00Z",
+            "requestId": "req_o1", "requestedModel": "opus",
+            "message": {"id": "msg_o1", "model": "claude-opus-5-5",
+                "usage": {"input_tokens": 1000.0, "output_tokens": 0.0}}})
+        .to_string();
+        let data = claude_run(std::slice::from_ref(&line));
+        assert!(data.days.keys().all(|(_, m)| m == "claude-opus-5-5"));
+        assert!(data.days.values().map(|v| v.0).sum::<f64>() > 0.0);
+
+        // Neither name priced: unpriced under the logged model.
+        let line = json!({"type": "assistant", "timestamp": "2026-11-11T12:00:00Z",
+            "requestId": "req_x1", "requestedModel": "mystery-request",
+            "message": {"id": "msg_x1", "model": "mystery-reply",
+                "usage": {"input_tokens": 1000.0, "output_tokens": 0.0}}})
+        .to_string();
+        let data = claude_run(std::slice::from_ref(&line));
+        assert_eq!(data.unpriced.get("mystery-reply"), Some(&1));
     }
 
     /// Claude Code's Messages API can't serve Gemini, so a Gemini slug in
