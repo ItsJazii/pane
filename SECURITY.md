@@ -96,7 +96,8 @@ All of this is auditable in the source — links go to the exact code.
   ultimately trusts GitHub. Anyone who'd rather not pipe a script into
   PowerShell at all can use winget or download-and-read first — the
   README shows both.
-- Model prices (LiteLLM, models.dev, OpenRouter, Pane’s pricing feed) are
+- Model prices (LiteLLM, models.dev, OpenRouter, Pane’s pricing feed,
+  and AihubMix’s public price list for AihubMix users) are
   fetched without signatures — tampered pricing data could at worst show
   wrong *display* dollars. Inputs are size-capped and never touch
   credentials or spend logs.

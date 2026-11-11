@@ -451,7 +451,7 @@ fn fast_multiplier_in(s: &Store, model: &str) -> f64 {
     1.0
 }
 
-const SOURCES: [(&str, &str); 4] = [
+const SOURCES: [(&str, &str); 5] = [
     (
         "litellm",
         "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
@@ -462,6 +462,7 @@ const SOURCES: [(&str, &str); 4] = [
         "https://raw.githubusercontent.com/ItsJazii/pane/main/pricing/supplement.json",
     ),
     ("openrouter", "https://openrouter.ai/api/v1/models"),
+    ("aihubmix", "https://aihubmix.com/api/v1/models"),
 ];
 const REFRESH_MS: i64 = 24 * 3600 * 1000;
 /// Pane's own pricing feed moves faster than app releases — promos and
@@ -499,6 +500,11 @@ struct Store {
     openrouter: HashMap<String, Price>,
     openrouter_seg: HashMap<String, Price>,
     openrouter_dashseg: HashMap<String, Price>,
+    /// AIHubMix's own published model cards, keyed by lowercase model id
+    /// and by its last path segment (`inclusionai/ling-1t` → `ling-1t`).
+    /// Only `aihubmix/…` slugs consult it — the last resort for a row the
+    /// gateway billed that nothing else can price.
+    aihubmix: HashMap<String, Price>,
     fast_multipliers: HashMap<String, f64>,
     alias_rules: Vec<(regex::Regex, String)>,
     /// Time-windowed cards from Pane's pricing feed (promos / price
@@ -535,6 +541,41 @@ pub fn note_unpriced() {
     UNPRICED_HINT.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Set when a spend scan needed AIHubMix's own catalog (a row the gateway
+/// billed that nothing else prices). The catalog is only downloaded for
+/// installs that use AIHubMix: a key is configured, or this flag is set.
+static AIHUBMIX_WANTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// The `aihubmix/<id>` slug that prices `model` on AIHubMix's own
+/// published card — the last resort for a row AIHubMix billed when no
+/// other source knows the model. Marks the catalog as wanted so the next
+/// refresh downloads it. The whole logged id is kept (`vendor/model` →
+/// `aihubmix/vendor/model`): resolve() tries the catalog's exact id
+/// first and only then its last segment, so two vendors sharing a model
+/// name each get their own card. An already-prefixed slug keeps its id.
+pub fn aihubmix_catalog_slug(model: &str) -> String {
+    AIHUBMIX_WANTED.store(true, std::sync::atomic::Ordering::Relaxed);
+    let lower = model.to_lowercase();
+    let id = lower
+        .strip_prefix("aihubmix/")
+        .or_else(|| lower.strip_prefix("aihubmix\u{1}"))
+        .unwrap_or(lower.as_str());
+    format!("aihubmix/{id}")
+}
+
+/// Test hook: list `id` in the shared AIHubMix catalog. Callers use ids
+/// no real catalog carries, so parallel tests can't see each other.
+#[cfg(test)]
+pub fn seed_aihubmix_for_test(id: &str, price: Price) {
+    let mut s = store().lock().unwrap();
+    if !s.loaded_from_disk {
+        load_from_disk(&mut s);
+    }
+    s.aihubmix.insert(id.to_lowercase(), price);
+    s.memo.clear();
+}
+
 pub fn generation() -> u64 {
     GENERATION.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -545,7 +586,7 @@ pub fn generation() -> u64 {
 /// fingerprinted below — an app update that reprices the same files would
 /// otherwise leave history at the old dollars until upstream happens to
 /// rewrite a catalog.
-const CORRECTIONS_REV: u32 = 29; // 19: Antigravity `-trial` ids (gemini-4-argon-trial) price like the base card; 20: Argon post-intro list card enforced over catalogs; 21: Claude Code deepseek-flash / V4.1 Flash priced on AIHubMix's card; 22: `deepseek/` spellings take the baked official card over models.dev's same-prefix reseller ids; 23: AIHubMix MiniMax M3.1 Flash card; 24: Moonshot Kimi K3.1 Pro + Highspeed cards; 25: Claude Fable/Mythos 5.2 card + 2× fast mode; 26: AIHubMix Tencent Hy4 card (Claude Code `hy4` rows); 27: Gemini 4 Carbon dated card, Devin Argon at Google's price, OpenRouter source, Pane-owned feed + dated_pricing; 28: AIHubMix Coding Qwen4 Max Preview card; 29: Claude rows with an unpriceable logged model fall back to requestedModel
+const CORRECTIONS_REV: u32 = 30; // 19: Antigravity `-trial` ids (gemini-4-argon-trial) price like the base card; 20: Argon post-intro list card enforced over catalogs; 21: Claude Code deepseek-flash / V4.1 Flash priced on AIHubMix's card; 22: `deepseek/` spellings take the baked official card over models.dev's same-prefix reseller ids; 23: AIHubMix MiniMax M3.1 Flash card; 24: Moonshot Kimi K3.1 Pro + Highspeed cards; 25: Claude Fable/Mythos 5.2 card + 2× fast mode; 26: AIHubMix Tencent Hy4 card (Claude Code `hy4` rows); 27: Gemini 4 Carbon dated card, Devin Argon at Google's price, OpenRouter source, Pane-owned feed + dated_pricing; 28: AIHubMix Coding Qwen4 Max Preview card; 29: Claude rows with an unpriceable logged model fall back to requestedModel; 30: AIHubMix's own catalog prices gateway-billed rows nothing else knows
 
 /// The corrections revision on its own — the spend cache treats a changed
 /// revision as a hard discard (the *code* that prices changed), while a
@@ -733,6 +774,83 @@ fn compact_openrouter(doc: &Value) -> String {
     rows.sort_by(|a, b| {
         a["id"].as_str().unwrap_or("").cmp(b["id"].as_str().unwrap_or(""))
     });
+    serde_json::to_string(&json!({"data": rows})).unwrap_or_default()
+}
+
+/// The text-model cards in AIHubMix's public catalog
+/// (aihubmix.com/api/v1/models), sorted by id: (model id, price). Rates
+/// are already USD per million tokens; an unpublished cache rate bills
+/// at input, like the baked AIHubMix arms. Skipped: non-text SKUs (image,
+/// video, embedding… — their `input`/`output` are other units), the
+/// `auto` router, and anything missing or outside the plausible range.
+/// The compact disk form carries no `types`, so an absent field passes.
+fn aihubmix_rows(doc: &Value) -> Vec<(String, Price)> {
+    let num = |v: Option<&Value>| -> Option<f64> {
+        v.and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok())))
+    };
+    let plausible = |v: f64| v.is_finite() && (0.0..=MAX_SUPPLEMENT_PRICE).contains(&v);
+    let mut rows: Vec<(String, Price)> = Vec::new();
+    for e in doc.get("data").and_then(Value::as_array).into_iter().flatten() {
+        let Some(id) = e.get("model_id").and_then(Value::as_str) else { continue };
+        if id.is_empty() || id.len() > 128 || id.eq_ignore_ascii_case("auto") {
+            continue;
+        }
+        if let Some(types) = e.get("types").and_then(Value::as_str) {
+            if !types.split(',').any(|t| t.trim() == "llm") {
+                continue;
+            }
+        }
+        let Some(pricing) = e.get("pricing") else { continue };
+        let (Some(input), Some(output)) =
+            (num(pricing.get("input")), num(pricing.get("output")))
+        else {
+            continue;
+        };
+        let cache_read = num(pricing.get("cache_read")).unwrap_or(input);
+        let cache_write = num(pricing.get("cache_write")).unwrap_or(input);
+        if ![input, output, cache_read, cache_write].into_iter().all(plausible) {
+            continue;
+        }
+        rows.push((id.to_string(), Price::flat(input, output, cache_read, cache_write)));
+    }
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows
+}
+
+/// AIHubMix's catalog as a lookup map: every lowercase model id, plus its
+/// last path segment where no full id already claims that key. Rows
+/// arrive sorted, so the smallest id wins any collision deterministically.
+fn parse_aihubmix(doc: &Value) -> HashMap<String, Price> {
+    let rows = aihubmix_rows(doc);
+    let mut out: HashMap<String, Price> = HashMap::new();
+    for (id, price) in &rows {
+        out.entry(id.to_lowercase()).or_insert(*price);
+    }
+    for (id, price) in &rows {
+        let lower = id.to_lowercase();
+        if let Some((_, seg)) = lower.rsplit_once('/') {
+            out.entry(seg.to_string()).or_insert(*price);
+        }
+    }
+    out
+}
+
+/// The price-only projection of AIHubMix's catalog — what parse_aihubmix
+/// consumes, sorted and serialized deterministically (~900 KB of
+/// descriptions and capability flags shrink to the cards). A refresh
+/// with no price move writes identical bytes, like compact_openrouter.
+fn compact_aihubmix(doc: &Value) -> String {
+    let rows: Vec<Value> = aihubmix_rows(doc)
+        .into_iter()
+        .map(|(id, p)| {
+            json!({"model_id": id, "pricing": {
+                "input": p.input,
+                "output": p.output,
+                "cache_read": p.cache_read,
+                "cache_write": p.cache_write,
+            }})
+        })
+        .collect();
     serde_json::to_string(&json!({"data": rows})).unwrap_or_default()
 }
 
@@ -1010,6 +1128,7 @@ fn ingest(store: &mut Store, source: &str, doc: &Value) {
     match source {
         "litellm" => store.litellm = parse_litellm(doc),
         "modelsdev" => store.modelsdev = parse_modelsdev(doc),
+        "aihubmix" => store.aihubmix = parse_aihubmix(doc),
         "openrouter" => {
             let (e, seg, dashseg) = parse_openrouter(doc);
             store.openrouter = e;
@@ -1077,7 +1196,14 @@ pub fn ensure_fresh() {
     let mut state = load_state();
     let now = now_ms();
     let unpriced = UNPRICED_HINT.load(std::sync::atomic::Ordering::Relaxed);
+    // AIHubMix's catalog only matters to installs that route through the
+    // gateway — everyone else never contacts aihubmix.com.
+    let aihubmix_wanted = AIHUBMIX_WANTED.load(std::sync::atomic::Ordering::Relaxed)
+        || providers::aihubmix::configured();
     for (source, url) in SOURCES {
+        if source == "aihubmix" && !aihubmix_wanted {
+            continue;
+        }
         let entry = state.get(source).cloned().unwrap_or_else(|| json!({}));
         let fetched_at = entry.get("fetchedAt").and_then(Value::as_i64).unwrap_or(0);
         let failed_at = entry.get("failedAt").and_then(Value::as_i64).unwrap_or(0);
@@ -1133,12 +1259,17 @@ pub fn ensure_fresh() {
             Ok((_, body, new_etag)) => match serde_json::from_str::<Value>(&body) {
                 Ok(doc) => {
                     // OpenRouter serves no ETag and churns daily in
-                    // fields pane never reads — store the normalized
-                    // projection and treat identical prices like a 304:
-                    // no write, no ingest, no spend-cache stamp churn.
-                    let body = if source == "openrouter" {
-                        let compacted = compact_openrouter(&doc);
-                        let path = dir().join("openrouter.json");
+                    // fields pane never reads (AIHubMix's catalog churns
+                    // the same way) — store the normalized projection
+                    // and treat identical prices like a 304: no write,
+                    // no ingest, no spend-cache stamp churn.
+                    let compacted = match source {
+                        "openrouter" => Some(compact_openrouter(&doc)),
+                        "aihubmix" => Some(compact_aihubmix(&doc)),
+                        _ => None,
+                    };
+                    let body = if let Some(compacted) = compacted {
+                        let path = dir().join(format!("{source}.json"));
                         if std::fs::read_to_string(&path).ok().as_deref()
                             == Some(compacted.as_str())
                         {
@@ -1367,24 +1498,35 @@ fn resolve(s: &Store, model: &str, depth: u8) -> Option<Price> {
     // LiteLLM or models.dev learn the model. Match exact ids, then the
     // last path segment, then a dot-normalized segment — each index
     // already holds the lexicographically smallest listing per tail.
+    //
+    // A row AIHubMix billed (`aihubmix/<id>`) that nothing above knows
+    // also has the gateway's own published card. It is the last
+    // real-rate source — below the baked AIHubMix arms (which carry what
+    // the flat catalog can't) and below OpenRouter — so a price that
+    // already resolved never moves. One exception: a vendor-qualified id
+    // (`aihubmix/beta/novel`) that the gateway lists exactly outranks
+    // OpenRouter's vendor-agnostic segment matches, which could
+    // otherwise hand it another vendor's `novel`.
     let or_key = canonical.to_lowercase();
+    let or_seg = or_key.rsplit('/').next().unwrap_or(or_key.as_str());
+    let aihubmix_id = or_key.strip_prefix("aihubmix/");
+    let aihubmix_card = |id: &str| {
+        s.aihubmix
+            .get(id)
+            .or_else(|| s.aihubmix.get(id.rsplit('/').next().unwrap_or(id)))
+    };
     if let Some(p) = s
         .openrouter
         .get(&or_key)
         .or_else(|| {
-            s.openrouter_seg
-                .get(or_key.rsplit('/').next().unwrap_or(or_key.as_str()))
+            aihubmix_id
+                .filter(|id| id.contains('/'))
+                .and_then(|id| s.aihubmix.get(id))
+                .filter(real)
         })
-        .or_else(|| {
-            s.openrouter_dashseg.get(
-                or_key
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(or_key.as_str())
-                    .replace('.', "-")
-                    .as_str(),
-            )
-        })
+        .or_else(|| s.openrouter_seg.get(or_seg))
+        .or_else(|| s.openrouter_dashseg.get(or_seg.replace('.', "-").as_str()))
+        .or_else(|| aihubmix_id.and_then(aihubmix_card).filter(real))
     {
         return Some(*p);
     }
@@ -1426,6 +1568,9 @@ fn resolve(s: &Store, model: &str, depth: u8) -> Option<Price> {
         return Some(p);
     }
     if let Some(p) = s.modelsdev.get(&canonical) {
+        return Some(*p);
+    }
+    if let Some(p) = aihubmix_id.and_then(aihubmix_card) {
         return Some(*p);
     }
     // Slug tails no catalog carries under their own name, billed at the
@@ -3225,6 +3370,130 @@ mod tests {
         let mut moved = doc.clone();
         moved["data"][0]["pricing"]["prompt"] = serde_json::json!("0.000003");
         assert_ne!(super::compact_openrouter(&doc), super::compact_openrouter(&moved));
+    }
+
+    // ---------- AIHubMix catalog ----------
+
+    fn aihubmix_doc() -> serde_json::Value {
+        serde_json::json!({"success": true, "data": [
+            {"model_id": "new-llm-x", "types": "llm", "desc": "long text",
+                "pricing": {"input": 0.353, "output": 1.059, "cache_read": 0.0441, "cache_write": 0.4412}},
+            {"model_id": "Vendor/Mixed-Case-1T", "types": "llm,search",
+                "pricing": {"input": 2, "output": 10}},
+            {"model_id": "free-llm", "types": "llm", "pricing": {"input": 0, "output": 0}},
+            {"model_id": "auto", "types": "llm", "pricing": {"input": 2, "output": 2}},
+            {"model_id": "an-image-model", "types": "image_generation",
+                "pricing": {"input": 5, "output": 30}},
+            {"model_id": "no-output", "types": "llm", "pricing": {"input": 1}},
+            {"model_id": "implausible", "types": "llm", "pricing": {"input": 99999, "output": 1}},
+            {"model_id": "negative", "types": "llm", "pricing": {"input": -1, "output": 1}},
+        ]})
+    }
+
+    #[test]
+    fn parse_aihubmix_keeps_text_cards_only() {
+        let map = super::parse_aihubmix(&aihubmix_doc());
+        let p = &map["new-llm-x"];
+        assert_eq!(
+            (p.input, p.output, p.cache_read, p.cache_write),
+            (0.353, 1.059, 0.0441, 0.4412)
+        );
+        // Unpublished cache rates bill at input; ids key lowercase, and
+        // by last segment too.
+        let m = &map["vendor/mixed-case-1t"];
+        assert_eq!((m.input, m.output, m.cache_read, m.cache_write), (2.0, 10.0, 2.0, 2.0));
+        assert_eq!(map["mixed-case-1t"].input, 2.0);
+        assert!(map.contains_key("free-llm"));
+        for skipped in ["auto", "an-image-model", "no-output", "implausible", "negative"] {
+            assert!(!map.contains_key(skipped), "{skipped}");
+        }
+    }
+
+    #[test]
+    fn compact_aihubmix_round_trips_and_stabilizes() {
+        let doc = aihubmix_doc();
+        let compacted: serde_json::Value =
+            serde_json::from_str(&super::compact_aihubmix(&doc)).unwrap();
+        assert_eq!(super::parse_aihubmix(&compacted), super::parse_aihubmix(&doc));
+        let rows = compacted["data"].as_array().unwrap();
+        let ids: Vec<&str> = rows.iter().map(|r| r["model_id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["Vendor/Mixed-Case-1T", "free-llm", "new-llm-x"]);
+        assert!(rows[0].get("desc").is_none() && rows[0].get("types").is_none());
+        // Non-price churn compacts to identical bytes; a price move doesn't.
+        let mut churned = doc.clone();
+        churned["data"][0]["desc"] = serde_json::json!("rewritten");
+        assert_eq!(super::compact_aihubmix(&doc), super::compact_aihubmix(&churned));
+        let mut moved = doc.clone();
+        moved["data"][0]["pricing"]["input"] = serde_json::json!(0.4);
+        assert_ne!(super::compact_aihubmix(&doc), super::compact_aihubmix(&moved));
+    }
+
+    #[test]
+    fn aihubmix_catalog_prices_only_gateway_slugs_as_a_last_resort() {
+        let mut s = super::Store::default();
+        super::ingest(&mut s, "aihubmix", &aihubmix_doc());
+        // Only `aihubmix/…` slugs see the catalog — a bare name stays
+        // unpriced, so another route never takes the gateway's rate.
+        assert!(super::resolve(&s, "new-llm-x", 0).is_none());
+        let p = super::resolve(&s, "aihubmix/new-llm-x", 0).unwrap();
+        assert_eq!((p.input, p.output), (0.353, 1.059));
+        assert_eq!(super::resolve(&s, "AIHubMix/New-LLM-X", 0).unwrap().input, 0.353);
+        // Full id and last-segment spellings, and effort tails peel.
+        assert_eq!(super::resolve(&s, "aihubmix/vendor/mixed-case-1t", 0).unwrap().input, 2.0);
+        assert_eq!(super::resolve(&s, "aihubmix/mixed-case-1t", 0).unwrap().input, 2.0);
+        assert_eq!(super::resolve(&s, "aihubmix/new-llm-x-high", 0).unwrap().input, 0.353);
+        // A model free on the gateway prices at $0 rather than unpriced.
+        let free = super::resolve(&s, "aihubmix/free-llm", 0).unwrap();
+        assert_eq!((free.input, free.output), (0.0, 0.0));
+        assert!(super::resolve(&s, "aihubmix/an-image-model", 0).is_none());
+        // Baked AIHubMix arms and the public catalogs still win.
+        let mut s = super::Store::default();
+        super::ingest(&mut s, "aihubmix", &serde_json::json!({"data": [
+            {"model_id": "hy4", "types": "llm", "pricing": {"input": 9, "output": 9}},
+            {"model_id": "new-llm-x", "types": "llm", "pricing": {"input": 9, "output": 9}},
+        ]}));
+        assert_eq!(super::resolve(&s, "aihubmix/hy4", 0).unwrap().input, 0.8823);
+        s.litellm.insert("aihubmix/new-llm-x".into(), super::Price::flat(1.0, 2.0, 0.1, 1.0));
+        assert_eq!(super::resolve(&s, "aihubmix/new-llm-x", 0).unwrap().input, 1.0);
+    }
+
+    #[test]
+    fn aihubmix_catalog_slug_spellings() {
+        assert_eq!(super::aihubmix_catalog_slug("New-LLM-X"), "aihubmix/new-llm-x");
+        // The vendor stays, so the catalog's exact id is tried first.
+        assert_eq!(super::aihubmix_catalog_slug("vendor/New-LLM-X"), "aihubmix/vendor/new-llm-x");
+        assert_eq!(super::aihubmix_catalog_slug("AIHubMix/vendor/x"), "aihubmix/vendor/x");
+    }
+
+    #[test]
+    fn aihubmix_catalog_exact_id_beats_a_shared_segment_and_openrouter_wins() {
+        // Two vendors share a model name: each id gets its own card, and
+        // only an unlisted vendor falls back to the segment alias.
+        let mut s = super::Store::default();
+        super::ingest(&mut s, "aihubmix", &serde_json::json!({"data": [
+            {"model_id": "alpha/novel", "types": "llm", "pricing": {"input": 1, "output": 1}},
+            {"model_id": "beta/novel", "types": "llm", "pricing": {"input": 3, "output": 3}},
+        ]}));
+        let price = |m: &str| super::resolve(&s, &super::aihubmix_catalog_slug(m), 0).unwrap().input;
+        assert_eq!(price("alpha/novel"), 1.0);
+        assert_eq!(price("beta/novel"), 3.0);
+        assert_eq!(price("gamma/novel"), 1.0);
+        assert_eq!(price("novel"), 1.0);
+        // A slug OpenRouter already priced keeps that price…
+        super::ingest(&mut s, "openrouter", &serde_json::json!({"data": [
+            {"id": "vendor/novel", "pricing": {"prompt": "0.000007", "completion": "0.00003"}},
+        ]}));
+        assert_eq!(super::resolve(&s, "aihubmix/novel", 0).unwrap().input, 7.0);
+        assert_eq!(super::resolve(&s, "aihubmix/gamma/novel", 0).unwrap().input, 7.0);
+        // …but OpenRouter's vendor-agnostic `novel` must not shadow a
+        // vendor-qualified id the gateway lists exactly.
+        assert_eq!(super::resolve(&s, "aihubmix/alpha/novel", 0).unwrap().input, 1.0);
+        assert_eq!(super::resolve(&s, "aihubmix/beta/novel", 0).unwrap().input, 3.0);
+        // An exact OpenRouter id still comes first.
+        super::ingest(&mut s, "openrouter", &serde_json::json!({"data": [
+            {"id": "aihubmix/beta/novel", "pricing": {"prompt": "0.000005", "completion": "0.00002"}},
+        ]}));
+        assert_eq!(super::resolve(&s, "aihubmix/beta/novel", 0).unwrap().input, 5.0);
     }
 
     #[test]

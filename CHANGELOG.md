@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added
+- **New AIHubMix models price themselves.** When you use a model
+  through AIHubMix that no price list knows yet, Pane now looks it up
+  in AIHubMix's own public price list and prices it at what AIHubMix
+  charges, instead of showing tokens with no dollar amount. This covers
+  Claude Code, pi / oh-my-pi, Hermes and DeepSeek Harness sessions
+  routed through AIHubMix. The list is only downloaded if you use
+  AIHubMix.
+
 ### Fixed
 - **Qwen4 Max Preview via AIHubMix in Claude Code is priced.** AIHubMix
   answers `coding-qwen4-max-preview` requests as `qwen4-max-preview`,

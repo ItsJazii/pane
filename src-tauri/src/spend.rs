@@ -284,6 +284,15 @@ fn probe_lookup(model: &str) -> Option<pricing::Price> {
     price
 }
 
+/// Last resort for a row AIHubMix billed: the gateway's own published
+/// card for the model, when nothing else can price it. Returns the
+/// `aihubmix/<id>` slug it priced under. Recorded like any lookup, so the
+/// row re-prices once the catalog arrives or another source learns it.
+fn probe_aihubmix_catalog(model: &str) -> Option<(String, pricing::Price)> {
+    let slug = pricing::aihubmix_catalog_slug(model);
+    probe_lookup(&slug).map(|p| (slug, p))
+}
+
 /// `pricing::fast_multiplier`, recorded — see `probe_lookup`.
 fn probe_fast_multiplier(model: &str) -> f64 {
     let mult = pricing::fast_multiplier(model);
@@ -1756,6 +1765,17 @@ fn claude_cost(model: &str, t: &ClaudeTokens, ts: DateTime<Utc>) -> Option<f64> 
     let price = probe_lookup(&price_key).or_else(|| {
         claude_price(model).map(|(i, o, cr, cw)| pricing::Price::flat(i, o, cr, cw))
     })?;
+    Some(claude_priced(model, &price_key, &price, t, ts))
+}
+
+/// Dollars for one Claude entry on an already-resolved card.
+fn claude_priced(
+    model: &str,
+    price_key: &str,
+    price: &pricing::Price,
+    t: &ClaudeTokens,
+    ts: DateTime<Utc>,
+) -> f64 {
     let u = pricing::Usage {
         input: t.input,
         output: t.output,
@@ -1764,7 +1784,24 @@ fn claude_cost(model: &str, t: &ClaudeTokens, ts: DateTime<Utc>) -> Option<f64> 
         cache_write_1h: t.w1h,
     };
     let mult = if t.fast { probe_fast_multiplier(model) } else { 1.0 };
-    Some(cost_for(&price_key, &price, &u, 200_000.0, ts) * mult)
+    cost_for(price_key, price, &u, 200_000.0, ts) * mult
+}
+
+/// A Claude Code row no source can price, whose model AIHubMix lists:
+/// the gateway's own card, named `aihubmix/<id>` so the breakdown shows
+/// where the price came from and split_aihubmix_routed can move it to
+/// the AihubMix card once a key exists. Claude Code logs don't record
+/// the endpoint, so this only covers ids Anthropic's own API can't
+/// serve: anything naming Claude may be a native session and stays
+/// unpriced until an authoritative price arrives.
+fn claude_aihubmix_cost(model: &str, t: &ClaudeTokens, ts: DateTime<Utc>) -> Option<(String, f64)> {
+    let lower = model.to_ascii_lowercase();
+    if lower.contains("claude") || lower.contains("anthropic") {
+        return None;
+    }
+    let (slug, price) = probe_aihubmix_catalog(model)?;
+    let cost = claude_priced(model, &slug, &price, t, ts);
+    Some((slug, cost))
 }
 
 /// Per-file dedup state for the Claude scanner. Persisted so a tail
@@ -1842,13 +1879,19 @@ fn claude_line(st: &mut ClaudeFileState, line: &str, data: &mut FileData) {
                 .get("requestedModel")
                 .and_then(Value::as_str)
                 .filter(|r| !r.is_empty() && *r != model);
+            // Still nothing: if AIHubMix lists the model, its own card
+            // prices the row (logged name first, then the requested one).
             let priced = claude_cost(&model, &t, ts)
-                .map(|c| (model.as_str(), c))
-                .or_else(|| requested.and_then(|r| claude_cost(r, &t, ts).map(|c| (r, c))));
+                .map(|c| (model.clone(), c))
+                .or_else(|| {
+                    requested.and_then(|r| claude_cost(r, &t, ts).map(|c| (r.to_string(), c)))
+                })
+                .or_else(|| claude_aihubmix_cost(&model, &t, ts))
+                .or_else(|| requested.and_then(|r| claude_aihubmix_cost(r, &t, ts)));
             match priced {
                 Some((name, c)) => {
                     if t.total() > 0.0 || c > 0.0 {
-                        add_event(data, ts, name, c, t.total());
+                        add_event(data, ts, &name, c, t.total());
                     }
                 }
                 None => {
@@ -1927,13 +1970,23 @@ fn split_aihubmix_routed(all: &mut FileData, aihubmix_configured: bool) -> FileD
             .next()
             .unwrap_or(m)
             .to_ascii_lowercase();
-        if m.to_ascii_lowercase().starts_with("qwen") || seg.starts_with("coding-qwen") {
+        let lower = m.to_ascii_lowercase();
+        // `aihubmix/<id>`: logged that way, or priced on AIHubMix's own
+        // catalog because nothing else knew the model.
+        let gateway_named = lower.starts_with("aihubmix/") || lower.starts_with("aihubmix\u{1}");
+        if lower.starts_with("qwen")
+            || seg.starts_with("coding-qwen")
+            || (gateway_named && seg.starts_with("qwen"))
+        {
             return true;
         }
         if !aihubmix_configured {
             return false;
         }
-        seg.starts_with("deepseek") || seg.starts_with("gemini") || pricing::aihubmix_hy4_route(m)
+        gateway_named
+            || seg.starts_with("deepseek")
+            || seg.starts_with("gemini")
+            || pricing::aihubmix_hy4_route(m)
     })
 }
 
@@ -2195,8 +2248,17 @@ fn hermes() -> Vec<(&'static str, &'static str, FileData)> {
             &ev.billing_provider,
             &ev.billing_base_url,
         );
-        match pricing::lookup(&slug) {
-            Some(p) => {
+        // An AIHubMix-routed row no source knows prices on the gateway's
+        // own card.
+        let priced = pricing::lookup(&slug).map(|p| (slug.clone(), p)).or_else(|| {
+            if !providers::hermes::is_aihubmix_route(&ev.billing_provider, &ev.billing_base_url) {
+                return None;
+            }
+            let slug = pricing::aihubmix_catalog_slug(&ev.model);
+            pricing::lookup(&slug).map(|p| (slug, p))
+        });
+        match priced {
+            Some((slug, p)) => {
                 let u = pricing::Usage {
                     input: ev.input,
                     output: ev.output + ev.reasoning,
@@ -3208,8 +3270,13 @@ fn pi_line(seen: &mut HashSet<String>, line: &str, data: &mut FileData) {
     let scoped_slug = (card == "aihubmix").then(|| pricing::aihubmix_gateway_slug(model));
     let lookup_slug = scoped_slug.as_deref().unwrap_or(model);
     let cost_model = scoped_slug.as_deref().unwrap_or(&tagged);
-    match probe_lookup(lookup_slug) {
-        Some(p) => {
+    // An AIHubMix row no source knows prices on the gateway's own card.
+    let priced = probe_lookup(lookup_slug)
+        .map(|p| (cost_model.to_string(), p))
+        .or_else(|| (card == "aihubmix").then(|| probe_aihubmix_catalog(model)).flatten());
+    match priced {
+        Some((cost_model, p)) => {
+            let cost_model = cost_model.as_str();
             let u = pricing::Usage {
                 input,
                 output,
@@ -3575,8 +3642,12 @@ fn deepseek_harness_priced(events: Vec<providers::dsh::DshEvent>) -> (FileData, 
             cache_write_5m: ev.cache_write,
             cache_write_1h: 0.0,
         };
-        match probe_lookup(&price_key) {
-            Some(p) => add_event(
+        // An AIHubMix row no source knows prices on the gateway's own card.
+        let priced = probe_lookup(&price_key).map(|p| (price_key.clone(), p)).or_else(|| {
+            (provider == "aihubmix").then(|| probe_aihubmix_catalog(&ev.model)).flatten()
+        });
+        match priced {
+            Some((price_key, p)) => add_event(
                 bucket,
                 ts,
                 &ev.model,
@@ -6543,6 +6614,78 @@ mod tests {
         assert_eq!(data.unpriced.get("mystery-reply"), Some(&1));
     }
 
+    /// A model nothing else prices, listed in AIHubMix's own catalog:
+    /// Claude Code, pi and DeepSeek Harness rows the gateway billed all
+    /// take the gateway's card instead of staying unpriced.
+    #[test]
+    fn aihubmix_catalog_prices_otherwise_unpriced_gateway_rows() {
+        pricing::seed_aihubmix_for_test(
+            "pane-test-gw-model",
+            pricing::Price::flat(1.0, 2.0, 0.1, 1.0),
+        );
+        // Claude Code: priced on the gateway card and named for it.
+        let line = json!({"type": "assistant", "timestamp": "2026-11-11T12:00:00Z",
+            "requestId": "req_g1",
+            "message": {"id": "msg_g1", "model": "pane-test-gw-model",
+                "usage": {"input_tokens": 1000000.0, "output_tokens": 1000000.0,
+                    "cache_read_input_tokens": 1000000.0}}})
+        .to_string();
+        let data = claude_run(std::slice::from_ref(&line));
+        let cost: f64 = data.days.values().map(|v| v.0).sum();
+        assert!((cost - 3.1).abs() < 1e-9, "{cost}");
+        assert!(data.days.keys().all(|(_, m)| m == "aihubmix/pane-test-gw-model"));
+        assert!(data.unpriced.is_empty());
+        // …also when only the requested model is listed.
+        let line = json!({"type": "assistant", "timestamp": "2026-11-11T12:00:00Z",
+            "requestId": "req_g2", "requestedModel": "pane-test-gw-model",
+            "message": {"id": "msg_g2", "model": "pane-test-gw-reply",
+                "usage": {"input_tokens": 1000000.0, "output_tokens": 0.0}}})
+        .to_string();
+        let data = claude_run(std::slice::from_ref(&line));
+        assert!((data.days.values().map(|v| v.0).sum::<f64>() - 1.0).abs() < 1e-9);
+        assert!(data.days.keys().all(|(_, m)| m == "aihubmix/pane-test-gw-model"));
+
+        // pi / omp on the aihubmix provider; the row keeps its logged name.
+        let mut seen = HashSet::new();
+        let mut data = FileData::default();
+        let line = json!({"type": "message", "id": "g3", "timestamp": "2026-11-11T12:00:00Z",
+            "message": {"role": "assistant", "provider": "aihubmix", "model": "pane-test-gw-model",
+                        "usage": {"input": 1000000.0, "output": 1000000.0, "cacheRead": 0.0,
+                                  "cacheWrite": 0.0, "totalTokens": 2000000.0}}})
+        .to_string();
+        pi_line(&mut seen, &line, &mut data);
+        let mix = take_tagged(&mut data, "aihubmix");
+        assert!((mix.days.values().map(|v| v.0).sum::<f64>() - 3.0).abs() < 1e-9);
+        assert!(mix.days.keys().all(|(_, m)| m == "pane-test-gw-model"));
+        assert!(mix.unpriced.is_empty());
+        // The same model on another pi provider is not AIHubMix's to price.
+        let mut seen = HashSet::new();
+        let mut data = FileData::default();
+        pi_line(&mut seen, &line.replace("\"aihubmix\"", "\"anthropic\""), &mut data);
+        assert_eq!(data.days.values().map(|v| v.0).sum::<f64>(), 0.0);
+        assert_eq!(data.unpriced.len(), 1);
+
+        // Claude Code logs don't record the endpoint: a Claude-named id
+        // may be a native Anthropic session, so the gateway's card must
+        // not price it even when AIHubMix lists it.
+        pricing::seed_aihubmix_for_test(
+            "claude-pane-test-family",
+            pricing::Price::flat(9.0, 9.0, 0.9, 9.0),
+        );
+        let t = ClaudeTokens {
+            input: 1_000_000.0,
+            output: 0.0,
+            cache_read: 0.0,
+            w5m: 0.0,
+            w1h: 0.0,
+            fast: false,
+        };
+        let at = DateTime::parse_from_rfc3339("2026-11-11T12:00:00Z").unwrap().with_timezone(&Utc);
+        assert!(claude_aihubmix_cost("claude-pane-test-family", &t, at).is_none());
+        assert!(claude_aihubmix_cost("anthropic/claude-pane-test-family", &t, at).is_none());
+        assert!(claude_aihubmix_cost("pane-test-gw-model", &t, at).is_some());
+    }
+
     /// Claude Code's Messages API can't serve Gemini, so a Gemini slug in
     /// these logs always crossed a gateway (AIHubMix): price it on the
     /// gateway card, leave it on the Claude card.
@@ -6702,6 +6845,8 @@ mod tests {
                 "qwen3.8-max",
                 "coding-qwen4-max-preview",
                 "aihubmix/coding-qwen4-max-preview",
+                "aihubmix/qwen5-new",
+                "aihubmix/brand-new-model",
             ] {
                 all.days.insert((1, m.to_string()), (1.0, 1.0));
                 all.hours.insert((2, m.to_string()), (1.0, 1.0));
@@ -6720,8 +6865,9 @@ mod tests {
         let moved = split_aihubmix_routed(&mut all, false);
         assert_eq!(
             names(&moved),
-            "aihubmix/coding-qwen4-max-preview,coding-qwen4-max-preview,qwen3.8-max"
+            "aihubmix/coding-qwen4-max-preview,aihubmix/qwen5-new,coding-qwen4-max-preview,qwen3.8-max"
         );
+        assert!(all.days.keys().any(|(_, m)| m == "aihubmix/brand-new-model"));
         assert!(all.days.keys().any(|(_, m)| m == "deepseek-flash"));
         assert!(all.days.keys().any(|(_, m)| m == "hy4"));
         assert!(all.days.keys().any(|(_, m)| m == "tencent/hy4"));
@@ -6733,9 +6879,9 @@ mod tests {
         let moved = split_aihubmix_routed(&mut all, true);
         assert_eq!(
             names(&moved),
-            "aihubmix/coding-qwen4-max-preview,aihubmix/hy4,coding-qwen4-max-preview,deepseek-flash,gemini-4-argon,hy4,qwen3.8-max"
+            "aihubmix/brand-new-model,aihubmix/coding-qwen4-max-preview,aihubmix/hy4,aihubmix/qwen5-new,coding-qwen4-max-preview,deepseek-flash,gemini-4-argon,hy4,qwen3.8-max"
         );
-        assert_eq!(moved.hours.len(), 7);
+        assert_eq!(moved.hours.len(), 9);
         assert_eq!(moved.unpriced["deepseek-flash"], 1);
         assert!(all
             .days
