@@ -23,7 +23,9 @@ price list
 ([`pricing/supplement.json`](../pricing/supplement.json), fetched from
 this repo every 6 hours), then the LiteLLM and models.dev catalogs, then
 vendor-published rates built into Pane, then OpenRouter's public model
-list for models none of the others know yet. Catalogs refresh daily, and
+list for models none of the others know yet. One exception: Kimi /
+Moonshot models use Moonshot's published rates built into Pane ahead of
+the public catalogs, which mix in reseller prices. Catalogs refresh daily, and
 hourly while an unpriced model is around. Dated prices (promos, announced
 price changes) are applied by each request's own timestamp. A model no
 source can price keeps its token count and shows as unpriced — never a
