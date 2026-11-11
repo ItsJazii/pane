@@ -550,15 +550,18 @@ static AIHUBMIX_WANTED: std::sync::atomic::AtomicBool =
 /// The `aihubmix/<id>` slug that prices `model` on AIHubMix's own
 /// published card — the last resort for a row AIHubMix billed when no
 /// other source knows the model. Marks the catalog as wanted so the next
-/// refresh downloads it. An already-prefixed slug keeps its id.
+/// refresh downloads it. The whole logged id is kept (`vendor/model` →
+/// `aihubmix/vendor/model`): resolve() tries the catalog's exact id
+/// first and only then its last segment, so two vendors sharing a model
+/// name each get their own card. An already-prefixed slug keeps its id.
 pub fn aihubmix_catalog_slug(model: &str) -> String {
     AIHUBMIX_WANTED.store(true, std::sync::atomic::Ordering::Relaxed);
     let lower = model.to_lowercase();
-    if lower.starts_with("aihubmix/") {
-        return lower;
-    }
-    let seg = lower.rsplit(['/', '\u{1}']).next().unwrap_or(lower.as_str());
-    format!("aihubmix/{seg}")
+    let id = lower
+        .strip_prefix("aihubmix/")
+        .or_else(|| lower.strip_prefix("aihubmix\u{1}"))
+        .unwrap_or(lower.as_str());
+    format!("aihubmix/{id}")
 }
 
 /// Test hook: list `id` in the shared AIHubMix catalog. Callers use ids
@@ -1489,22 +1492,6 @@ fn resolve(s: &Store, model: &str, depth: u8) -> Option<Price> {
     if let Some(p) = builtin_price(&canonical) {
         return Some(p);
     }
-    // A row AIHubMix billed (`aihubmix/<id>`) that nothing above knows:
-    // the gateway's own published card for that id. Below the baked
-    // AIHubMix arms, which carry what the flat catalog can't (peak
-    // windows), so an existing price never moves.
-    let aihubmix_id = canonical
-        .get(..9)
-        .filter(|p| p.eq_ignore_ascii_case("aihubmix/"))
-        .map(|_| canonical[9..].to_lowercase());
-    let aihubmix_card = |id: &str| {
-        s.aihubmix
-            .get(id)
-            .or_else(|| s.aihubmix.get(id.rsplit('/').next().unwrap_or(id)))
-    };
-    if let Some(p) = aihubmix_id.as_deref().and_then(aihubmix_card).filter(real) {
-        return Some(*p);
-    }
     // OpenRouter lists brand-new models the same day they launch, but its
     // cards are flat — no long-context or 1h-cache tiers — so it sits
     // BELOW the hand-verified baked table: baked cards only retire when
@@ -1530,6 +1517,24 @@ fn resolve(s: &Store, model: &str, depth: u8) -> Option<Price> {
             )
         })
     {
+        return Some(*p);
+    }
+    // A row AIHubMix billed (`aihubmix/<id>`) that nothing above knows:
+    // the gateway's own published card — its exact id first, then the
+    // last path segment. Deliberately last among the real-rate sources
+    // (below the baked AIHubMix arms, which carry what the flat catalog
+    // can't, and below OpenRouter), so a price that already resolved
+    // never moves.
+    let aihubmix_id = canonical
+        .get(..9)
+        .filter(|p| p.eq_ignore_ascii_case("aihubmix/"))
+        .map(|_| canonical[9..].to_lowercase());
+    let aihubmix_card = |id: &str| {
+        s.aihubmix
+            .get(id)
+            .or_else(|| s.aihubmix.get(id.rsplit('/').next().unwrap_or(id)))
+    };
+    if let Some(p) = aihubmix_id.as_deref().and_then(aihubmix_card).filter(real) {
         return Some(*p);
     }
     // DeepSeek ships dated snapshots ("deepseek-v4-pro-0813"): when no
@@ -3462,8 +3467,30 @@ mod tests {
     #[test]
     fn aihubmix_catalog_slug_spellings() {
         assert_eq!(super::aihubmix_catalog_slug("New-LLM-X"), "aihubmix/new-llm-x");
-        assert_eq!(super::aihubmix_catalog_slug("vendor/New-LLM-X"), "aihubmix/new-llm-x");
+        // The vendor stays, so the catalog's exact id is tried first.
+        assert_eq!(super::aihubmix_catalog_slug("vendor/New-LLM-X"), "aihubmix/vendor/new-llm-x");
         assert_eq!(super::aihubmix_catalog_slug("AIHubMix/vendor/x"), "aihubmix/vendor/x");
+    }
+
+    #[test]
+    fn aihubmix_catalog_exact_id_beats_a_shared_segment_and_openrouter_wins() {
+        // Two vendors share a model name: each id gets its own card, and
+        // only an unlisted vendor falls back to the segment alias.
+        let mut s = super::Store::default();
+        super::ingest(&mut s, "aihubmix", &serde_json::json!({"data": [
+            {"model_id": "alpha/novel", "types": "llm", "pricing": {"input": 1, "output": 1}},
+            {"model_id": "beta/novel", "types": "llm", "pricing": {"input": 3, "output": 3}},
+        ]}));
+        let price = |m: &str| super::resolve(&s, &super::aihubmix_catalog_slug(m), 0).unwrap().input;
+        assert_eq!(price("alpha/novel"), 1.0);
+        assert_eq!(price("beta/novel"), 3.0);
+        assert_eq!(price("gamma/novel"), 1.0);
+        assert_eq!(price("novel"), 1.0);
+        // A slug OpenRouter already priced keeps that price.
+        super::ingest(&mut s, "openrouter", &serde_json::json!({"data": [
+            {"id": "vendor/novel", "pricing": {"prompt": "0.000007", "completion": "0.00003"}},
+        ]}));
+        assert_eq!(super::resolve(&s, "aihubmix/novel", 0).unwrap().input, 7.0);
     }
 
     #[test]

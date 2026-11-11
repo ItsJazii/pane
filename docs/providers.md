@@ -564,6 +564,8 @@ guessed dollar amount.
   oh-my-pi, Hermes and DeepSeek Harness rows on the `aihubmix` route,
   and to Claude Code rows whose model nothing else knows — those are
   named `aihubmix/<model>` and move to this card when a key is set up.
+  Claude-named models are left out of that, because Claude Code's logs
+  can't tell a native Anthropic session from a gateway one.
   Prices Pane already has are never replaced by this list, and
   image / video / embedding models are not priced from it.
 

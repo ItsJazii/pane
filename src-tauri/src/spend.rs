@@ -1790,8 +1790,15 @@ fn claude_priced(
 /// A Claude Code row no source can price, whose model AIHubMix lists:
 /// the gateway's own card, named `aihubmix/<id>` so the breakdown shows
 /// where the price came from and split_aihubmix_routed can move it to
-/// the AihubMix card once a key exists.
+/// the AihubMix card once a key exists. Claude Code logs don't record
+/// the endpoint, so this only covers ids Anthropic's own API can't
+/// serve: anything naming Claude may be a native session and stays
+/// unpriced until an authoritative price arrives.
 fn claude_aihubmix_cost(model: &str, t: &ClaudeTokens, ts: DateTime<Utc>) -> Option<(String, f64)> {
+    let lower = model.to_ascii_lowercase();
+    if lower.contains("claude") || lower.contains("anthropic") {
+        return None;
+    }
     let (slug, price) = probe_aihubmix_catalog(model)?;
     let cost = claude_priced(model, &slug, &price, t, ts);
     Some((slug, cost))
@@ -6657,6 +6664,26 @@ mod tests {
         pi_line(&mut seen, &line.replace("\"aihubmix\"", "\"anthropic\""), &mut data);
         assert_eq!(data.days.values().map(|v| v.0).sum::<f64>(), 0.0);
         assert_eq!(data.unpriced.len(), 1);
+
+        // Claude Code logs don't record the endpoint: a Claude-named id
+        // may be a native Anthropic session, so the gateway's card must
+        // not price it even when AIHubMix lists it.
+        pricing::seed_aihubmix_for_test(
+            "claude-pane-test-family",
+            pricing::Price::flat(9.0, 9.0, 0.9, 9.0),
+        );
+        let t = ClaudeTokens {
+            input: 1_000_000.0,
+            output: 0.0,
+            cache_read: 0.0,
+            w5m: 0.0,
+            w1h: 0.0,
+            fast: false,
+        };
+        let at = DateTime::parse_from_rfc3339("2026-11-11T12:00:00Z").unwrap().with_timezone(&Utc);
+        assert!(claude_aihubmix_cost("claude-pane-test-family", &t, at).is_none());
+        assert!(claude_aihubmix_cost("anthropic/claude-pane-test-family", &t, at).is_none());
+        assert!(claude_aihubmix_cost("pane-test-gw-model", &t, at).is_some());
     }
 
     /// Claude Code's Messages API can't serve Gemini, so a Gemini slug in
