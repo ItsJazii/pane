@@ -215,6 +215,10 @@ enum PriceProbe {
     Lookup { key: String, price: Option<pricing::Price> },
     /// `pricing::fast_multiplier(key)` returned `mult`.
     FastMult { key: String, mult: f64 },
+    /// `pricing::dated_feed_fingerprint(key)` returned `fingerprint` —
+    /// dated feed cards apply after lookup, so lookup probes alone
+    /// can't see a `dated_pricing` edit.
+    Dated { key: String, fingerprint: String },
     /// The file asked more unique questions than `MAX_PROBES_PER_FILE`,
     /// or a model string longer than `MAX_PROBE_KEY`. A truncated list
     /// cannot vouch for prices we didn't record.
@@ -226,6 +230,9 @@ impl PriceProbe {
         match self {
             PriceProbe::Lookup { key, price } => pricing::lookup(key) == *price,
             PriceProbe::FastMult { key, mult } => pricing::fast_multiplier(key) == *mult,
+            PriceProbe::Dated { key, fingerprint } => {
+                pricing::dated_feed_fingerprint(key) == *fingerprint
+            }
             PriceProbe::Overflow => false,
         }
     }
@@ -282,6 +289,18 @@ fn probe_fast_multiplier(model: &str) -> f64 {
     let mult = pricing::fast_multiplier(model);
     record_model_probe(model, |key| PriceProbe::FastMult { key, mult });
     mult
+}
+
+/// `pricing::dated_card`, recorded — see `probe_lookup`. The probe holds
+/// the feed's dated fingerprint for the model, so editing a
+/// `dated_pricing` window re-prices the files it touched.
+fn probe_dated_card(model: &str, ts_ms: i64) -> Option<pricing::Price> {
+    let card = pricing::dated_card(model, ts_ms);
+    record_model_probe(model, |key| PriceProbe::Dated {
+        fingerprint: pricing::dated_feed_fingerprint(&key),
+        key,
+    });
+    card
 }
 
 fn record_model_probe(model: &str, make: impl FnOnce(String) -> PriceProbe) {
@@ -1716,7 +1735,7 @@ fn cost_for(
     long_context_threshold: f64,
     ts: DateTime<Utc>,
 ) -> f64 {
-    let legacy = pricing::dated_card(model, ts.timestamp_millis());
+    let legacy = probe_dated_card(model, ts.timestamp_millis());
     let p = legacy.as_ref().unwrap_or(p);
     pricing::request_cost_at(p, u, long_context_threshold)
         * pricing::peak_multiplier(model, ts.timestamp_millis())
@@ -2199,7 +2218,7 @@ fn hermes_cost(
         .clamp(0, total_ms);
     if pricing::peak_windowed(slug) && total_ms > 0 && (peak_ms > 0 || legacy_ms > 0) {
         let new_base = pricing::request_cost(p, u, false);
-        let legacy_base = pricing::dated_card(slug, start_ms)
+        let legacy_base = probe_dated_card(slug, start_ms)
             .map(|lp| pricing::request_cost(&lp, u, false))
             .unwrap_or(new_base);
         let off_ms = total_ms - legacy_ms - peak_ms;
@@ -3449,13 +3468,9 @@ fn devin() -> ProviderSpend {
     build_spend("devin", "Devin", data)
 }
 
-/// Devin CLI events price on Devin's own Argon promo card while it runs —
-/// it must win over cost_for's dated overlay (Google's intro card is a
-/// different rate). Every other model resolves normally.
+/// Devin CLI events price on the resolved card — Devin bills Argon and
+/// Carbon at Google's price, so cost_for's dated overlay covers them.
 fn devin_cost(model: &str, p: &pricing::Price, u: &pricing::Usage, ts: DateTime<Utc>) -> f64 {
-    if let Some(card) = pricing::devin_argon_card(model, ts.timestamp_millis()) {
-        return pricing::request_cost_at(&card, u, 200_000.0);
-    }
     cost_for(model, p, u, 200_000.0, ts)
 }
 
@@ -4437,6 +4452,41 @@ mod tests {
             mult: 3.5,
         };
         assert!(!wrong_mult.still_valid());
+        // No dated feed entry names this model: an empty fingerprint
+        // vouches, a recorded one (the entry since changed/vanished)
+        // forces the re-parse.
+        let dated = PriceProbe::Dated {
+            key: "pane-test-model-that-cannot-exist".into(),
+            fingerprint: String::new(),
+        };
+        assert!(dated.still_valid());
+        let stale_dated = PriceProbe::Dated {
+            key: "pane-test-model-that-cannot-exist".into(),
+            fingerprint: "Some(0)|None|stale;".into(),
+        };
+        assert!(!stale_dated.still_valid());
+    }
+
+    /// cost_for consults dated cards after the lookup probes, so it must
+    /// record a Dated probe too — otherwise a `dated_pricing` edit would
+    /// leave cached dollars stale.
+    #[test]
+    fn cost_for_records_a_dated_probe() {
+        PROBES.with(|p| *p.borrow_mut() = Some(Vec::new()));
+        let p = pricing::Price::flat(1.0, 2.0, 0.1, 1.0);
+        let u = pricing::Usage {
+            input: 1_000_000.0,
+            output: 0.0,
+            cache_read: 0.0,
+            cache_write_5m: 0.0,
+            cache_write_1h: 0.0,
+        };
+        let _ = cost_for("pane-test-dated-model", &p, &u, 200_000.0, Utc::now());
+        let probes = PROBES.with(|p| p.borrow_mut().take()).unwrap_or_default();
+        assert!(probes.iter().any(|q| matches!(
+            q,
+            PriceProbe::Dated { key, .. } if key == "pane-test-dated-model"
+        )));
     }
 
     /// file_days records the pricing questions a parse asked, so the entry
@@ -6396,7 +6446,7 @@ mod tests {
     /// never does. Both resolve to the same resolved card — only the
     /// effective-dated overlay differs.
     #[test]
-    fn argon_intro_card_applies_by_route_and_date() {
+    fn gemini4_intro_card_applies_by_route_and_date() {
         let card = pricing::Price::flat(4.0, 20.0, 0.20, 4.0);
         let u = pricing::Usage {
             input: 1_000_000.0,
@@ -6721,18 +6771,31 @@ mod tests {
             cache_write_5m: 0.0,
             cache_write_1h: 0.0,
         };
-        // Promo window: $1 in + $5 out = $6; 1M cached input = $0.05.
+        // Devin bills Argon and Carbon at Google's price: intro window
+        // $2 in + $10 out = $12; 1M cached input = $0.10.
         assert_eq!(
             devin_cost("gemini-4-argon", &card, &io, ts("2026-10-14T12:00:00Z")),
-            6.0
+            12.0
         );
         assert_eq!(
             devin_cost("gemini-4-argon", &card, &cr, ts("2026-10-14T12:00:00Z")),
-            0.05
+            0.10
+        );
+        assert_eq!(
+            devin_cost("gemini-4-carbon", &card, &io, ts("2026-10-14T12:00:00Z")),
+            12.0
+        );
+        assert_eq!(
+            devin_cost("gemini-4-carbon", &card, &cr, ts("2026-10-14T12:00:00Z")),
+            0.10
         );
         // After the promo the resolved card applies ($4 + $20).
         assert_eq!(
             devin_cost("gemini-4-argon", &card, &io, ts("2026-12-02T12:00:00Z")),
+            24.0
+        );
+        assert_eq!(
+            devin_cost("gemini-4-carbon", &card, &io, ts("2026-12-02T12:00:00Z")),
             24.0
         );
         // Non-Argon slugs fall through to cost_for untouched.

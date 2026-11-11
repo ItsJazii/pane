@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **New models get priced sooner.** OpenRouter's model list is now a
+  price source alongside LiteLLM and models.dev, and Pane's own price
+  list updates without an app update — new prices and promos reach you
+  within hours.
+
+### Fixed
+- **Gemini 4 Carbon is priced.** Google's intro $2 / $10 per million
+  tokens ($0.10 cache read) applies through Nov 30, then the standard
+  $4 / $20 card takes over on Dec 1 — same promo Google runs for Argon.
+- **Devin's Gemini 4 Argon bills at Google's price.** Devin charges
+  Argon and Carbon at Google's rates, so its turns now price at
+  $2 / $10 instead of Devin's old $1 / $5 picker card.
+
 ## 0.5.1 — 2026-11-10
 
 ### Fixed

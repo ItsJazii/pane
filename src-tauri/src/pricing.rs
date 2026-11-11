@@ -159,36 +159,51 @@ pub fn v41_flash_legacy_card(model: &str, ts_ms: i64) -> Option<Price> {
 }
 
 /// 2026-12-01T08:00Z — end of Nov 30 Pacific. Google dates the Gemini 4
-/// Argon intro promo in PT (ai.google.dev/gemini-api/docs/latest-model):
-/// $2 in / $10 out / $0.10 cache read through 2026-11-30, then the
-/// standard $4/$20/$0.20 card argon_list_card enforces over the catalogs.
-pub const ARGON_INTRO_END_MS: i64 = 1_796_112_000_000;
+/// Argon AND Carbon intro promos in PT (ai.google.dev/gemini-api/docs/
+/// latest-model): $2 in / $10 out / $0.10 cache read through 2026-11-30,
+/// then the standard $4/$20/$0.20 card gemini4_list_card enforces over the
+/// catalogs.
+pub const GEMINI4_INTRO_END_MS: i64 = 1_796_112_000_000;
 
 /// The last `/` segment when it spells Gemini 4 Argon — exactly or as
 /// `gemini-4-argon-<suffix>` (effort tails, -fast, dated snapshots),
 /// case-insensitive. Route-agnostic: AIHubMix spellings still match.
 fn argon_segment(model: &str) -> Option<&str> {
+    gemini4_segment(model).filter(|seg| seg.to_lowercase().starts_with("gemini-4-argon"))
+}
+
+/// The last `/` segment when it spells Gemini 4 Argon or Carbon — exactly
+/// or as `gemini-4-(argon|carbon)-<suffix>` (effort tails, -fast, dated
+/// snapshots), case-insensitive. Route-agnostic: AIHubMix spellings still
+/// match.
+fn gemini4_segment(model: &str) -> Option<&str> {
     let seg = model.rsplit('/').next().unwrap_or(model);
     let lower = seg.to_lowercase();
-    (lower == "gemini-4-argon" || lower.starts_with("gemini-4-argon-")).then_some(seg)
+    (lower == "gemini-4-argon"
+        || lower.starts_with("gemini-4-argon-")
+        || lower == "gemini-4-carbon"
+        || lower.starts_with("gemini-4-carbon-"))
+    .then_some(seg)
 }
 
-/// Whether `model` is a Gemini 4 Argon slug on a non-AIHubMix route.
-/// The aihubmix/ spelling is excluded — that gateway bills its own flat
-/// card year-round and must never take the dated Google intro rate.
-fn argon_slug(model: &str) -> bool {
-    if model.to_lowercase().starts_with("aihubmix/") {
+/// Whether `model` takes Google's dated Gemini 4 card. AIHubMix bills
+/// Argon on its own flat card year-round, so the aihubmix/ Argon spelling
+/// is excluded; AIHubMix lists Carbon at Google's own rate
+/// (aihubmix.com/model/gemini-4-carbon: $2 / $10 / $0.10 cache read), so
+/// aihubmix/ Carbon follows the Google card on both sides of the cutoff.
+fn gemini4_google_slug(model: &str) -> bool {
+    if model.to_lowercase().starts_with("aihubmix/") && argon_segment(model).is_some() {
         return false;
     }
-    argon_segment(model).is_some()
+    gemini4_segment(model).is_some()
 }
 
-/// `card` scoped to Google's Gemini 4 Argon slugs on direct/bare routes —
-/// None for other models and AIHubMix-scoped spellings (the gateway bills
-/// its own flat card year-round). A `-fast` slug scales the card by the
-/// supplement's fast multiplier — same as resolve()'s tier pricing.
-fn argon_google_card_in(s: &Store, model: &str, card: Price) -> Option<Price> {
-    if !argon_slug(model) {
+/// `card` scoped to Google's Gemini 4 Argon/Carbon slugs — None for other
+/// models and the AIHubMix Argon spelling (see gemini4_google_slug). A
+/// `-fast` slug scales the card by the supplement's fast multiplier —
+/// same as resolve()'s tier pricing.
+fn gemini4_google_card_in(s: &Store, model: &str, card: Price) -> Option<Price> {
+    if !gemini4_google_slug(model) {
         return None;
     }
     let lower = model.to_lowercase();
@@ -201,53 +216,121 @@ fn argon_google_card_in(s: &Store, model: &str, card: Price) -> Option<Price> {
     Some(scaled_price(&card, fast_tier_mult(s, base)))
 }
 
-/// Google's intro card for Gemini 4 Argon before ARGON_INTRO_END_MS:
+/// Google's intro card for Gemini 4 Argon and Carbon before
+/// GEMINI4_INTRO_END_MS:
 /// $2 in / $10 out / $0.10 cache read; cache write bills at intro input
 /// ($2) since no cache-write rate is published.
-fn argon_intro_card_in(s: &Store, model: &str, ts_ms: i64) -> Option<Price> {
-    if ts_ms >= ARGON_INTRO_END_MS {
+fn gemini4_intro_card_in(s: &Store, model: &str, ts_ms: i64) -> Option<Price> {
+    if ts_ms >= GEMINI4_INTRO_END_MS {
         return None;
     }
-    argon_google_card_in(s, model, Price::flat(2.0, 10.0, 0.10, 2.0))
+    // The `cyber-permissive` SKUs were never on the intro promo — always
+    // the list card (which still applies to them after the cutoff).
+    if cyber_permissive_slug(model) {
+        return None;
+    }
+    gemini4_google_card_in(s, model, Price::flat(2.0, 10.0, 0.10, 2.0))
 }
 
-pub fn argon_intro_card(model: &str, ts_ms: i64) -> Option<Price> {
-    argon_intro_card_in(&store().lock().unwrap(), model, ts_ms)
+/// Gemini 4 Argon/Carbon `-cyber-permissive` spellings — excluded from
+/// the intro promo only.
+fn cyber_permissive_slug(model: &str) -> bool {
+    let seg = model.rsplit('/').next().unwrap_or(model).to_lowercase();
+    seg.contains("cyber-permissive")
 }
 
-/// Google's list card for Gemini 4 Argon from ARGON_INTRO_END_MS on:
+pub fn gemini4_intro_card(model: &str, ts_ms: i64) -> Option<Price> {
+    gemini4_intro_card_in(&store().lock().unwrap(), model, ts_ms)
+}
+
+/// Google's list card for Gemini 4 Argon and Carbon from
+/// GEMINI4_INTRO_END_MS on:
 /// $4 in / $20 out / $0.20 cache read, cache write at input. Enforced
 /// over the catalogs, which still carry the intro rate after the promo
 /// ends — the bare baked arm alone would lose to LiteLLM's stale card.
-pub fn argon_list_card(model: &str, ts_ms: i64) -> Option<Price> {
-    if ts_ms < ARGON_INTRO_END_MS {
+pub fn gemini4_list_card(model: &str, ts_ms: i64) -> Option<Price> {
+    if ts_ms < GEMINI4_INTRO_END_MS {
         return None;
     }
-    argon_google_card_in(&store().lock().unwrap(), model, Price::flat(4.0, 20.0, 0.20, 4.0))
-}
-
-/// Devin's own Argon card — the model picker lists $1 in / $5 out /
-/// $0.05 cached input through Nov 30, 2026 (promo ends at
-/// ARGON_INTRO_END_MS, same PT cutoff as Google's). Cache write is
-/// unpublished, so writes bill at intro input. Afterwards Devin follows
-/// Google's list price, so callers fall through to the resolved card.
-/// Only the Devin spend scanner consults this.
-pub fn devin_argon_card(model: &str, ts_ms: i64) -> Option<Price> {
-    if ts_ms >= ARGON_INTRO_END_MS || argon_segment(model).is_none() {
-        return None;
-    }
-    Some(Price::flat(1.0, 5.0, 0.05, 1.0))
+    gemini4_google_card_in(&store().lock().unwrap(), model, Price::flat(4.0, 20.0, 0.20, 4.0))
 }
 
 /// Every effective-dated card: a resolved price that differs by date.
 /// cost_for and the Hermes session splitter consult this before the
 /// resolved card — a bare result is the card in force at ts_ms. Argon
-/// is covered on both sides of the promo: intro before the cutoff, the
-/// enforced list card after it.
+/// and Carbon are covered on both sides of the promo: intro before the
+/// cutoff, the enforced list card after it.
 pub fn dated_card(model: &str, ts_ms: i64) -> Option<Price> {
-    v41_flash_legacy_card(model, ts_ms)
-        .or_else(|| argon_intro_card(model, ts_ms))
-        .or_else(|| argon_list_card(model, ts_ms))
+    // Scope the lock — argon_* re-lock the store themselves.
+    let feed = feed_dated_card(&store().lock().unwrap(), model, ts_ms);
+    feed
+        .or_else(|| v41_flash_legacy_card(model, ts_ms))
+        .or_else(|| gemini4_intro_card(model, ts_ms))
+        .or_else(|| gemini4_list_card(model, ts_ms))
+}
+
+/// A `dated_pricing` feed entry whose window contains `ts_ms` — first
+/// match wins. Slugs normalize like the fast path: last segment
+/// lowercased, `-fast` peeled (card scales by fast_tier_mult), then
+/// effort/mode tails until the entry's model equals what's left.
+/// `exclude_prefixes` keeps gateway spellings on their own card.
+fn feed_dated_card(s: &Store, model: &str, ts_ms: i64) -> Option<Price> {
+    let (entries, fast) = feed_dated_entries(s, model);
+    let e = entries
+        .into_iter()
+        .find(|e| !(e.from.is_some_and(|f| ts_ms < f) || e.until.is_some_and(|u| ts_ms >= u)))?;
+    Some(match &fast {
+        Some(base) => scaled_price(&e.price, fast_tier_mult(s, base)),
+        None => e.price,
+    })
+}
+
+/// The `dated_pricing` entries that can apply to `model` (any window),
+/// in feed order, plus the `-fast` base when the slug is a fast tier.
+fn feed_dated_entries<'a>(s: &'a Store, model: &str) -> (Vec<&'a DatedEntry>, Option<String>) {
+    let lower = model.to_lowercase();
+    let mut stem = lower.rsplit('/').next().unwrap_or(lower.as_str()).to_string();
+    let fast = stem.strip_suffix("-fast").map(|b| b.to_string());
+    if let Some(b) = &fast {
+        stem = b.clone();
+    }
+    while let Some(next) = ["-xhigh", "-light", "-low", "-medium", "-high", "-max", "-ultra"]
+        .iter()
+        .find_map(|suf| stem.strip_suffix(suf))
+    {
+        stem = next.to_string();
+    }
+    let entries = s
+        .dated_pricing
+        .iter()
+        .filter(|e| e.model == stem && !e.exclude_prefixes.iter().any(|p| lower.starts_with(p.as_str())))
+        .collect();
+    (entries, fast)
+}
+
+/// Everything the feed's `dated_pricing` could answer for `model`, as a
+/// stable string — empty when no entry applies. The spend cache records
+/// it per model (cost_for applies dated cards after the lookup probes),
+/// so a feed edit that only touches `dated_pricing` still re-prices the
+/// cached history it affects.
+pub fn dated_feed_fingerprint(model: &str) -> String {
+    let mut s = store().lock().unwrap();
+    if !s.loaded_from_disk {
+        load_from_disk(&mut s);
+    }
+    dated_feed_fingerprint_in(&s, model)
+}
+
+fn dated_feed_fingerprint_in(s: &Store, model: &str) -> String {
+    let (entries, fast) = feed_dated_entries(s, model);
+    let mut out: String = entries
+        .iter()
+        .map(|e| format!("{:?}|{:?}|{:?};", e.from, e.until, e.price))
+        .collect();
+    if let (Some(base), false) = (&fast, out.is_empty()) {
+        out.push_str(&format!("fast={}", fast_tier_mult(s, base)));
+    }
+    out
 }
 
 /// Only two `hy4` spellings take the AIHubMix card: the bare slug
@@ -364,7 +447,7 @@ fn fast_multiplier_in(s: &Store, model: &str) -> f64 {
     1.0
 }
 
-const SOURCES: [(&str, &str); 3] = [
+const SOURCES: [(&str, &str); 4] = [
     (
         "litellm",
         "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
@@ -372,11 +455,28 @@ const SOURCES: [(&str, &str); 3] = [
     ("modelsdev", "https://models.dev/api.json"),
     (
         "supplement",
-        "https://robinebers.github.io/openusage/pricing_supplement.json",
+        "https://raw.githubusercontent.com/ItsJazii/pane/main/pricing/supplement.json",
     ),
+    ("openrouter", "https://openrouter.ai/api/v1/models"),
 ];
 const REFRESH_MS: i64 = 24 * 3600 * 1000;
+/// Pane's own pricing feed moves faster than app releases — promos and
+/// dated cards ship there by PR, so it re-fetches more often than the
+/// third-party catalogs.
+const SUPPLEMENT_REFRESH_MS: i64 = 6 * 3600 * 1000;
 const RETRY_MS: i64 = 30 * 60 * 1000;
+
+/// How often `source` is re-fetched: hourly while an unpriced model was
+/// seen (any source), 6 h for Pane's own feed, daily for the rest.
+fn refresh_ms(source: &str, unpriced: bool) -> i64 {
+    if unpriced {
+        3_600_000
+    } else if source == "supplement" {
+        SUPPLEMENT_REFRESH_MS
+    } else {
+        REFRESH_MS
+    }
+}
 /// The catalogs are third-party feeds; a compromised one must not be able
 /// to fill memory (and then the disk cache) with an arbitrarily large
 /// response. Largest legitimate source today is LiteLLM at ~3 MB — 32 MB
@@ -388,10 +488,30 @@ struct Store {
     litellm: HashMap<String, Price>,
     modelsdev: HashMap<String, Price>,
     supplement: HashMap<String, Price>,
+    /// OpenRouter's live model list, keyed by full lowercase id — plus
+    /// last-segment and dot-normalized-segment indexes so `canonical`'s
+    /// own spelling finds its listing. Segment entries keep the
+    /// lexicographically smallest id so picks are deterministic.
+    openrouter: HashMap<String, Price>,
+    openrouter_seg: HashMap<String, Price>,
+    openrouter_dashseg: HashMap<String, Price>,
     fast_multipliers: HashMap<String, f64>,
     alias_rules: Vec<(regex::Regex, String)>,
+    /// Time-windowed cards from Pane's pricing feed (promos / price
+    /// changes that can't wait for an app release).
+    dated_pricing: Vec<DatedEntry>,
     memo: HashMap<String, Option<Price>>,
     loaded_from_disk: bool,
+}
+
+/// One `dated_pricing` entry from Pane's feed: `model` (plain slug)
+/// prices at `price` inside [from, until); either bound may be open.
+struct DatedEntry {
+    model: String,
+    from: Option<i64>,
+    until: Option<i64>,
+    price: Price,
+    exclude_prefixes: Vec<String>,
 }
 
 fn store() -> &'static Mutex<Store> {
@@ -421,7 +541,7 @@ pub fn generation() -> u64 {
 /// fingerprinted below — an app update that reprices the same files would
 /// otherwise leave history at the old dollars until upstream happens to
 /// rewrite a catalog.
-const CORRECTIONS_REV: u32 = 26; // 19: Antigravity `-trial` ids (gemini-4-argon-trial) price like the base card; 20: Argon post-intro list card enforced over catalogs; 21: Claude Code deepseek-flash / V4.1 Flash priced on AIHubMix's card; 22: `deepseek/` spellings take the baked official card over models.dev's same-prefix reseller ids; 23: AIHubMix MiniMax M3.1 Flash card; 24: Moonshot Kimi K3.1 Pro + Highspeed cards; 25: Claude Fable/Mythos 5.2 card + 2× fast mode; 26: AIHubMix Tencent Hy4 card (Claude Code `hy4` rows)
+const CORRECTIONS_REV: u32 = 27; // 19: Antigravity `-trial` ids (gemini-4-argon-trial) price like the base card; 20: Argon post-intro list card enforced over catalogs; 21: Claude Code deepseek-flash / V4.1 Flash priced on AIHubMix's card; 22: `deepseek/` spellings take the baked official card over models.dev's same-prefix reseller ids; 23: AIHubMix MiniMax M3.1 Flash card; 24: Moonshot Kimi K3.1 Pro + Highspeed cards; 25: Claude Fable/Mythos 5.2 card + 2× fast mode; 26: AIHubMix Tencent Hy4 card (Claude Code `hy4` rows); 27: Gemini 4 Carbon dated card, Devin Argon at Google's price, OpenRouter source, Pane-owned feed + dated_pricing
 
 /// The corrections revision on its own — the spend cache treats a changed
 /// revision as a hard discard (the *code* that prices changed), while a
@@ -495,6 +615,123 @@ fn now_ms() -> i64 {
 // Parsing (each source's shape → HashMap<model, Price> per million tokens)
 // ---------------------------------------------------------------------------
 
+/// OpenRouter's /api/v1/models — same-day listings for brand-new models.
+/// `pricing` rates are per-token decimal strings (numbers accepted too);
+/// keyed by lowercase id. Segment indexes keep the smallest id per last
+/// path segment (and per dot-to-dash normalized segment) so a model
+/// spelled differently upstream still matches deterministically.
+/// Skipped: `:variant` ids (`:free`, `:batch`, `:extended`…), openrouter/
+/// meta ids, negative rates (`openrouter/auto` is "-1"), 0/0 entries and
+/// implausible prices.
+fn parse_openrouter(doc: &Value) -> (HashMap<String, Price>, HashMap<String, Price>, HashMap<String, Price>) {
+    let mut exact = HashMap::new();
+    let mut seg: HashMap<String, (String, Price)> = HashMap::new();
+    let mut dashseg: HashMap<String, (String, Price)> = HashMap::new();
+    let Some(data) = doc.get("data").and_then(Value::as_array) else {
+        return (HashMap::new(), HashMap::new(), HashMap::new());
+    };
+    let plausible = |v: f64| v.is_finite() && (0.0..=MAX_SUPPLEMENT_PRICE).contains(&v);
+    for entry in data {
+        let Some(id) = entry.get("id").and_then(Value::as_str) else { continue };
+        if id.contains(':') || id.starts_with("openrouter/") {
+            continue;
+        }
+        let Some(pricing) = entry.get("pricing") else { continue };
+        let per_tok = |key: &str| {
+            let v = pricing.get(key)?;
+            v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+        };
+        let (Some(input), Some(output)) = (per_tok("prompt"), per_tok("completion")) else {
+            continue;
+        };
+        let cache_read = per_tok("input_cache_read").unwrap_or(input);
+        let cache_write = per_tok("input_cache_write").unwrap_or(input);
+        let rates = [input, output, cache_read, cache_write];
+        if !rates.iter().all(|v| v.is_finite() && *v >= 0.0 && plausible(*v)) {
+            continue;
+        }
+        let price = Price::flat(input * 1e6, output * 1e6, cache_read * 1e6, cache_write * 1e6);
+        if price.input <= 0.0 && price.output <= 0.0 {
+            continue;
+        }
+        let key = id.to_lowercase();
+        let last = key.rsplit('/').next().unwrap_or(key.as_str()).to_string();
+        exact.insert(key.clone(), price);
+        // The lexicographically smallest full id wins the segment slot —
+        // deterministic no matter how many vendors list the same tail.
+        seg.entry(last.clone())
+            .and_modify(|(id, p): &mut (String, Price)| {
+                if id.as_str() > key.as_str() { *id = key.clone(); *p = price; }
+            })
+            .or_insert((key.clone(), price));
+        dashseg
+            .entry(last.replace('.', "-"))
+            .and_modify(|(id, p): &mut (String, Price)| {
+                if id.as_str() > key.as_str() { *id = key.clone(); *p = price; }
+            })
+            .or_insert((key, price));
+    }
+    (
+        exact,
+        seg.into_iter().map(|(k, (_, p))| (k, p)).collect(),
+        dashseg.into_iter().map(|(k, (_, p))| (k, p)).collect(),
+    )
+}
+
+/// The price-only projection of an OpenRouter catalog — what
+/// parse_openrouter actually consumes, sorted by id and serialized
+/// deterministically. The live endpoint churns daily in fields pane
+/// never reads and sends no ETag; the disk cache stores this form so a
+/// refresh with no price move writes identical bytes.
+fn compact_openrouter(doc: &Value) -> String {
+    let num = |v: Option<&Value>| -> Option<f64> {
+        v.and_then(|v| {
+            v.as_f64()
+                .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+        })
+    };
+    let plausible = |v: f64| v.is_finite() && (0.0..=MAX_SUPPLEMENT_PRICE).contains(&v);
+    let mut rows: Vec<Value> = Vec::new();
+    for e in doc
+        .get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(id) = e.get("id").and_then(Value::as_str) else { continue };
+        if id.contains(':') || id.starts_with("openrouter/") {
+            continue;
+        }
+        let Some(pricing) = e.get("pricing") else { continue };
+        let (Some(input), Some(output)) = (
+            num(pricing.get("prompt")),
+            num(pricing.get("completion")),
+        ) else {
+            continue;
+        };
+        let cache_read = num(pricing.get("input_cache_read")).unwrap_or(input);
+        let cache_write = num(pricing.get("input_cache_write")).unwrap_or(input);
+        if !(input >= 0.0 && plausible(input))
+            || !(output >= 0.0 && plausible(output))
+            || !(cache_read >= 0.0 && plausible(cache_read))
+            || !(cache_write >= 0.0 && plausible(cache_write))
+            || (input == 0.0 && output == 0.0)
+        {
+            continue;
+        }
+        rows.push(json!({"id": id, "pricing": {
+            "prompt": input,
+            "completion": output,
+            "input_cache_read": cache_read,
+            "input_cache_write": cache_write,
+        }}));
+    }
+    rows.sort_by(|a, b| {
+        a["id"].as_str().unwrap_or("").cmp(b["id"].as_str().unwrap_or(""))
+    });
+    serde_json::to_string(&json!({"data": rows})).unwrap_or_default()
+}
+
 fn parse_litellm(doc: &Value) -> HashMap<String, Price> {
     let mut out = HashMap::new();
     let Some(obj) = doc.as_object() else { return out };
@@ -560,33 +797,67 @@ fn parse_modelsdev(doc: &Value) -> HashMap<String, Price> {
     out.into_iter().map(|(k, (p, _))| (k, p)).collect()
 }
 
+/// One feed `pricing`/`dated_pricing` price object: required
+/// input/output per-million plus optional cache and tier fields.
+/// `Ok(None)` — no input/output (a `pricing` entry to skip); `Err` —
+/// anything out of range (the entry must be dropped and counted).
+fn feed_card(entry: &Value) -> Result<Option<Price>, ()> {
+    let get = |key: &str| entry.get(key).and_then(Value::as_f64);
+    let (Some(input), Some(output)) =
+        (get("input_per_million"), get("output_per_million"))
+    else {
+        return Ok(None);
+    };
+    let cache_read = get("cache_read_per_million").unwrap_or(input);
+    let cache_write = get("cache_write_per_million").unwrap_or(input);
+    let plausible = |v: f64| v.is_finite() && (0.0..=MAX_SUPPLEMENT_PRICE).contains(&v);
+    // Optional tier fields let the feed carry a full card — an
+    // out-of-range optional value rejects the whole entry.
+    let opt = |key: &str| -> Result<Option<f64>, ()> {
+        match get(key) {
+            Some(v) if plausible(v) => Ok(Some(v)),
+            Some(_) => Err(()),
+            None => Ok(None),
+        }
+    };
+    let cache_write_1h = opt("cache_write_1h_per_million")?;
+    let input_200k = opt("input_above_200k_per_million")?;
+    let output_200k = opt("output_above_200k_per_million")?;
+    let cache_read_200k = opt("cache_read_above_200k_per_million")?;
+    let cache_write_200k = opt("cache_write_above_200k_per_million")?;
+    if ![input, output, cache_read, cache_write].into_iter().all(plausible) {
+        return Err(());
+    }
+    let mut p = Price::flat(input, output, cache_read, cache_write);
+    p.cache_write_1h = cache_write_1h;
+    p.input_200k = input_200k;
+    p.output_200k = output_200k;
+    p.cache_read_200k = cache_read_200k;
+    p.cache_write_200k = cache_write_200k;
+    Ok(Some(p))
+}
+
 fn apply_supplement(store: &mut Store, doc: &Value) {
     store.supplement.clear();
     store.fast_multipliers.clear();
     store.alias_rules.clear();
+    store.dated_pricing.clear();
     // The feed is trusted by URL alone yet outranks both catalogs in
     // resolve(), so every value it hands us is range-checked on the way
     // in; drops are counted and reported once at the end.
     let mut dropped = 0usize;
     if let Some(pricing) = doc.get("pricing").and_then(Value::as_object) {
         for (model, entry) in pricing {
-            let get = |key: &str| entry.get(key).and_then(Value::as_f64);
-            let (Some(input), Some(output)) =
-                (get("input_per_million"), get("output_per_million"))
-            else {
-                continue;
-            };
-            let cache_read = get("cache_read_per_million").unwrap_or(input);
-            let cache_write = get("cache_write_per_million").unwrap_or(input);
-            let plausible = |v: f64| v.is_finite() && (0.0..=MAX_SUPPLEMENT_PRICE).contains(&v);
-            if ![input, output, cache_read, cache_write].into_iter().all(plausible) {
-                dropped += 1;
-                continue;
+            match feed_card(entry) {
+                Ok(Some(p)) => {
+                    store.supplement.insert(model.clone(), p);
+                }
+                Ok(None) => continue,
+                Err(()) => {
+                    dropped += 1;
+                    continue;
+                }
             }
-            store.supplement.insert(
-                model.clone(),
-                Price::flat(input, output, cache_read, cache_write),
-            );
         }
     }
     correct_stale_supplement(&mut store.supplement);
@@ -653,6 +924,79 @@ fn apply_supplement(store: &mut Store, doc: &Value) {
             }
         }
     }
+    // `dated_pricing`: promo windows / price changes shipped by PR to the
+    // feed itself. Same entry shape as `pricing` plus optional `from`,
+    // `until` (RFC3339; inclusive/exclusive) and `exclude_prefixes`
+    // (case-insensitive, matched on the full slug). `model` is a bare
+    // name — matching compares the slug's last segment only, so gateway
+    // routes are handled with `exclude_prefixes`, not prefixed models.
+    // Anything malformed — bad dates, from >= until, missing input/output,
+    // implausible rates, a model that isn't a plain ASCII slug or
+    // contains `/` — drops that entry.
+    if let Some(entries) = doc.get("dated_pricing").and_then(Value::as_array) {
+        let parse_ms = |v: Option<&Value>| -> Option<Option<i64>> {
+            match v {
+                None | Some(Value::Null) => Some(None),
+                Some(Value::String(s)) => chrono::DateTime::parse_from_rfc3339(s)
+                    .ok()
+                    .map(|d| Some(d.timestamp_millis())),
+                _ => None,
+            }
+        };
+        for entry in entries.iter().take(256) {
+            let Some(model) = entry.get("model").and_then(Value::as_str) else {
+                dropped += 1;
+                continue;
+            };
+            // A bare name only — matching compares the slug's last
+            // segment, so a `/` in `model` could never match.
+            if model.is_empty()
+                || model.len() > 128
+                || model.contains('/')
+                || !model
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+            {
+                dropped += 1;
+                continue;
+            }
+            let Ok(Some(p)) = feed_card(entry) else {
+                dropped += 1;
+                continue;
+            };
+            let (Some(from), Some(until)) = (
+                parse_ms(entry.get("from")),
+                parse_ms(entry.get("until")),
+            )
+            else {
+                dropped += 1;
+                continue;
+            };
+            if let (Some(f), Some(u)) = (from, until) {
+                if f >= u {
+                    dropped += 1;
+                    continue;
+                }
+            }
+            let exclude_prefixes = entry
+                .get("exclude_prefixes")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(|p| p.to_lowercase())
+                        .collect()
+                })
+                .unwrap_or_default();
+            store.dated_pricing.push(DatedEntry {
+                model: model.to_lowercase(),
+                from,
+                until,
+                price: p,
+                exclude_prefixes,
+            });
+        }
+    }
     if dropped > 0 {
         eprintln!("[pane] pricing: supplement dropped {dropped} out-of-range entries");
     }
@@ -662,6 +1006,12 @@ fn ingest(store: &mut Store, source: &str, doc: &Value) {
     match source {
         "litellm" => store.litellm = parse_litellm(doc),
         "modelsdev" => store.modelsdev = parse_modelsdev(doc),
+        "openrouter" => {
+            let (e, seg, dashseg) = parse_openrouter(doc);
+            store.openrouter = e;
+            store.openrouter_seg = seg;
+            store.openrouter_dashseg = dashseg;
+        }
         "supplement" => apply_supplement(store, doc),
         _ => {}
     }
@@ -722,16 +1072,12 @@ pub fn ensure_fresh() {
 
     let mut state = load_state();
     let now = now_ms();
-    let refresh_ms = if UNPRICED_HINT.load(std::sync::atomic::Ordering::Relaxed) {
-        3_600_000 // unpriced models seen: look for catalog updates hourly
-    } else {
-        REFRESH_MS
-    };
+    let unpriced = UNPRICED_HINT.load(std::sync::atomic::Ordering::Relaxed);
     for (source, url) in SOURCES {
         let entry = state.get(source).cloned().unwrap_or_else(|| json!({}));
         let fetched_at = entry.get("fetchedAt").and_then(Value::as_i64).unwrap_or(0);
         let failed_at = entry.get("failedAt").and_then(Value::as_i64).unwrap_or(0);
-        let due = now - fetched_at > refresh_ms && now - failed_at > RETRY_MS;
+        let due = now - fetched_at > refresh_ms(source, unpriced) && now - failed_at > RETRY_MS;
         if !due {
             continue;
         }
@@ -782,6 +1128,24 @@ pub fn ensure_fresh() {
             }
             Ok((_, body, new_etag)) => match serde_json::from_str::<Value>(&body) {
                 Ok(doc) => {
+                    // OpenRouter serves no ETag and churns daily in
+                    // fields pane never reads — store the normalized
+                    // projection and treat identical prices like a 304:
+                    // no write, no ingest, no spend-cache stamp churn.
+                    let body = if source == "openrouter" {
+                        let compacted = compact_openrouter(&doc);
+                        let path = dir().join("openrouter.json");
+                        if std::fs::read_to_string(&path).ok().as_deref()
+                            == Some(compacted.as_str())
+                        {
+                            state[source] =
+                                json!({ "etag": new_etag, "fetchedAt": now, "failedAt": 0 });
+                            continue;
+                        }
+                        compacted
+                    } else {
+                        body
+                    };
                     let _ = std::fs::create_dir_all(dir());
                     let _ = std::fs::write(dir().join(format!("{source}.json")), &body);
                     ingest(&mut store().lock().unwrap(), source, &doc);
@@ -992,6 +1356,33 @@ fn resolve(s: &Store, model: &str, depth: u8) -> Option<Price> {
     // always wins the moment one ships. Keep this list tiny and sourced.
     if let Some(p) = builtin_price(&canonical) {
         return Some(p);
+    }
+    // OpenRouter lists brand-new models the same day they launch, but its
+    // cards are flat — no long-context or 1h-cache tiers — so it sits
+    // BELOW the hand-verified baked table: baked cards only retire when
+    // LiteLLM or models.dev learn the model. Match exact ids, then the
+    // last path segment, then a dot-normalized segment — each index
+    // already holds the lexicographically smallest listing per tail.
+    let or_key = canonical.to_lowercase();
+    if let Some(p) = s
+        .openrouter
+        .get(&or_key)
+        .or_else(|| {
+            s.openrouter_seg
+                .get(or_key.rsplit('/').next().unwrap_or(or_key.as_str()))
+        })
+        .or_else(|| {
+            s.openrouter_dashseg.get(
+                or_key
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(or_key.as_str())
+                    .replace('.', "-")
+                    .as_str(),
+            )
+        })
+    {
+        return Some(*p);
     }
     // DeepSeek ships dated snapshots ("deepseek-v4-pro-0813"): when no
     // source knows the dated form, retry the base slug through the WHOLE
@@ -1352,11 +1743,18 @@ fn builtin_price(canonical: &str) -> Option<Price> {
         // tier): $4.00 in / $20.00 out / $0.20 cache read, matching
         // Google's standard post-intro list ($4/$20, cached input 95%
         // off). Google's direct intro promo is $2/$10/$0.10 through
-        // 2026-11-30 PT — dated_card()/argon_intro_card() overlay it for
+        // 2026-11-30 PT — dated_card()/gemini4_intro_card() overlay it for
         // bare routes, while AIHubMix traffic is scoped to this spelling
         // (aihubmix_scoped) so the gateway always bills $4/$20. Cache
         // write is unpublished, so writes bill at input.
         "gemini-4-argon" => Some(Price::flat(4.0, 20.0, 0.20, 4.0)),
+        // Gemini 4 Carbon — Google's standard list card ($4 / $20 / $0.20
+        // cache read from 2026-12-01; cloud.google.com/model-garden/
+        // pricing). A base card so lookup() answers before any catalog
+        // learns Carbon; dated_card()/gemini4_intro_card() overlay the
+        // $2/$10/$0.10 intro rate before the cutoff. Cache write is
+        // unpublished, so writes bill at input.
+        "gemini-4-carbon" => Some(Price::flat(4.0, 20.0, 0.20, 4.0)),
         // Cognition SWE / Penguin — LiteLLM Cognition cost map
         // (docs.litellm.ai/docs/providers/cognition) and Devin's
         // in-app rate card: $0.50 / $2.50 / $0.20 cache read. Cache
@@ -1785,10 +2183,10 @@ mod tests {
     }
 
     #[test]
-    fn argon_intro_card_is_dated_and_route_scoped() {
+    fn gemini4_intro_card_is_dated_and_route_scoped() {
         let ms = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis();
         for slug in ["gemini-4-argon", "google/gemini-4-argon", "gemini-4-argon-high"] {
-            let p = super::argon_intro_card(slug, ms("2026-10-14T12:00:00Z"))
+            let p = super::gemini4_intro_card(slug, ms("2026-10-14T12:00:00Z"))
                 .unwrap_or_else(|| panic!("{slug} should intro-price"));
             assert_eq!(
                 (p.input, p.output, p.cache_read, p.cache_write),
@@ -1797,14 +2195,14 @@ mod tests {
             );
         }
         // AIHubMix routes keep the gateway card even during the promo.
-        assert!(super::argon_intro_card("aihubmix/gemini-4-argon", ms("2026-10-14T12:00:00Z")).is_none());
+        assert!(super::gemini4_intro_card("aihubmix/gemini-4-argon", ms("2026-10-14T12:00:00Z")).is_none());
         // The promo ends 2026-11-30 PT = 2026-12-01T08:00Z.
-        assert!(super::argon_intro_card("gemini-4-argon", ms("2026-12-01T07:59:59Z")).is_some());
-        assert!(super::argon_intro_card("gemini-4-argon", ms("2026-12-01T08:00:00Z")).is_none());
-        assert!(super::argon_intro_card("gemini-4-argon", ms("2026-12-05T00:00:00Z")).is_none());
+        assert!(super::gemini4_intro_card("gemini-4-argon", ms("2026-12-01T07:59:59Z")).is_some());
+        assert!(super::gemini4_intro_card("gemini-4-argon", ms("2026-12-01T08:00:00Z")).is_none());
+        assert!(super::gemini4_intro_card("gemini-4-argon", ms("2026-12-05T00:00:00Z")).is_none());
         // Other models never take the intro card.
-        assert!(super::argon_intro_card("gemini-4-flash", ms("2026-10-14T12:00:00Z")).is_none());
-        assert!(super::argon_intro_card("gpt-6.1-sol", ms("2026-10-14T12:00:00Z")).is_none());
+        assert!(super::gemini4_intro_card("gemini-4-flash", ms("2026-10-14T12:00:00Z")).is_none());
+        assert!(super::gemini4_intro_card("gpt-6.1-sol", ms("2026-10-14T12:00:00Z")).is_none());
         // dated_card exposes the override to the spend paths on both
         // sides of the promo: intro inside the window, the enforced
         // list card after it.
@@ -1815,12 +2213,12 @@ mod tests {
     }
 
     #[test]
-    fn argon_list_card_is_dated_and_route_scoped() {
+    fn gemini4_list_card_is_dated_and_route_scoped() {
         let ms = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis();
         // From the PT cutoff on the list card is enforced — the catalogs
         // still carry the intro rate then, so this must not defer to them.
         for slug in ["gemini-4-argon", "google/gemini-4-argon", "gemini-4-argon-high"] {
-            let p = super::argon_list_card(slug, ms("2026-12-01T08:00:00Z"))
+            let p = super::gemini4_list_card(slug, ms("2026-12-01T08:00:00Z"))
                 .unwrap_or_else(|| panic!("{slug} should list-price"));
             assert_eq!(
                 (p.input, p.output, p.cache_read, p.cache_write),
@@ -1829,22 +2227,31 @@ mod tests {
             );
         }
         // Inside the promo the intro card applies instead.
-        assert!(super::argon_list_card("gemini-4-argon", ms("2026-12-01T07:59:59Z")).is_none());
+        assert!(super::gemini4_list_card("gemini-4-argon", ms("2026-12-01T07:59:59Z")).is_none());
         // AIHubMix keeps its flat gateway card year-round.
-        assert!(super::argon_list_card("aihubmix/gemini-4-argon", ms("2026-12-05T00:00:00Z")).is_none());
+        assert!(super::gemini4_list_card("aihubmix/gemini-4-argon", ms("2026-12-05T00:00:00Z")).is_none());
         // Other models never take it.
-        assert!(super::argon_list_card("gemini-4-flash", ms("2026-12-05T00:00:00Z")).is_none());
+        assert!(super::gemini4_list_card("gemini-4-flash", ms("2026-12-05T00:00:00Z")).is_none());
     }
 
+    /// Devin bills Argon and Carbon at Google's price — no separate
+    /// Devin card exists; turns price via dated_card's Google overlay.
+    /// (devin_cost asserts the same numbers end-to-end in spend.rs.)
     #[test]
-    fn devin_argon_card_is_dated_and_model_scoped() {
+    fn gemini4_cards_cover_argon_and_carbon_by_date() {
         let ms = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis();
-        let p = super::devin_argon_card("gemini-4-argon", ms("2026-10-14T12:00:00Z")).unwrap();
-        assert_eq!((p.input, p.output, p.cache_read, p.cache_write), (1.0, 5.0, 0.05, 1.0));
-        // Promo ends 2026-11-30 PT = 2026-12-01T08:00Z.
-        assert!(super::devin_argon_card("gemini-4-argon", ms("2026-12-01T07:59:59Z")).is_some());
-        assert!(super::devin_argon_card("gemini-4-argon", ms("2026-12-01T08:00:00Z")).is_none());
-        assert!(super::devin_argon_card("gpt-6.1-sol", ms("2026-10-14T12:00:00Z")).is_none());
+        for m in ["gemini-4-argon", "gemini-4-carbon"] {
+            let p = super::gemini4_intro_card(m, ms("2026-10-14T12:00:00Z"))
+                .unwrap_or_else(|| panic!("{m}"));
+            assert_eq!((p.input, p.output, p.cache_read), (2.0, 10.0, 0.1), "{m}");
+            // Promo ends 2026-11-30 PT = 2026-12-01T08:00Z.
+            assert!(super::gemini4_intro_card(m, ms("2026-12-01T07:59:59Z")).is_some());
+            assert!(super::gemini4_intro_card(m, ms("2026-12-01T08:00:00Z")).is_none());
+            let p = super::gemini4_list_card(m, ms("2026-12-05T00:00:00Z"))
+                .unwrap_or_else(|| panic!("{m}"));
+            assert_eq!((p.input, p.output, p.cache_read), (4.0, 20.0, 0.2), "{m}");
+        }
+        assert!(super::gemini4_intro_card("gpt-6.1-sol", ms("2026-10-14T12:00:00Z")).is_none());
     }
 
     /// `hy4` prices on the AIHubMix card only when Claude Code logged it
@@ -1961,12 +2368,12 @@ mod tests {
         let ms = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis();
         let mut store = super::Store::default();
         // Default multiplier (2.0): the -fast slug's intro card scales.
-        let p = super::argon_intro_card_in(&store, "gemini-4-argon-fast", ms("2026-10-14T12:00:00Z"))
+        let p = super::gemini4_intro_card_in(&store, "gemini-4-argon-fast", ms("2026-10-14T12:00:00Z"))
             .expect("argon-fast should intro-price");
         assert_eq!((p.input, p.output, p.cache_read, p.cache_write), (4.0, 20.0, 0.20, 4.0));
         // A published 1.5 multiplier scales every rate.
         store.fast_multipliers.insert("gemini-4-argon".into(), 1.5);
-        let p = super::argon_intro_card_in(&store, "gemini-4-argon-fast", ms("2026-10-14T12:00:00Z"))
+        let p = super::gemini4_intro_card_in(&store, "gemini-4-argon-fast", ms("2026-10-14T12:00:00Z"))
             .expect("argon-fast should intro-price");
         for (got, want) in [
             (p.input, 3.0),
@@ -1977,7 +2384,7 @@ mod tests {
             assert!((got - want).abs() < 1e-9, "{got} != {want}");
         }
         // Non-fast Argon is unscaled.
-        let p = super::argon_intro_card_in(&store, "gemini-4-argon", ms("2026-10-14T12:00:00Z"))
+        let p = super::gemini4_intro_card_in(&store, "gemini-4-argon", ms("2026-10-14T12:00:00Z"))
             .expect("argon should intro-price");
         assert_eq!((p.input, p.output, p.cache_read, p.cache_write), (2.0, 10.0, 0.10, 2.0));
     }
@@ -2479,4 +2886,348 @@ mod tests {
             assert_eq!((p.input, p.output), (16.0, 80.0), "{m}");
         }
     }
+
+    // ---------- OpenRouter source ----------
+
+    #[test]
+    fn parse_openrouter_rates_strings_and_numbers() {
+        let doc = serde_json::json!({"data": [
+            {"id": "google/gemini-4-carbon", "pricing": {
+                "prompt": "0.000002", "completion": "0.00001",
+                "input_cache_read": "0.0000001", "input_cache_write": "0.0000001875"}},
+            {"id": "anthropic/claude-fable-5.2", "pricing": {
+                "prompt": 0.000008, "completion": 0.00004,
+                "input_cache_read": 0.0000002, "input_cache_write": 0.00001}},
+            {"id": "openai/miss-cache", "pricing": {
+                "prompt": "0.000001", "completion": "0.000002"}},
+        ]});
+        let (exact, seg, _) = super::parse_openrouter(&doc);
+        let c = &exact["google/gemini-4-carbon"];
+        assert_eq!((c.input, c.output, c.cache_write), (2.0, 10.0, 0.1875));
+        assert!((c.cache_read - 0.1).abs() < 1e-9);
+        let f = &exact["anthropic/claude-fable-5.2"];
+        assert_eq!((f.input, f.output, f.cache_write), (8.0, 40.0, 10.0));
+        assert!((f.cache_read - 0.2).abs() < 1e-9);
+        // Missing cache fields fall back to input.
+        let m = &exact["openai/miss-cache"];
+        assert_eq!((m.cache_read, m.cache_write), (1.0, 1.0));
+        assert_eq!(seg.len(), 3);
+    }
+
+    #[test]
+    fn parse_openrouter_skips_variants_meta_negative_and_free() {
+        let doc = serde_json::json!({"data": [
+            {"id": "x/a:free", "pricing": {"prompt": "0", "completion": "0"}},
+            {"id": "x/a:batch", "pricing": {"prompt": "0.000001", "completion": "0.000002"}},
+            {"id": "openrouter/auto", "pricing": {"prompt": "-1", "completion": "-1"}},
+            {"id": "x/negative", "pricing": {"prompt": "-0.000001", "completion": "0.000002"}},
+            {"id": "x/zero", "pricing": {"prompt": "0", "completion": "0"}},
+            {"id": "x/implausible", "pricing": {"prompt": "99999", "completion": "0.1"}},
+        ]});
+        let (exact, seg, dashseg) = super::parse_openrouter(&doc);
+        assert!(exact.is_empty() && seg.is_empty() && dashseg.is_empty());
+    }
+
+    #[test]
+    fn openrouter_resolves_segment_and_dot_spellings() {
+        let mut s = super::Store::default();
+        let doc = serde_json::json!({"data": [
+            {"id": "acme/brand-new-model", "pricing": {
+                "prompt": "0.000002", "completion": "0.00001"}},
+            {"id": "acme/foo-1.5", "pricing": {
+                "prompt": "0.000008", "completion": "0.00004"}},
+            {"id": "zzz/brand-new-model", "pricing": {
+                "prompt": "0.000007", "completion": "0.00003"}},
+        ]});
+        super::ingest(&mut s, "openrouter", &doc);
+        // Segment match across vendor prefixes; smallest id (acme/ <
+        // zzz/) wins the tie deterministically.
+        let p = super::resolve(&s, "brand-new-model", 0).unwrap();
+        assert_eq!((p.input, p.output), (2.0, 10.0));
+        let p = super::resolve(&s, "other/brand-new-model", 0).unwrap();
+        assert_eq!((p.input, p.output), (2.0, 10.0));
+        // A model with a baked arm (Carbon) keeps the baked card.
+        let mut s2 = super::Store::default();
+        super::ingest(&mut s2, "openrouter", &serde_json::json!({"data": [
+            {"id": "google/gemini-4-carbon", "pricing": {
+                "prompt": "0.000002", "completion": "0.00001"}},
+        ]}));
+        assert_eq!(super::resolve(&s2, "gemini-4-carbon", 0).unwrap().input, 4.0);
+        // Dot/dash: `foo-1-5` finds acme/foo-1.5 via the dash index.
+        let p = super::resolve(&s, "foo-1-5", 0).unwrap();
+        assert_eq!((p.input, p.output), (8.0, 40.0));
+        // But a hand-verified baked card outranks OpenRouter — flat
+        // catalog cards lack the 1h tier the baked fable card carries.
+        let p = super::resolve(&s, "claude-fable-5-2", 0).unwrap();
+        assert_eq!(p.cache_write_1h, Some(16.0));
+    }
+
+    #[test]
+    fn openrouter_loses_to_litellm_and_modelsdev() {
+        let mut s = super::Store::default();
+        s.litellm.insert("claude-fable-5-2".into(), super::Price::flat(9.0, 45.0, 0.3, 11.0));
+        s.modelsdev.insert("gemini-4-carbon".into(), super::Price::flat(5.0, 25.0, 0.5, 6.0));
+        let doc = serde_json::json!({"data": [
+            {"id": "acme/foo-1.5", "pricing": {
+                "prompt": "0.000008", "completion": "0.00004"}},
+            {"id": "google/gemini-4-carbon", "pricing": {
+                "prompt": "0.000002", "completion": "0.00001"}},
+        ]});
+        super::ingest(&mut s, "openrouter", &doc);
+        assert_eq!(super::resolve(&s, "claude-fable-5-2", 0).unwrap().input, 9.0);
+        assert_eq!(super::resolve(&s, "gemini-4-carbon", 0).unwrap().input, 5.0);
+    }
+
+    // ---------- supplement optional fields ----------
+
+    #[test]
+    fn supplement_optional_tiers_fill_the_card() {
+        let mut s = super::Store::default();
+        let doc = serde_json::json!({"pricing": {
+            "x/model": {"input_per_million": 1, "output_per_million": 2,
+                "cache_read_per_million": 0.1, "cache_write_per_million": 1.5,
+                "cache_write_1h_per_million": 3,
+                "input_above_200k_per_million": 2,
+                "output_above_200k_per_million": 4,
+                "cache_read_above_200k_per_million": 0.2,
+                "cache_write_above_200k_per_million": 3},
+            "x/bad": {"input_per_million": 1, "output_per_million": 2,
+                "input_above_200k_per_million": 99999},
+        }});
+        super::apply_supplement(&mut s, &doc);
+        let p = &s.supplement["x/model"];
+        assert_eq!(p.cache_write_1h, Some(3.0));
+        assert_eq!(p.input_200k, Some(2.0));
+        assert_eq!(p.output_200k, Some(4.0));
+        assert_eq!(p.cache_read_200k, Some(0.2));
+        assert_eq!(p.cache_write_200k, Some(3.0));
+        assert!(!s.supplement.contains_key("x/bad"));
+    }
+
+    // ---------- dated_pricing feed entries ----------
+
+    fn dated_doc() -> serde_json::Value {
+        serde_json::json!({"dated_pricing": [
+            {"model": "gemini-4-carbon", "from": "2026-12-01T08:00:00Z",
+                "until": null, "input_per_million": 4, "output_per_million": 20,
+                "cache_read_per_million": 0.2, "cache_write_per_million": 4,
+                "exclude_prefixes": ["aihubmix/"]},
+            {"model": "promo-model", "from": "2026-11-01T00:00:00Z",
+                "until": "2026-12-01T00:00:00Z",
+                "input_per_million": 1, "output_per_million": 5},
+        ]})
+    }
+
+    #[test]
+    fn dated_pricing_window_prefix_and_suffix_rules() {
+        let ms = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis();
+        let mut s = super::Store::default();
+        super::apply_supplement(&mut s, &dated_doc());
+        // Before/inside/after the window (until is exclusive).
+        assert!(super::feed_dated_card(&s, "gemini-4-carbon", ms("2026-11-30T12:00:00Z")).is_none());
+        let p = super::feed_dated_card(&s, "gemini-4-carbon", ms("2026-12-01T08:00:00Z")).unwrap();
+        assert_eq!((p.input, p.output, p.cache_read), (4.0, 20.0, 0.2));
+        assert_eq!(
+            super::feed_dated_card(&s, "promo-model", ms("2026-11-15T00:00:00Z")).unwrap().input,
+            1.0
+        );
+        assert!(super::feed_dated_card(&s, "promo-model", ms("2026-12-01T00:00:00Z")).is_none());
+        // Open-ended entry stays live.
+        assert!(super::feed_dated_card(&s, "gemini-4-carbon", ms("2030-01-01T00:00:00Z")).is_some());
+        // exclude_prefixes keeps the gateway spelling off the card.
+        assert!(super::feed_dated_card(&s, "aihubmix/gemini-4-carbon", ms("2027-01-01T00:00:00Z")).is_none());
+        // Effort tails peel to the entry's model…
+        assert!(super::feed_dated_card(&s, "promo-model-xhigh-high", ms("2026-11-15T00:00:00Z")).is_some());
+        // …but a different stem must NOT match.
+        assert!(super::feed_dated_card(&s, "gemini-4-carbon-cyber-permissive", ms("2027-01-01T00:00:00Z")).is_none());
+        // -fast scales by fast_tier_mult (2x default).
+        let p = super::feed_dated_card(&s, "promo-model-fast", ms("2026-11-15T00:00:00Z")).unwrap();
+        assert_eq!((p.input, p.output), (2.0, 10.0));
+    }
+
+    #[test]
+    fn dated_pricing_invalid_entries_drop() {
+        let mut s = super::Store::default();
+        let doc = serde_json::json!({"dated_pricing": [
+            {"model": "bad date", "input_per_million": 1, "output_per_million": 2},
+            {"model": "ok", "from": "2026-12-01T00:00:00Z", "until": "2026-11-01T00:00:00Z",
+                "input_per_million": 1, "output_per_million": 2},
+            {"model": "ok", "input_per_million": 1},
+            {"model": "ok", "input_per_million": 99999, "output_per_million": 2},
+            {"model": "vendor/has-slash", "input_per_million": 1, "output_per_million": 2},
+            {"model": "fine", "input_per_million": 1, "output_per_million": 2},
+        ]});
+        super::apply_supplement(&mut s, &doc);
+        assert_eq!(s.dated_pricing.len(), 1);
+        assert_eq!(s.dated_pricing[0].model, "fine");
+    }
+
+    #[test]
+    fn dated_feed_fingerprint_tracks_applicable_entries() {
+        let mut s = super::Store::default();
+        assert_eq!(super::dated_feed_fingerprint_in(&s, "gemini-4-carbon"), "");
+        super::apply_supplement(&mut s, &dated_doc());
+        let fp = super::dated_feed_fingerprint_in(&s, "gemini-4-carbon-high");
+        assert!(!fp.is_empty());
+        // Excluded route and unrelated models see no entry.
+        assert_eq!(super::dated_feed_fingerprint_in(&s, "aihubmix/gemini-4-carbon"), "");
+        assert_eq!(super::dated_feed_fingerprint_in(&s, "gemini-4-argon"), "");
+        // A fast tier folds its multiplier in.
+        assert!(super::dated_feed_fingerprint_in(&s, "promo-model-fast").contains("fast=2"));
+        // Editing the window or the rate changes the fingerprint.
+        let mut doc = dated_doc();
+        doc["dated_pricing"][0]["input_per_million"] = serde_json::json!(5);
+        super::apply_supplement(&mut s, &doc);
+        assert_ne!(super::dated_feed_fingerprint_in(&s, "gemini-4-carbon"), fp);
+        let mut doc = dated_doc();
+        doc["dated_pricing"][0]["from"] = serde_json::json!("2026-12-02T08:00:00Z");
+        super::apply_supplement(&mut s, &doc);
+        assert_ne!(super::dated_feed_fingerprint_in(&s, "gemini-4-carbon"), fp);
+    }
+
+    #[test]
+    fn dated_pricing_overrides_the_builtin_dated_card() {
+        let ms = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis();
+        let mut s = super::Store::default();
+        let doc = serde_json::json!({"dated_pricing": [
+            {"model": "gemini-4-argon", "input_per_million": 3, "output_per_million": 15},
+        ]});
+        super::apply_supplement(&mut s, &doc);
+        // Feed entry (open window) outranks the baked Argon intro card.
+        let p = super::feed_dated_card(&s, "gemini-4-argon", ms("2026-10-14T12:00:00Z")).unwrap();
+        assert_eq!((p.input, p.output), (3.0, 15.0));
+    }
+
+    #[test]
+    fn shipped_supplement_feed_parses_clean() {
+        // The checked-in feed must ingest with zero dropped entries —
+        // every pricing key, multiplier, alias rule and dated entry
+        // survives validation.
+        let doc: serde_json::Value =
+            serde_json::from_str(include_str!("../../pricing/supplement.json")).unwrap();
+        let mut s = super::Store::default();
+        super::apply_supplement(&mut s, &doc);
+        assert_eq!(s.supplement.len(), doc["pricing"].as_object().unwrap().len());
+        assert_eq!(
+            s.fast_multipliers.len(),
+            doc["fast_multipliers"].as_object().unwrap().len()
+        );
+        assert_eq!(
+            s.alias_rules.len(),
+            doc["alias_rules"].as_array().unwrap().len()
+        );
+        assert!(s.dated_pricing.is_empty());
+    }
+
+    // ---------- Gemini 4 Carbon dated card ----------
+
+    #[test]
+    fn gemini4_carbon_intro_and_list_cards() {
+        let ms = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis();
+        // AIHubMix lists Carbon at Google's rate, so its spelling follows
+        // the same dated card.
+        for m in [
+            "gemini-4-carbon",
+            "google/gemini-4-carbon",
+            "gemini-4-carbon-high",
+            "aihubmix/gemini-4-carbon",
+        ] {
+            let p = super::gemini4_intro_card(m, ms("2026-10-14T12:00:00Z"))
+                .unwrap_or_else(|| panic!("{m}"));
+            assert_eq!((p.input, p.output, p.cache_read), (2.0, 10.0, 0.1), "{m}");
+            let p = super::gemini4_list_card(m, ms("2027-01-01T00:00:00Z"))
+                .unwrap_or_else(|| panic!("{m}"));
+            assert_eq!((p.input, p.output, p.cache_read), (4.0, 20.0, 0.2), "{m}");
+        }
+        // AIHubMix Argon stays on the gateway's own flat card.
+        assert!(super::gemini4_intro_card("aihubmix/gemini-4-argon", ms("2026-10-14T12:00:00Z")).is_none());
+        assert!(super::gemini4_list_card("aihubmix/gemini-4-argon", ms("2027-01-01T00:00:00Z")).is_none());
+        // lookup() answers for Carbon even before any catalog lists it —
+        // the base card, which dated_card() overlays before the cutoff.
+        let store = super::Store::default();
+        for m in ["gemini-4-carbon", "google/gemini-4-carbon", "aihubmix/gemini-4-carbon"] {
+            let p = super::resolve(&store, m, 0).unwrap_or_else(|| panic!("{m}"));
+            assert_eq!((p.input, p.output, p.cache_read), (4.0, 20.0, 0.2), "{m}");
+        }
+        // cyber-permissive was never on the promo: no intro, list after.
+        assert!(super::gemini4_intro_card("gemini-4-carbon-cyber-permissive", ms("2026-10-14T12:00:00Z")).is_none());
+        assert!(super::gemini4_intro_card("gemini-4-argon-cyber-permissive", ms("2026-10-14T12:00:00Z")).is_none());
+        assert!(super::gemini4_list_card("gemini-4-carbon-cyber-permissive", ms("2027-01-01T00:00:00Z")).is_some());
+    }
+
+    #[test]
+    fn compact_openrouter_normalizes_and_stabilizes() {
+        let doc = serde_json::json!({"data": [
+            {"id": "zzz/b-1", "pricing": {"prompt": "0.000002", "completion": "0.00001"},
+                "description": "churns daily", "context_length": 1000000},
+            {"id": "a/a-1", "pricing": {"prompt": 0.000001, "completion": 0.000002},
+                "description": "other", "per_request_limits": {}},
+            {"id": "x/a:free", "pricing": {"prompt": "0", "completion": "0"}},
+            {"id": "openrouter/auto", "pricing": {"prompt": "-1", "completion": "-1"}},
+        ]});
+        let compacted: serde_json::Value =
+            serde_json::from_str(&super::compact_openrouter(&doc)).unwrap();
+        // Same three maps the raw doc parses to — compaction loses
+        // nothing parse_openrouter consumes.
+        assert_eq!(
+            super::parse_openrouter(&compacted),
+            super::parse_openrouter(&doc)
+        );
+        let rows = compacted["data"].as_array().unwrap();
+        // Sorted by id, only the four price fields, rejected ids gone.
+        let ids: Vec<&str> = rows.iter().filter_map(|r| r["id"].as_str()).collect();
+        assert_eq!(ids, ["a/a-1", "zzz/b-1"]);
+        assert_eq!(
+            rows[0]["pricing"].as_object().unwrap().keys().collect::<Vec<_>>(),
+            vec!["completion", "input_cache_read", "input_cache_write", "prompt"]
+        );
+        assert!(rows[0].get("description").is_none());
+        // Non-price churn compacts to identical bytes.
+        let mut churned = doc.clone();
+        churned["data"][0]["description"] = serde_json::json!("brand new text");
+        churned["data"][0]["supported_parameters"] = serde_json::json!(["tools"]);
+        assert_eq!(super::compact_openrouter(&doc), super::compact_openrouter(&churned));
+        // A price move does change the bytes.
+        let mut moved = doc.clone();
+        moved["data"][0]["pricing"]["prompt"] = serde_json::json!("0.000003");
+        assert_ne!(super::compact_openrouter(&doc), super::compact_openrouter(&moved));
+    }
+
+    #[test]
+    fn shipped_alias_rule_gemini3_pro_matches_all_forms() {
+        let doc: serde_json::Value =
+            serde_json::from_str(include_str!("../../pricing/supplement.json")).unwrap();
+        let rule = doc["alias_rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["canonical"].as_str() == Some("gemini-3-pro-preview"))
+            .unwrap();
+        let re = regex::Regex::new(rule["pattern"].as_str().unwrap()).unwrap();
+        for m in [
+            "gemini-3-pro-preview",
+            "gemini-3-pro-preview-high",
+            "gemini-3-pro-preview-preview",
+            "gemini-3-pro-preview-high-preview",
+            "gemini-3-pro-high",
+            "gemini-3-pro-low-preview",
+        ] {
+            assert!(re.is_match(m), "{m}");
+        }
+        for m in ["gemini-3-pro", "gemini-3-pro-ultra", "gemini-3-pro-preview-ultra"] {
+            assert!(!re.is_match(m), "{m}");
+        }
+    }
+
+    // ---------- per-source refresh ----------
+
+    #[test]
+    fn refresh_intervals_by_source() {
+        assert_eq!(super::refresh_ms("supplement", false), 6 * 3600 * 1000);
+        assert_eq!(super::refresh_ms("litellm", false), 24 * 3600 * 1000);
+        assert_eq!(super::refresh_ms("openrouter", false), 24 * 3600 * 1000);
+        assert_eq!(super::refresh_ms("supplement", true), 3_600_000);
+        assert_eq!(super::refresh_ms("openrouter", true), 3_600_000);
+    }
+
 }

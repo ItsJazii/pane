@@ -142,7 +142,7 @@ Pane читает эти журналы (Claude, Codex, Grok, OpenCode, Devin CL
 Antigravity, Cursor CSV, MiniMax CLI, Kimi Code, Qwen Code, агент pi
 и его форки oh-my-pi / Step Code, настольное приложение Hermes),
 оценивает каждый запрос по актуальным ценам соответствующей модели
-(LiteLLM / models.dev; обновление ежедневно, а при наличии неизвестных
+(LiteLLM / models.dev / OpenRouter, плюс собственный список цен Pane; обновление ежедневно, а при наличии неизвестных
 моделей — ежечасно, чтобы цены новых моделей появлялись в течение часа;
 для моделей, которых ещё нет в каталогах, например Claude Fable 5.2,
 используются встроенные в Pane официальные цены)
@@ -318,8 +318,9 @@ Pane — независимая реализация для Windows с нуля,
   остаётся компактным.
 - [prasen.dev](https://www.prasen.dev/) — исходная техника линз «жидкого стекла»
   на основе SDF, из которой перенесён эффект преломления интерфейса.
-- [LiteLLM](https://github.com/BerriAI/litellm) и
-  [models.dev](https://models.dev/) — открытые каталоги цен моделей,
+- [LiteLLM](https://github.com/BerriAI/litellm),
+  [models.dev](https://models.dev/) и
+  [OpenRouter](https://openrouter.ai/) — открытые каталоги цен моделей,
   на которых основан расчёт расходов.
 - [shadcn/ui](https://ui.shadcn.com/) — дизайн-токены палитры zinc,
   на которых построена тема.

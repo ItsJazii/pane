@@ -88,7 +88,7 @@ Pane 是一款轻量的 Tauri v2 应用：Rust 核心负责数据处理，原生
 
 **3. 预测额度消耗。** 对于有重置周期的指标，Pane 会推算：按照当前速度使用，额度能否撑到重置？情况变差时，进度条会变为琥珀色或红色。可选的 Windows 通知会在每个重置周期提示“即将用完”“将会用完”，或在每周额度重置时提示“额度已重置”。
 
-**4. 统计花费。** 你的 CLI 已在本地记录每次请求。Pane 扫描这些日志（Claude、Codex、Grok、OpenCode、Devin CLI、Droid CLI、Antigravity、Cursor CSV、MiniMax CLI、Kimi Code、Qwen Code、pi 编程代理及其 oh-my-pi / Step Code 分支、Hermes 桌面应用），按实时模型单价计费（LiteLLM / models.dev 每天更新；存在未知模型时每小时更新，让新模型的价格能在一小时内被识别；目录尚未收录的模型（如 Claude Fable 5.2）使用 Pane 内置的官方公布价格），绘制今天、昨天和最近 30 天的花费圆环图，并按模型拆分。点击圆环可在金额和 Token 数之间切换。对于固定价格的套餐，这里显示的是按 API 价格计算的*等效费用*，能直观看出订阅的价值。没有公开价格的模型仍会计入实测 Token 数，但不会猜测金额；服务商花费行的 ⚠ 表示实际费用可能高于显示值。
+**4. 统计花费。** 你的 CLI 已在本地记录每次请求。Pane 扫描这些日志（Claude、Codex、Grok、OpenCode、Devin CLI、Droid CLI、Antigravity、Cursor CSV、MiniMax CLI、Kimi Code、Qwen Code、pi 编程代理及其 oh-my-pi / Step Code 分支、Hermes 桌面应用），按实时模型单价计费（LiteLLM / models.dev / OpenRouter 与 Pane 自有价格表每天更新；存在未知模型时每小时更新，让新模型的价格能在一小时内被识别；目录尚未收录的模型（如 Claude Fable 5.2）使用 Pane 内置的官方公布价格），绘制今天、昨天和最近 30 天的花费圆环图，并按模型拆分。点击圆环可在金额和 Token 数之间切换。对于固定价格的套餐，这里显示的是按 API 价格计算的*等效费用*，能直观看出订阅的价值。没有公开价格的模型仍会计入实测 Token 数，但不会猜测金额；服务商花费行的 ⚠ 表示实际费用可能高于显示值。
 
 **5. 数据留在本机。** 上述处理都在你的电脑上完成。无需注册账户，额度、花费和服务商数据不会离开电脑。Pane 只会报告两类匿名的自身信息：更新检查（按国家或地区统计，不存储 IP），以及每日一次的匿名统计（始终开启，应用内没有关闭开关；包括随机 ID、版本、已启用的服务商及请求成功/失败次数，不包含额度数值或错误文本）。完整约定请参阅[隐私与安全](#隐私与安全)。
 
@@ -166,7 +166,7 @@ Pane 的诞生离不开 **[Robin Ebers](https://github.com/robinebers)** 开发�
 
 - [Tauri](https://tauri.app/)：让 Pane 保持轻量的应用框架。
 - [prasen.dev](https://www.prasen.dev/)：界面折射效果移植自其最初设计的 SDF 液态玻璃透镜技术。
-- [LiteLLM](https://github.com/BerriAI/litellm) 和 [models.dev](https://models.dev/)：为花费统计提供模型价格目录。
+- [LiteLLM](https://github.com/BerriAI/litellm)、[models.dev](https://models.dev/) 和 [OpenRouter](https://openrouter.ai/)：为花费统计提供模型价格目录。
 - [shadcn/ui](https://ui.shadcn.com/)：主题使用的 zinc 设计变量来源。
 
 Pane 与 Robin Ebers 或所列 AI 服务商不存在关联，也未获得他们的认可。服务商名称和标识仅用于识别对应服务。
