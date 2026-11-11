@@ -9,6 +9,12 @@
   When the logged model can't be priced, Pane now prices the row by the
   model Claude Code asked for.
 
+### Security
+- Updated the auto-updater and the Tauri app framework to fix known
+  security advisories in the zip library they include. Pane's updates
+  are a signed installer rather than a zip file, so this was a
+  precaution.
+
 ## 0.5.2 — 2026-11-11
 
 ### Added
