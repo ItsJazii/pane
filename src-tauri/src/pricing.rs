@@ -1498,43 +1498,36 @@ fn resolve(s: &Store, model: &str, depth: u8) -> Option<Price> {
     // LiteLLM or models.dev learn the model. Match exact ids, then the
     // last path segment, then a dot-normalized segment — each index
     // already holds the lexicographically smallest listing per tail.
+    //
+    // A row AIHubMix billed (`aihubmix/<id>`) that nothing above knows
+    // also has the gateway's own published card. It is the last
+    // real-rate source — below the baked AIHubMix arms (which carry what
+    // the flat catalog can't) and below OpenRouter — so a price that
+    // already resolved never moves. One exception: a vendor-qualified id
+    // (`aihubmix/beta/novel`) that the gateway lists exactly outranks
+    // OpenRouter's vendor-agnostic segment matches, which could
+    // otherwise hand it another vendor's `novel`.
     let or_key = canonical.to_lowercase();
-    if let Some(p) = s
-        .openrouter
-        .get(&or_key)
-        .or_else(|| {
-            s.openrouter_seg
-                .get(or_key.rsplit('/').next().unwrap_or(or_key.as_str()))
-        })
-        .or_else(|| {
-            s.openrouter_dashseg.get(
-                or_key
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(or_key.as_str())
-                    .replace('.', "-")
-                    .as_str(),
-            )
-        })
-    {
-        return Some(*p);
-    }
-    // A row AIHubMix billed (`aihubmix/<id>`) that nothing above knows:
-    // the gateway's own published card — its exact id first, then the
-    // last path segment. Deliberately last among the real-rate sources
-    // (below the baked AIHubMix arms, which carry what the flat catalog
-    // can't, and below OpenRouter), so a price that already resolved
-    // never moves.
-    let aihubmix_id = canonical
-        .get(..9)
-        .filter(|p| p.eq_ignore_ascii_case("aihubmix/"))
-        .map(|_| canonical[9..].to_lowercase());
+    let or_seg = or_key.rsplit('/').next().unwrap_or(or_key.as_str());
+    let aihubmix_id = or_key.strip_prefix("aihubmix/");
     let aihubmix_card = |id: &str| {
         s.aihubmix
             .get(id)
             .or_else(|| s.aihubmix.get(id.rsplit('/').next().unwrap_or(id)))
     };
-    if let Some(p) = aihubmix_id.as_deref().and_then(aihubmix_card).filter(real) {
+    if let Some(p) = s
+        .openrouter
+        .get(&or_key)
+        .or_else(|| {
+            aihubmix_id
+                .filter(|id| id.contains('/'))
+                .and_then(|id| s.aihubmix.get(id))
+                .filter(real)
+        })
+        .or_else(|| s.openrouter_seg.get(or_seg))
+        .or_else(|| s.openrouter_dashseg.get(or_seg.replace('.', "-").as_str()))
+        .or_else(|| aihubmix_id.and_then(aihubmix_card).filter(real))
+    {
         return Some(*p);
     }
     // DeepSeek ships dated snapshots ("deepseek-v4-pro-0813"): when no
@@ -1577,7 +1570,7 @@ fn resolve(s: &Store, model: &str, depth: u8) -> Option<Price> {
     if let Some(p) = s.modelsdev.get(&canonical) {
         return Some(*p);
     }
-    if let Some(p) = aihubmix_id.as_deref().and_then(aihubmix_card) {
+    if let Some(p) = aihubmix_id.and_then(aihubmix_card) {
         return Some(*p);
     }
     // Slug tails no catalog carries under their own name, billed at the
@@ -3486,11 +3479,21 @@ mod tests {
         assert_eq!(price("beta/novel"), 3.0);
         assert_eq!(price("gamma/novel"), 1.0);
         assert_eq!(price("novel"), 1.0);
-        // A slug OpenRouter already priced keeps that price.
+        // A slug OpenRouter already priced keeps that price…
         super::ingest(&mut s, "openrouter", &serde_json::json!({"data": [
             {"id": "vendor/novel", "pricing": {"prompt": "0.000007", "completion": "0.00003"}},
         ]}));
         assert_eq!(super::resolve(&s, "aihubmix/novel", 0).unwrap().input, 7.0);
+        assert_eq!(super::resolve(&s, "aihubmix/gamma/novel", 0).unwrap().input, 7.0);
+        // …but OpenRouter's vendor-agnostic `novel` must not shadow a
+        // vendor-qualified id the gateway lists exactly.
+        assert_eq!(super::resolve(&s, "aihubmix/alpha/novel", 0).unwrap().input, 1.0);
+        assert_eq!(super::resolve(&s, "aihubmix/beta/novel", 0).unwrap().input, 3.0);
+        // An exact OpenRouter id still comes first.
+        super::ingest(&mut s, "openrouter", &serde_json::json!({"data": [
+            {"id": "aihubmix/beta/novel", "pricing": {"prompt": "0.000005", "completion": "0.00002"}},
+        ]}));
+        assert_eq!(super::resolve(&s, "aihubmix/beta/novel", 0).unwrap().input, 5.0);
     }
 
     #[test]
