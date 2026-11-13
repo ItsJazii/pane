@@ -639,10 +639,14 @@ guessed dollar amount.
   RPC rejects the key, the card falls back to local request/token counts
   for today and the month. Spend rows and the donut slice come from the
   local ledger either way.
-- **Token Plan:** when no key reads Coding Plan quotas and Qwen Code's
-  own `~\.qwen\settings.json` points at QwenCloud's Token Plan (the
-  active `model.baseUrl` contains `token-plan`; `providerMetadata.token-plan`
-  counts only when no base URL is set), the card shows "Token Plan",
+- **Token Plan:** when Qwen Code's own `~\.qwen\settings.json` points
+  at QwenCloud's Token Plan (the active `model.baseUrl` contains
+  `token-plan`; `providerMetadata.token-plan` counts only when no base
+  URL is set), the Token Plan key (`BAILIAN_TOKEN_PLAN_API_KEY` /
+  `QWENCLOUD_TOKEN_PLAN_API_KEY`, from the process or the settings'
+  `env` block) is never sent to the Coding Plan console. Only a
+  different key pasted into Pane is tried there, so a separate Coding
+  Plan subscription keeps its quota card. Otherwise the card shows "Token Plan",
   request counts for today and the month from the local ledger, and a
   Dashboard link to QwenCloud's Token Plan Usage page. Pane makes no
   network call for it: the Token Plan key only serves inference and

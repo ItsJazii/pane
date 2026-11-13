@@ -72,14 +72,36 @@ fn settings_use_token_plan(settings: &Value) -> bool {
         .is_some_and(|m| m.contains_key("token-plan"))
 }
 
-fn qwen_code_uses_token_plan() -> bool {
-    let Some(path) = dirs::home_dir().map(|h| h.join(".qwen").join("settings.json")) else {
-        return false;
-    };
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<Value>(raw.trim_start_matches('\u{feff}')).ok())
-        .is_some_and(|v| settings_use_token_plan(&v))
+fn qwen_code_settings() -> Option<Value> {
+    let path = dirs::home_dir()?.join(".qwen").join("settings.json");
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(raw.trim_start_matches('\u{feff}')).ok()
+}
+
+/// Env vars that hold a QwenCloud Token Plan key — read from Qwen Code's
+/// own settings `env` block and from the process environment.
+const TOKEN_PLAN_KEY_VARS: [&str; 2] = ["BAILIAN_TOKEN_PLAN_API_KEY", "QWENCLOUD_TOKEN_PLAN_API_KEY"];
+
+fn token_plan_keys(settings: &Value) -> Vec<String> {
+    TOKEN_PLAN_KEY_VARS
+        .iter()
+        .flat_map(|var| {
+            [
+                settings.pointer(&format!("/env/{var}")).and_then(Value::as_str).map(str::to_string),
+                std::env::var(var).ok(),
+            ]
+        })
+        .flatten()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .collect()
+}
+
+/// On a Token Plan setup, the only key worth a Coding Plan quota probe
+/// is one pasted into Pane that isn't the CLI's Token Plan key — that
+/// key never leaves for Alibaba's Coding Plan console.
+fn coding_plan_probe_key(saved: Option<String>, token_plan_keys: &[String]) -> Option<String> {
+    saved.filter(|k| !token_plan_keys.iter().any(|t| t == k))
 }
 
 /// The Token Plan card: "Token Plan" in the card's chip, the ledger's
@@ -97,17 +119,21 @@ fn token_plan_snapshot(ledger: Option<LedgerCounts>) -> Snapshot {
 }
 
 async fn fetch() -> Result<Snapshot, String> {
-    // A key that reads Coding Plan quotas wins over whatever endpoint the
-    // CLI is pointed at — the quota call stands down for hours after a
-    // failure, so a Token Plan key costs at most one probe per window.
+    if let Some(settings) = qwen_code_settings().filter(settings_use_token_plan) {
+        // A separate Coding Plan key saved in Pane keeps its quota card.
+        let saved = stored_api_key(ID, &[]);
+        if let Some(key) = coding_plan_probe_key(saved, &token_plan_keys(&settings)) {
+            if let Some(snap) = fetch_quota(&key).await {
+                return Ok(snap);
+            }
+        }
+        return Ok(token_plan_snapshot(ledger_counts()));
+    }
     let key = find_api_key();
     if let Some(key) = &key {
         if let Some(snap) = fetch_quota(key).await {
             return Ok(snap);
         }
-    }
-    if qwen_code_uses_token_plan() {
-        return Ok(token_plan_snapshot(ledger_counts()));
     }
     if let Some(snap) = local_ledger() {
         return Ok(snap);
@@ -304,6 +330,21 @@ mod tests {
             "providerMetadata": {"token-plan": {"version": "x"}},
         });
         assert!(!settings_use_token_plan(&both));
+    }
+
+    #[test]
+    fn token_plan_key_never_probes_the_coding_plan_console() {
+        let settings = serde_json::json!({"env": {"BAILIAN_TOKEN_PLAN_API_KEY": " sk-sp-plan "}});
+        let plan = token_plan_keys(&settings);
+        assert!(plan.iter().any(|k| k == "sk-sp-plan"));
+        // The CLI's Token Plan key pasted into Pane too: no probe.
+        assert_eq!(coding_plan_probe_key(Some("sk-sp-plan".into()), &plan), None);
+        // A different key pasted into Pane is a Coding Plan key: probe it.
+        assert_eq!(
+            coding_plan_probe_key(Some("sk-sp-coding".into()), &plan).as_deref(),
+            Some("sk-sp-coding")
+        );
+        assert_eq!(coding_plan_probe_key(None, &plan), None);
     }
 
     #[test]

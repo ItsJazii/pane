@@ -9,8 +9,9 @@
   requests, Usage Trend and Today / Yesterday / Last 30 Days spend, and
   its Dashboard link opens QwenCloud's Token Plan Usage page. QwenCloud
   shows the plan's Credits quota only on its website, not to API keys,
-  so Pane doesn't draw a quota bar. A Coding Plan key saved in Pane
-  still shows its Coding Plan quotas.
+  so Pane doesn't draw a quota bar. A separate Coding Plan key saved in
+  Pane still shows its Coding Plan quotas, and the Token Plan key is
+  never sent to Alibaba's Coding Plan console.
 
 ### Fixed
 - **Qwen4 Max Preview in Qwen Code is priced.** `qwen4-max-preview`
