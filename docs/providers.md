@@ -624,7 +624,7 @@ guessed dollar amount.
   JSON is `providerId`, `displayName`, `plan`, `lines`, `fetchedAt` —
   no dashboard URL, origin, or secrets.
 
-## Qwen Code (Alibaba Coding Plan)
+## Qwen Code (Alibaba Coding Plan / QwenCloud Token Plan)
 
 - **Reads:** pasted key (Settings), `BAILIAN_TOKEN_PLAN_API_KEY` (the env
   var Qwen Code itself uses), or `DASHSCOPE_API_KEY`; local spend from
@@ -639,6 +639,23 @@ guessed dollar amount.
   RPC rejects the key, the card falls back to local request/token counts
   for today and the month. Spend rows and the donut slice come from the
   local ledger either way.
+- **Token Plan:** when Qwen Code's own `~\.qwen\settings.json` points
+  at QwenCloud's Token Plan (the active `model.baseUrl` contains
+  `token-plan`; `providerMetadata.token-plan` counts only when no base
+  URL is set), the Token Plan key (`BAILIAN_TOKEN_PLAN_API_KEY` /
+  `QWENCLOUD_TOKEN_PLAN_API_KEY`, from the process or the settings'
+  `env` block) is never sent to the Coding Plan console. Only a
+  different key pasted into Pane is tried there, so a separate Coding
+  Plan subscription keeps its quota card. Otherwise the card shows "Token Plan",
+  request counts for today and the month from the local ledger, and a
+  Dashboard link to QwenCloud's Token Plan Usage page. Pane makes no
+  network call for it: the Token Plan key only serves inference and
+  `/models`, and the plan's Credits quota is shown only on the
+  logged-in QwenCloud website, which Pane does not touch.
+  `qwen4-max-preview` / `qwen4.0-max-preview` (Token Plan only, no
+  published per-token price) is priced as an estimate at AIHubMix's
+  rate for the same model ($0.353 in / $1.059 out / $0.0441 cache read
+  / $0.4412 cache write per million tokens).
 
 ---
 

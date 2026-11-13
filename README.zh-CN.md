@@ -119,7 +119,7 @@ Pane 是一款轻量的 Tauri v2 应用：Rust 核心负责数据处理，原生
 | AihubMix | API Key（设置或从 OpenCode 自动发现）→ 用量与花费上限对比；新模型按 AihubMix 公开价格表计价 |
 | One/New API | 在设置中添加多个兼容站点及每站多个 Key；每个 Key 对应一张额度卡片，密钥仅在本机供文件所有者读取 |
 | Sub2API | 在“设置 → Sub2API”中添加多个站点及每站多个 Key；每个 Key 对应一张卡片，数据来自该站点的 `GET /v1/usage`；密钥仅本机文件所有者可读，只发送到配置的站点源地址 |
-| Qwen Code | Coding Plan Key（设置或环境变量）→ 5 小时、每周、每月请求额度及本地花费 |
+| Qwen Code | Coding Plan Key（设置或环境变量）→ 5 小时、每周、每月请求额度及本地花费；从 Qwen Code 设置自动识别 Token Plan → 本地请求数、花费及 QwenCloud 控制台链接 |
 | Hermes | 本地账本 `%LOCALAPPDATA%\hermes\state.db` → 最近使用的两个模型、路由及按模型目录价格计算的花费，包括限定场景下的 AihubMix 启动模型价格 |
 
 *OpenCode 的额度指标使用 [anomalyco/opencode#16513](https://github.com/anomalyco/opencode/pull/16513) 引入的官方用量 API，显示与 Zen 控制台相同的账户级数据。因此，其他设备（或共享订阅的其他人）的用量也会被计入。如果 API 无法访问，Pane 会改用本机 `opencode.db` 计算用量，与 `opencode stats` 使用的数据相同；金额统计始终来自本地。
