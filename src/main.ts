@@ -542,6 +542,33 @@ let lastAppliedSpendGen = 0;
 let refreshTimer: number | undefined;
 let lastSnapshots: Snapshot[] = [];
 let lastSpend: ProviderSpend[] = [];
+
+/// Cards whose spend rows stay up through a quiet month, like DeepSeek's:
+/// the scan drops providers with no 30-day usage (that keeps the Total
+/// Spend donut honest), so these cards fill in an empty block themselves.
+const ALWAYS_SPEND_ROWS = new Set(["stepfun"]);
+
+function emptyWindow(): SpendWindow {
+  return { cost: 0, tokens: 0, models: [] };
+}
+
+/// One card's spend block for its rows, trend and tooltips.
+function spendFor(id: string | undefined): ProviderSpend | undefined {
+  const found = lastSpend.find((sp) => sp.id === id);
+  if (found || !id || !ALWAYS_SPEND_ROWS.has(id) || !lastSnapshots.some((s) => s.id === id)) return found;
+  const name = lastSnapshots.find((s) => s.id === id)?.name ?? id;
+  return {
+    id,
+    name,
+    today: emptyWindow(),
+    yesterday: emptyWindow(),
+    last30: emptyWindow(),
+    trend: new Array(30).fill(0),
+    unpriced: 0,
+    unpriced_models: [],
+    month_cost: 0,
+  };
+}
 let spendLoaded = false;
 let spendTab: SpendTab = "today";
 let customizeOpen = false;
@@ -964,7 +991,7 @@ function ensureLayout(): void {
       if (!kimiL) {
         kimiL = defaultProviderLayout(
           lastSnapshots.find((s) => s.id === "kimi"),
-          lastSpend.find((sp) => sp.id === "kimi"),
+          spendFor("kimi"),
           false,
         );
         layout.providers.kimi = kimiL;
@@ -989,7 +1016,7 @@ function ensureLayout(): void {
       layout.providerOrder.push(s.id);
       changed = true;
     }
-    const spend = lastSpend.find((sp) => sp.id === s.id);
+    const spend = spendFor(s.id);
     let L = layout.providers[s.id];
     if (!L) {
       // One-time migration: providers picked in the old tray-strip setting
@@ -1473,7 +1500,7 @@ function minimalItemKey(s: Snapshot): string | null {
     providerFamily(s.id) === "sub2api"
       ? sub2ApiLiveLayout(s.metrics, providerLayout(s.id))
       : providerLayout(s.id);
-  const spend = lastSpend.find((sp) => sp.id === s.id);
+  const spend = spendFor(s.id);
   const visible = L.metricOrder.filter(
     (k) => !L.hidden.includes(k) && canRenderMinimal(s, spend, k),
   );
@@ -1497,7 +1524,7 @@ function renderCard(s: Snapshot): string {
   let caret = "";
   if (s.status === "ok") {
     const L = providerFamily(s.id) === "sub2api" ? sub2ApiLiveLayout(s.metrics, providerLayout(s.id)) : providerLayout(s.id);
-    const spend = lastSpend.find((sp) => sp.id === s.id);
+    const spend = spendFor(s.id);
     if (config.minimal) {
       const key = minimalItemKey(s);
       body = key
@@ -3440,7 +3467,7 @@ function updateTrailActive(): void {
 function showTrendTip(el: HTMLElement): void {
   const tip = document.querySelector<HTMLElement>("#model-tip")!;
   const [id, idxStr] = (el.dataset.trend ?? "").split("|");
-  const spend = lastSpend.find((s) => s.id === id);
+  const spend = spendFor(id);
   const i = Number(idxStr);
   if (!spend || Number.isNaN(i)) return;
   modelTipRow = null;
@@ -3472,7 +3499,7 @@ let modelTipRow: HTMLElement | null = null;
 function showModelTip(row: HTMLElement): void {
   const tip = document.querySelector<HTMLElement>("#model-tip")!;
   const [id, key] = (row.dataset.spend ?? "").split("|");
-  const spend = lastSpend.find((s) => s.id === id);
+  const spend = spendFor(id);
   const w = spend?.[key as SpendTab];
   if (!w) return;
   // Moving between children of the open row must not rerender or reset
@@ -4615,7 +4642,7 @@ function handleCustomizeClick(target: HTMLElement): boolean {
   if (reset && config.layout) {
     const id = reset.dataset.reset!;
     const snapshot = lastSnapshots.find((s) => s.id === id);
-    const spend = lastSpend.find((sp) => sp.id === id);
+    const spend = spendFor(id);
     config.layout.providers[id] = defaultProviderLayout(snapshot, spend, false);
     saveLayout();
     renderAll();
