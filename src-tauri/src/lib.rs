@@ -152,6 +152,9 @@ fn config_with_defaults(mut cfg: Value) -> Value {
     obj.entry("configRev").or_insert(json!(0));
     obj.entry("appearanceBeforeSeason").or_insert(json!(""));
     obj.entry("locale").or_insert(json!("auto"));
+    // StepFun's plan tier pick — null = "Not set" (Credits row stays an
+    // estimate-only text row instead of a bar against a monthly pool).
+    obj.entry("stepfunPlanCredits").or_insert(Value::Null);
     obj.entry("widgetMode").or_insert(json!(false));
     obj.entry("widgetCollapsed").or_insert(json!(false));
     obj.entry("widgetLocked").or_insert(json!(false));
@@ -213,6 +216,7 @@ const CONFIG_KEYS: &[&str] = &[
     "starPromptLastMs",
     "reduceAnimations",
     "locale",
+    "stepfunPlanCredits",
     "widgetMode",
     "widgetCollapsed",
     "widgetLocked",

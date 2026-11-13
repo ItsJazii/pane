@@ -236,6 +236,7 @@ export interface Config {
   configRev: number;
   appearanceBeforeSeason: string;
   locale: LocalePref;
+  stepfunPlanCredits: number | null;
   widgetMode: boolean;
   widgetCollapsed: boolean;
   widgetLocked: boolean;
@@ -278,6 +279,7 @@ const FRONTEND_CONFIG_KEYS = [
   "configRev",
   "appearanceBeforeSeason",
   "locale",
+  "stepfunPlanCredits",
   "widgetMode",
   "widgetCollapsed",
   "widgetLocked",
@@ -495,6 +497,7 @@ let config: Config = {
   configRev: 0,
   appearanceBeforeSeason: "",
   locale: "auto",
+  stepfunPlanCredits: null,
   widgetMode: false,
   widgetCollapsed: false,
   widgetLocked: false,
@@ -5743,6 +5746,15 @@ async function initSettings(): Promise<void> {
     requestTraySync();
   });
 
+  const stepfunPlan = document.querySelector<HTMLSelectElement>("#stepfun-plan")!;
+  stepfunPlan.value =
+    config.stepfunPlanCredits == null ? "" : String(config.stepfunPlanCredits);
+  stepfunPlan.addEventListener("change", () => {
+    const v = stepfunPlan.value;
+    // Await the write: the backend reads the tier from config.json.
+    void patchConfig({ stepfunPlanCredits: v ? Number(v) : null }).then(() => refresh(true, true));
+  });
+
   const notifyToggles: [string, keyof Config][] = [
     ["#notify-reset", "notifyReset"],
     ["#notify-almost", "notifyAlmostOut"],
@@ -5921,6 +5933,7 @@ async function resetAllSettings(): Promise<void> {
     seasonShown: "",
     appearanceBeforeSeason: "",
     locale: "auto",
+    stepfunPlanCredits: null,
     widgetMode: false,
     widgetCollapsed: false,
     widgetLocked: false,
@@ -5956,6 +5969,10 @@ function syncSettingsControls(): void {
   setCheck("#pacing", config.pacingAlways);
   setSelect("#timeformat", config.timeFormat);
   setSelect("#locale", config.locale);
+  setSelect(
+    "#stepfun-plan",
+    config.stepfunPlanCredits == null ? "" : String(config.stepfunPlanCredits),
+  );
   setCheck("#notify-reset", config.notifyReset);
   setCheck("#notify-almost", config.notifyAlmostOut);
   setCheck("#notify-close", config.notifyCuttingClose);

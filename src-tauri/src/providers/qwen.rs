@@ -54,17 +54,22 @@ const TOKEN_PLAN_DASHBOARD: &str =
     "https://home.qwencloud.com/analytics/token-plan/individual?region=ap-southeast-1";
 
 /// Whether Qwen Code's own settings point at the Token Plan endpoint.
+/// The active `model.baseUrl` decides; `providerMetadata` can keep
+/// entries for providers that aren't in use, so it only counts when no
+/// base URL is set.
 fn settings_use_token_plan(settings: &Value) -> bool {
     let base = settings
         .pointer("/model/baseUrl")
         .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    base.contains("token-plan")
-        || settings
-            .get("providerMetadata")
-            .and_then(Value::as_object)
-            .is_some_and(|m| m.contains_key("token-plan"))
+        .map(str::trim)
+        .unwrap_or("");
+    if !base.is_empty() {
+        return base.to_ascii_lowercase().contains("token-plan");
+    }
+    settings
+        .get("providerMetadata")
+        .and_then(Value::as_object)
+        .is_some_and(|m| m.contains_key("token-plan"))
 }
 
 fn qwen_code_uses_token_plan() -> bool {
@@ -92,14 +97,17 @@ fn token_plan_snapshot(ledger: Option<LedgerCounts>) -> Snapshot {
 }
 
 async fn fetch() -> Result<Snapshot, String> {
-    if qwen_code_uses_token_plan() {
-        return Ok(token_plan_snapshot(ledger_counts()));
-    }
+    // A key that reads Coding Plan quotas wins over whatever endpoint the
+    // CLI is pointed at — the quota call stands down for hours after a
+    // failure, so a Token Plan key costs at most one probe per window.
     let key = find_api_key();
     if let Some(key) = &key {
         if let Some(snap) = fetch_quota(key).await {
             return Ok(snap);
         }
+    }
+    if qwen_code_uses_token_plan() {
+        return Ok(token_plan_snapshot(ledger_counts()));
     }
     if let Some(snap) = local_ledger() {
         return Ok(snap);
@@ -290,6 +298,12 @@ mod tests {
         let coding = serde_json::json!({"model": {"baseUrl": "https://coding-intl.dashscope.aliyuncs.com/v1"}});
         assert!(!settings_use_token_plan(&coding));
         assert!(!settings_use_token_plan(&serde_json::json!({})));
+        // An active Coding Plan URL beats a leftover Token Plan entry.
+        let both = serde_json::json!({
+            "model": {"baseUrl": "https://coding-intl.dashscope.aliyuncs.com/v1"},
+            "providerMetadata": {"token-plan": {"version": "x"}},
+        });
+        assert!(!settings_use_token_plan(&both));
     }
 
     #[test]

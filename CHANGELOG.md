@@ -9,22 +9,14 @@
   requests, Usage Trend and Today / Yesterday / Last 30 Days spend, and
   its Dashboard link opens QwenCloud's Token Plan Usage page. QwenCloud
   shows the plan's Credits quota only on its website, not to API keys,
-  so Pane doesn't draw a quota bar.
-- **StepFun card shows Usage Trend and spend rows** (Today / Yesterday /
-  Last 30 Days) like DeepSeek's card, even in a month with no local
-  StepFun usage.
-
-### Changed
-- **Removed the Step Plan tier picker from Settings.** A plan-only
-  StepFun key still shows a "Plan Credits" estimate from your logs.
+  so Pane doesn't draw a quota bar. A Coding Plan key saved in Pane
+  still shows its Coding Plan quotas.
 
 ### Fixed
 - **Qwen4 Max Preview in Qwen Code is priced.** `qwen4-max-preview`
   (logged as `qwen4.0-max-preview`) has no published per-token price,
   so it's estimated at AIHubMix's rate for the same model ($0.353 in /
   $1.059 out per million tokens) instead of showing $0.
-- **StepFun no longer shows the same amount twice** when the whole
-  balance is vouchers.
 - **Qwen Token Plan card no longer links to the Coding Plan console**,
   a different Alibaba product.
 
