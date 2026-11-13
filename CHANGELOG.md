@@ -16,6 +16,11 @@
   Last 30 Days) like DeepSeek's card. They stay on the card in a month
   with no local StepFun usage; the trend is a flat line until usage is
   logged.
+- **SWE-2 models are priced.** Cognition's SWE-2 and SWE-2 Flash show
+  $0.00 (free) instead of counting tokens with no rate, and SWE-2 Max
+  Lightning prices at its promo card — $1 in / $5 out / $0.10 cached
+  input per million tokens ("83% off until 2027-01-01"). Devin's
+  `-fast` mode and effort tails stay on the same card, matching SWE-1.
 
 ### Changed
 - **Removed the Step Plan tier picker from Settings.** A plan-only

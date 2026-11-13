@@ -586,7 +586,8 @@ pub fn generation() -> u64 {
 /// fingerprinted below — an app update that reprices the same files would
 /// otherwise leave history at the old dollars until upstream happens to
 /// rewrite a catalog.
-const CORRECTIONS_REV: u32 = 31; // 19: Antigravity `-trial` ids (gemini-4-argon-trial) price like the base card; 20: Argon post-intro list card enforced over catalogs; 21: Claude Code deepseek-flash / V4.1 Flash priced on AIHubMix's card; 22: `deepseek/` spellings take the baked official card over models.dev's same-prefix reseller ids; 23: AIHubMix MiniMax M3.1 Flash card; 24: Moonshot Kimi K3.1 Pro + Highspeed cards; 25: Claude Fable/Mythos 5.2 card + 2× fast mode; 26: AIHubMix Tencent Hy4 card (Claude Code `hy4` rows); 27: Gemini 4 Carbon dated card, Devin Argon at Google's price, OpenRouter source, Pane-owned feed + dated_pricing; 28: AIHubMix Coding Qwen4 Max Preview card; 29: Claude rows with an unpriceable logged model fall back to requestedModel; 30: AIHubMix's own catalog prices gateway-billed rows nothing else knows; 31: qwen4-max-preview / qwen4.0-max-preview estimate card
+const CORRECTIONS_REV: u32 = 32; // 19: Antigravity `-trial` ids (gemini-4-argon-trial) price like the base card; 20: Argon post-intro list card enforced over catalogs; 21: Claude Code deepseek-flash / V4.1 Flash priced on AIHubMix's card; 22: `deepseek/` spellings take the baked official card over models.dev's same-prefix reseller ids; 23: AIHubMix MiniMax M3.1 Flash card; 24: Moonshot Kimi K3.1 Pro + Highspeed cards; 25: Claude Fable/Mythos 5.2 card + 2× fast mode; 26: AIHubMix Tencent Hy4 card (Claude Code `hy4` rows); 27: Gemini 4 Carbon dated card, Devin Argon at Google's price, OpenRouter source, Pane-owned feed + dated_pricing; 28: AIHubMix Coding Qwen4 Max Preview card; 29: Claude rows with an unpriceable logged model fall back to requestedModel; 30: AIHubMix's own catalog prices gateway-billed rows nothing else knows; 31: qwen4-max-preview / qwen4.0-max-preview estimate card; 32: SWE-2 free card, SWE-2 Max Lightning promo card
+
 
 /// The corrections revision on its own — the spend cache treats a changed
 /// revision as a hard discard (the *code* that prices changed), while a
@@ -1420,7 +1421,10 @@ fn resolve(s: &Store, model: &str, depth: u8) -> Option<Price> {
                 stem = next;
             }
         }
-        if matches!(stem, "swe-1.7" | "swe-1-7" | "swe-1.6" | "swe-1-6" | "penguin") {
+        if matches!(stem, "swe-1.7" | "swe-1-7" | "swe-1.6" | "swe-1-6" | "penguin")
+            || stem == "swe-2"
+            || stem.starts_with("swe-2-")
+        {
             return resolve(s, base, depth + 1);
         }
         let m = fast_tier_mult(s, base);
@@ -1934,6 +1938,13 @@ fn builtin_price(canonical: &str) -> Option<Price> {
         "swe-1.7-lightning" | "swe-1-7-lightning" => {
             Some(Price::flat(2.50, 12.50, 1.00, 2.50))
         }
+        // Cognition SWE-2 (Windsurf model picker rate card, 2026-11):
+        // SWE-2 is free and SWE-2 Flash is free for now — a 0/0 card
+        // keeps them "free", never unpriced. SWE-2 Max Lightning bills
+        // $1 in / $5 out / $0.10 cache read at the promo rate ("83% off
+        // until 2027-01-01"); cache write unpublished → bills at input.
+        "swe-2" | "swe-2-flash" => Some(Price::flat(0.0, 0.0, 0.0, 0.0)),
+        "swe-2-max-lightning" => Some(Price::flat(1.0, 5.0, 0.10, 1.0)),
         // StepFun Step Plan (platform.stepfun.ai pricing, USD/MTok):
         // step-3.7-flash $0.20 in / $1.15 out / $0.04 cache hit;
         // step-3.5-flash (+ the -2603 dated SKU) $0.10 / $0.30 / $0.02.
@@ -2610,6 +2621,36 @@ mod tests {
             assert_eq!(
                 (p.input, p.output, p.cache_read, p.cache_write),
                 (2.50, 12.50, 1.00, 2.50),
+                "{slug}"
+            );
+        }
+    }
+
+    #[test]
+    fn swe2_free_and_lightning_promo_cards() {
+        let store = super::Store::default();
+        // Free models price at $0 — never an unpriced ⚠. Effort tails
+        // and Devin's `-fast` mode stay on the free card.
+        for slug in ["swe-2", "swe-2-flash", "swe-2-flash-high", "swe-2-fast"] {
+            let p = super::resolve(&store, slug, 0)
+                .unwrap_or_else(|| panic!("{slug} did not price"));
+            assert_eq!(
+                (p.input, p.output, p.cache_read, p.cache_write),
+                (0.0, 0.0, 0.0, 0.0),
+                "{slug}"
+            );
+        }
+        // Max Lightning's promo card; `-fast` is Devin's mode, not a 2× SKU.
+        for slug in [
+            "swe-2-max-lightning",
+            "swe-2-max-lightning-fast",
+            "cognition/swe-2-max-lightning",
+        ] {
+            let p = super::resolve(&store, slug, 0)
+                .unwrap_or_else(|| panic!("{slug} did not price"));
+            assert_eq!(
+                (p.input, p.output, p.cache_read, p.cache_write),
+                (1.0, 5.0, 0.10, 1.0),
                 "{slug}"
             );
         }
