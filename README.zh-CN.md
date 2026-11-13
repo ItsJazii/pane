@@ -109,7 +109,7 @@ Pane 是一款轻量的 Tauri v2 应用：Rust 核心负责数据处理，原生
 | Z.ai | API Key（设置）、CLI Key 文件或环境变量 |
 | Antigravity | 本地语言服务器，或通过凭据管理器访问 Google Cloud Code API；本地对话数据库用于统计花费 |
 | DeepSeek | API Key（设置）→ 余额 |
-| StepFun | API Key（设置，未配置时回退到 Step Code 保存的 `platform_*` Key）→ 余额、抵用券和已用额度；Step Plan 套餐档位在设置中手动选用；`step-*` 花费从 Claude Code / Codex / OpenCode / oh-my-pi / Step Code 记录归集 |
+| StepFun | API Key（设置，未配置时回退到 Step Code 保存的 `platform_*` Key）→ 余额、抵用券和已用额度，用量趋势；`step-*` 花费从 Claude Code / Codex / OpenCode / oh-my-pi / Step Code 记录归集 |
 | Kimi API | 平台 API Key（设置）→ 钱包余额和已用额度（支持国际站与中国站接口） |
 | Kimi Code | 官方 CLI 登录（`kimi login`）或粘贴 Kimi For Coding 套餐 Key → 会话及每周额度进度条、会员名称（Moderato / Allegretto / Allegro / Vivace）；可选显示 Kimi API 钱包余额；统计本地会话花费 |
 | ElevenLabs | API Key（设置）→ 字符额度及重置进度预测 |
@@ -119,7 +119,7 @@ Pane 是一款轻量的 Tauri v2 应用：Rust 核心负责数据处理，原生
 | AihubMix | API Key（设置或从 OpenCode 自动发现）→ 用量与花费上限对比；新模型按 AihubMix 公开价格表计价 |
 | One/New API | 在设置中添加多个兼容站点及每站多个 Key；每个 Key 对应一张额度卡片，密钥仅在本机供文件所有者读取 |
 | Sub2API | 在“设置 → Sub2API”中添加多个站点及每站多个 Key；每个 Key 对应一张卡片，数据来自该站点的 `GET /v1/usage`；密钥仅本机文件所有者可读，只发送到配置的站点源地址 |
-| Qwen Code | Coding Plan Key（设置或环境变量）→ 5 小时、每周、每月请求额度及本地花费 |
+| Qwen Code | Coding Plan Key（设置或环境变量）→ 5 小时、每周、每月请求额度及本地花费；从 Qwen Code 设置自动识别 Token Plan → 本地请求数、花费及 QwenCloud 控制台链接 |
 | Hermes | 本地账本 `%LOCALAPPDATA%\hermes\state.db` → 最近使用的两个模型、路由及按模型目录价格计算的花费，包括限定场景下的 AihubMix 启动模型价格 |
 
 *OpenCode 的额度指标使用 [anomalyco/opencode#16513](https://github.com/anomalyco/opencode/pull/16513) 引入的官方用量 API，显示与 Zen 控制台相同的账户级数据。因此，其他设备（或共享订阅的其他人）的用量也会被计入。如果 API 无法访问，Pane 会改用本机 `opencode.db` 计算用量，与 `opencode stats` 使用的数据相同；金额统计始终来自本地。

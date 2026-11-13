@@ -236,7 +236,6 @@ export interface Config {
   configRev: number;
   appearanceBeforeSeason: string;
   locale: LocalePref;
-  stepfunPlanCredits: number | null;
   widgetMode: boolean;
   widgetCollapsed: boolean;
   widgetLocked: boolean;
@@ -279,7 +278,6 @@ const FRONTEND_CONFIG_KEYS = [
   "configRev",
   "appearanceBeforeSeason",
   "locale",
-  "stepfunPlanCredits",
   "widgetMode",
   "widgetCollapsed",
   "widgetLocked",
@@ -497,7 +495,6 @@ let config: Config = {
   configRev: 0,
   appearanceBeforeSeason: "",
   locale: "auto",
-  stepfunPlanCredits: null,
   widgetMode: false,
   widgetCollapsed: false,
   widgetLocked: false,
@@ -1526,7 +1523,10 @@ function renderCard(s: Snapshot): string {
   const family = providerFamily(s.id);
   const dashUrl = (s.dashboard_url ?? "").trim();
   const dashOk = /^https?:\/\//i.test(dashUrl);
-  const staticLinks = PROVIDER_LINKS[s.id] ?? PROVIDER_LINKS[family] ?? [];
+  // A Qwen Token Plan card carries QwenCloud's usage page; the static
+  // Coding Plan link points at a different product's console.
+  const staticLinks =
+    dashOk && family === "qwen" ? [] : (PROVIDER_LINKS[s.id] ?? PROVIDER_LINKS[family] ?? []);
   const linkItems = dashOk
     ? [{ label: "Dashboard", url: dashUrl }, ...staticLinks.filter((l) => l.label !== "Dashboard")]
     : staticLinks;
@@ -5743,15 +5743,6 @@ async function initSettings(): Promise<void> {
     requestTraySync();
   });
 
-  const stepfunPlan = document.querySelector<HTMLSelectElement>("#stepfun-plan")!;
-  stepfunPlan.value =
-    config.stepfunPlanCredits == null ? "" : String(config.stepfunPlanCredits);
-  stepfunPlan.addEventListener("change", () => {
-    const v = stepfunPlan.value;
-    // Await the write: the backend reads the tier from config.json.
-    void patchConfig({ stepfunPlanCredits: v ? Number(v) : null }).then(() => refresh(true, true));
-  });
-
   const notifyToggles: [string, keyof Config][] = [
     ["#notify-reset", "notifyReset"],
     ["#notify-almost", "notifyAlmostOut"],
@@ -5930,7 +5921,6 @@ async function resetAllSettings(): Promise<void> {
     seasonShown: "",
     appearanceBeforeSeason: "",
     locale: "auto",
-    stepfunPlanCredits: null,
     widgetMode: false,
     widgetCollapsed: false,
     widgetLocked: false,
@@ -5966,10 +5956,6 @@ function syncSettingsControls(): void {
   setCheck("#pacing", config.pacingAlways);
   setSelect("#timeformat", config.timeFormat);
   setSelect("#locale", config.locale);
-  setSelect(
-    "#stepfun-plan",
-    config.stepfunPlanCredits == null ? "" : String(config.stepfunPlanCredits),
-  );
   setCheck("#notify-reset", config.notifyReset);
   setCheck("#notify-almost", config.notifyAlmostOut);
   setCheck("#notify-close", config.notifyCuttingClose);

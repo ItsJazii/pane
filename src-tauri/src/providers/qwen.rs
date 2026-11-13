@@ -13,6 +13,14 @@
 //!
 //! Key source: pasted in Settings, `BAILIAN_TOKEN_PLAN_API_KEY` (the env
 //! var Qwen Code itself reads), or `DASHSCOPE_API_KEY`.
+//!
+//! QwenCloud's **Token Plan** (Singapore, `token-plan.maas.qwencloudapi.com`)
+//! is a different product: Credits-metered with one monthly quota per
+//! subscription month. Its usage is only shown on the logged-in QwenCloud
+//! console — the plan key can't read it, and Pane never touches a browser
+//! session. So a Token Plan card (detected from Qwen Code's own settings)
+//! shows the local ledger plus a link to that page, and never calls the
+//! Coding Plan console.
 
 use super::{http, stored_api_key, Metric, Snapshot};
 use serde_json::Value;
@@ -40,7 +48,53 @@ pub async fn snapshot() -> Snapshot {
     }
 }
 
+/// QwenCloud's Token Plan Usage page — the only place the plan's quota
+/// is shown; the card links there.
+const TOKEN_PLAN_DASHBOARD: &str =
+    "https://home.qwencloud.com/analytics/token-plan/individual?region=ap-southeast-1";
+
+/// Whether Qwen Code's own settings point at the Token Plan endpoint.
+fn settings_use_token_plan(settings: &Value) -> bool {
+    let base = settings
+        .pointer("/model/baseUrl")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    base.contains("token-plan")
+        || settings
+            .get("providerMetadata")
+            .and_then(Value::as_object)
+            .is_some_and(|m| m.contains_key("token-plan"))
+}
+
+fn qwen_code_uses_token_plan() -> bool {
+    let Some(path) = dirs::home_dir().map(|h| h.join(".qwen").join("settings.json")) else {
+        return false;
+    };
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(raw.trim_start_matches('\u{feff}')).ok())
+        .is_some_and(|v| settings_use_token_plan(&v))
+}
+
+/// The Token Plan card: "Token Plan" in the card's chip, the ledger's
+/// request counts (the same rows as any other local-usage card) and a
+/// link to QwenCloud's usage page for the quota.
+fn token_plan_snapshot(ledger: Option<LedgerCounts>) -> Snapshot {
+    let counts = ledger.unwrap_or_default();
+    let metrics = vec![
+        Metric::text("Requests today", format!("{}", counts.day_req)),
+        Metric::text("Requests this month", format!("{}", counts.mon_req)),
+    ];
+    let mut snap = Snapshot::ok(ID, NAME, Some("Token Plan".to_string()), metrics);
+    snap.dashboard_url = Some(TOKEN_PLAN_DASHBOARD.to_string());
+    snap
+}
+
 async fn fetch() -> Result<Snapshot, String> {
+    if qwen_code_uses_token_plan() {
+        return Ok(token_plan_snapshot(ledger_counts()));
+    }
     let key = find_api_key();
     if let Some(key) = &key {
         if let Some(snap) = fetch_quota(key).await {
@@ -171,25 +225,40 @@ fn parse_quota(doc: &Value) -> Option<Snapshot> {
 /// Fallback card from the CLI's own per-request ledger: request and token
 /// counts for today and the current month. No percentages — the plan's
 /// limits aren't knowable locally.
-fn local_ledger() -> Option<Snapshot> {
+#[derive(Default, Clone, Copy)]
+struct LedgerCounts {
+    day_req: u64,
+    mon_req: u64,
+}
+
+/// Request counts for today and this month from the CLI's ledger.
+fn count_ledger(raw: &str, today: &str) -> LedgerCounts {
+    let mut c = LedgerCounts::default();
+    for line in raw.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        if v.get("totalTokens").and_then(Value::as_f64).unwrap_or(0.0) <= 0.0 {
+            continue;
+        }
+        c.mon_req += 1;
+        if v.get("localDate").and_then(Value::as_str) == Some(today) {
+            c.day_req += 1;
+        }
+    }
+    c
+}
+
+fn ledger_counts() -> Option<LedgerCounts> {
     let now = chrono::Local::now();
     let path = dirs::home_dir()?
         .join(".qwen")
         .join("usage")
         .join(format!("token-usage-{}.jsonl", now.format("%Y-%m")));
     let raw = std::fs::read_to_string(path).ok()?;
-    let today = now.format("%Y-%m-%d").to_string();
-    let (mut day_req, mut mon_req) = (0u64, 0u64);
-    for line in raw.lines() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
-        if v.get("totalTokens").and_then(Value::as_f64).unwrap_or(0.0) <= 0.0 {
-            continue;
-        }
-        mon_req += 1;
-        if v.get("localDate").and_then(Value::as_str) == Some(today.as_str()) {
-            day_req += 1;
-        }
-    }
+    Some(count_ledger(&raw, &now.format("%Y-%m-%d").to_string()))
+}
+
+fn local_ledger() -> Option<Snapshot> {
+    let LedgerCounts { day_req, mon_req } = ledger_counts()?;
     if mon_req == 0 {
         return None;
     }
@@ -211,6 +280,42 @@ fn local_ledger() -> Option<Snapshot> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_plan_detected_from_qwen_code_settings() {
+        let tp = serde_json::json!({"model": {"baseUrl": "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1"}});
+        assert!(settings_use_token_plan(&tp));
+        let meta = serde_json::json!({"providerMetadata": {"token-plan": {"version": "x"}}});
+        assert!(settings_use_token_plan(&meta));
+        let coding = serde_json::json!({"model": {"baseUrl": "https://coding-intl.dashscope.aliyuncs.com/v1"}});
+        assert!(!settings_use_token_plan(&coding));
+        assert!(!settings_use_token_plan(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn token_plan_card_is_requests_plus_dashboard_link() {
+        let ledger = count_ledger(
+            concat!(
+                r#"{"localDate":"2026-11-11","model":"qwen4.0-max-preview","totalTokens":26644}"#, "\n",
+                r#"{"localDate":"2026-11-10","model":"qwen3.8-max","totalTokens":100}"#, "\n",
+                r#"{"localDate":"2026-11-11","model":"qwen3.8-max","totalTokens":0}"#, "\n",
+            ),
+            "2026-11-11",
+        );
+        assert_eq!((ledger.day_req, ledger.mon_req), (1, 2));
+        let snap = token_plan_snapshot(Some(ledger));
+        assert_eq!(snap.status, "ok");
+        assert_eq!(snap.plan.as_deref(), Some("Token Plan"));
+        assert_eq!(snap.dashboard_url.as_deref(), Some(TOKEN_PLAN_DASHBOARD));
+        let labels: Vec<&str> = snap.metrics.iter().map(|m| m.label.as_str()).collect();
+        assert_eq!(labels, vec!["Requests today", "Requests this month"]);
+        assert_eq!(snap.metrics[0].value.as_deref(), Some("1"));
+        assert_eq!(snap.metrics[1].value.as_deref(), Some("2"));
+        // A Token Plan user with no ledger yet still gets a working card.
+        let snap = token_plan_snapshot(None);
+        assert_eq!(snap.status, "ok");
+        assert_eq!(snap.metrics[0].value.as_deref(), Some("0"));
+    }
 
     /// Live diagnostic (ignored): shows what each console/header attempt
     /// returns so quota-auth failures can be debugged without ever
