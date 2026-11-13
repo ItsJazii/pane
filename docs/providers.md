@@ -380,20 +380,18 @@ guessed dollar amount.
   and a 200 proves the key is real.
 - **Shows:** a Prepaid/Postpaid plan chip with Balance (and Vouchers
   when any are held) plus a "Credits used" percent bar metered against
-  the highest balance Pane has seen locally. .ai accounts display in
-  USD; .com accounts bill in CNY and display in ¥. A Step Plan
-  subscription can't be detected over the API — `/step_plan/v1/models`
-  answers 200 for any valid key, subscribed or not — so the plan side
-  is opt-in: pick your tier in Settings → API keys → StepFun (Flash
-  Mini 400M / Plus 1,600M / Pro 8,000M / Max 40,000M) and the card
-  shows both pots. The "Wallet" bar stays live from the API
-  (pay-as-you-go clients on `/v1` drain it) while "Plan Credits"
-  estimates this month's plan Credits from local logs (USD spend × 7,
-  since 1M Credit = ¥1 at model list price). StepFun's API has no
-  plan-quota endpoint — the estimate is all it can show, it clears at
-  month end like the real pool, and it counts every `step-*` row the
-  log scan finds, so wallet-billed clients inflate it; the Wallet bar
-  is the authoritative number. Local spend for `step-*`
+  the highest balance Pane has seen locally. When the whole balance is
+  vouchers, only the Balance row shows (no duplicate Vouchers row).
+  .ai accounts display in USD; .com accounts bill in CNY and display
+  in ¥. Usage Trend and Today / Yesterday / Last 30 Days spend rows
+  stay on the card even in a month with no local StepFun usage (the
+  trend draws as a flat line until usage is logged). A
+  Step Plan subscription can't be detected over the API —
+  `/step_plan/v1/models` answers 200 for any valid key, subscribed or
+  not — and StepFun's API has no plan-quota endpoint, so a plan-only
+  key (one the wallet endpoints reject) shows a "Plan Credits" text
+  estimate of this month's Credits from local logs (USD spend × 7,
+  since 1M Credit = ¥1 at model list price). Local spend for `step-*`
   models used through
   Claude Code, Codex, or OpenCode against the Step Plan endpoint routes
   to this card (models.dev catalog, falling back to baked StepFun list
@@ -624,7 +622,7 @@ guessed dollar amount.
   JSON is `providerId`, `displayName`, `plan`, `lines`, `fetchedAt` —
   no dashboard URL, origin, or secrets.
 
-## Qwen Code (Alibaba Coding Plan)
+## Qwen Code (Alibaba Coding Plan / QwenCloud Token Plan)
 
 - **Reads:** pasted key (Settings), `BAILIAN_TOKEN_PLAN_API_KEY` (the env
   var Qwen Code itself uses), or `DASHSCOPE_API_KEY`; local spend from
@@ -639,6 +637,23 @@ guessed dollar amount.
   RPC rejects the key, the card falls back to local request/token counts
   for today and the month. Spend rows and the donut slice come from the
   local ledger either way.
+- **Token Plan:** when Qwen Code's own `~\.qwen\settings.json` points
+  at QwenCloud's Token Plan (the active `model.baseUrl` contains
+  `token-plan`; `providerMetadata.token-plan` counts only when no base
+  URL is set), the Token Plan key (`BAILIAN_TOKEN_PLAN_API_KEY` /
+  `QWENCLOUD_TOKEN_PLAN_API_KEY`, from the process or the settings'
+  `env` block) is never sent to the Coding Plan console. Only a
+  different key pasted into Pane is tried there, so a separate Coding
+  Plan subscription keeps its quota card. Otherwise the card shows "Token Plan",
+  request counts for today and the month from the local ledger, and a
+  Dashboard link to QwenCloud's Token Plan Usage page. Pane makes no
+  network call for it: the Token Plan key only serves inference and
+  `/models`, and the plan's Credits quota is shown only on the
+  logged-in QwenCloud website, which Pane does not touch.
+  `qwen4-max-preview` / `qwen4.0-max-preview` (Token Plan only, no
+  published per-token price) is priced as an estimate at AIHubMix's
+  rate for the same model ($0.353 in / $1.059 out / $0.0441 cache read
+  / $0.4412 cache write per million tokens).
 
 ---
 

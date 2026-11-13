@@ -3,11 +3,39 @@
 ## Unreleased
 
 ### Added
+- **Qwen Token Plan card.** If Qwen Code is set up on QwenCloud's Token
+  Plan, Pane spots it from Qwen Code's own settings with nothing to set
+  up. The card says "Token Plan", shows today's and this month's
+  requests, Usage Trend and Today / Yesterday / Last 30 Days spend, and
+  its Dashboard link opens QwenCloud's Token Plan Usage page. QwenCloud
+  shows the plan's Credits quota only on its website, not to API keys,
+  so Pane doesn't draw a quota bar. A separate Coding Plan key saved in
+  Pane still shows its Coding Plan quotas, and the Token Plan key is
+  never sent to Alibaba's Coding Plan console.
+- **StepFun card shows Usage Trend and spend rows** (Today / Yesterday /
+  Last 30 Days) like DeepSeek's card. They stay on the card in a month
+  with no local StepFun usage; the trend is a flat line until usage is
+  logged.
 - **SWE-2 models are priced.** Cognition's SWE-2 and SWE-2 Flash show
   $0.00 (free) instead of counting tokens with no rate, and SWE-2 Max
   Lightning prices at its promo card — $1 in / $5 out / $0.10 cached
   input per million tokens ("83% off until 2027-01-01"). Devin's
   `-fast` mode and effort tails stay on the same card, matching SWE-1.
+
+### Changed
+- **Removed the Step Plan tier picker from Settings.** A plan-only
+  StepFun key still shows a "Plan Credits" estimate from your logs.
+
+### Fixed
+- **Qwen4 Max Preview in Qwen Code is priced.** `qwen4-max-preview`
+  (logged as `qwen4.0-max-preview`) has no published per-token price,
+  so it's estimated at AIHubMix's rate for the same model ($0.353 in /
+  $1.059 out per million tokens) instead of showing $0.
+- **Qwen Token Plan card no longer links to the Coding Plan console**,
+  a different Alibaba product.
+- **StepFun no longer shows the same amount twice** when the whole
+  balance is vouchers.
+
 
 ## 0.5.3 — 2026-11-11
 

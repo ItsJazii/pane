@@ -6585,10 +6585,11 @@ mod tests {
 
     #[test]
     fn claude_unpriced_logged_model_falls_back_to_requested_model() {
-        // AIHubMix answers coding-qwen4-max-preview as qwen4-max-preview.
+        // A gateway answering under a name with no price (AIHubMix did
+        // this with coding-qwen4-max-preview before qwen4 had a card).
         let line = json!({"type": "assistant", "timestamp": "2026-11-11T12:00:00Z",
             "requestId": "req_q1", "requestedModel": "coding-qwen4-max-preview",
-            "message": {"id": "msg_q1", "model": "qwen4-max-preview",
+            "message": {"id": "msg_q1", "model": "pane-test-unpriced-reply",
                 "usage": {"input_tokens": 1000000.0, "output_tokens": 1000000.0,
                     "cache_read_input_tokens": 1000000.0}}})
         .to_string();

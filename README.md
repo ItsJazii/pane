@@ -173,7 +173,7 @@ error text) — see [Privacy](#privacy--security) for the full contract.
 | Z.ai | API key (Settings), CLI key file, or env var |
 | Antigravity | Local language server, or Google Cloud Code API via Credential Manager; local conversation databases for spend |
 | DeepSeek | API key (Settings) → balance |
-| StepFun | API key (Settings, or Step Code's saved `platform_*` key as fallback) → balance + vouchers with credits-used meter; Step Plan tier is opt-in in Settings; `step-*` spend routed from Claude Code / Codex / OpenCode / oh-my-pi / Step Code |
+| StepFun | API key (Settings, or Step Code's saved `platform_*` key as fallback) → balance + vouchers with credits-used meter, usage trend; `step-*` spend routed from Claude Code / Codex / OpenCode / oh-my-pi / Step Code |
 | Kimi API | Platform API key (Settings) → wallet balance and credits-used meter (global + CN endpoints) |
 | Kimi Code | Official CLI login (`kimi login`) or pasted Kimi For Coding plan key → Session + Weekly bars and membership name (Moderato / Allegretto / Allegro / Vivace); optional Kimi API wallet bar; local session spend |
 | ElevenLabs | API key (Settings) → character quota with reset pacing |
@@ -183,7 +183,7 @@ error text) — see [Privacy](#privacy--security) for the full contract.
 | AihubMix | API key (Settings or auto-detected from OpenCode) → usage vs spending limit; new models are priced from AihubMix's own public price list |
 | One/New API | Add multiple compatible sites and keys in Settings; one quota card per key, with owner-only local secret storage |
 | Sub2API | Add multiple Sub2API sites and keys in Settings; one card per key from each site's `GET /v1/usage` — keys stay owner-only local and are sent only to the configured origin |
-| Qwen Code | Coding Plan key (Settings or env) → 5h/weekly/monthly request quotas + local spend |
+| Qwen Code | Coding Plan key (Settings or env) → 5h/weekly/monthly request quotas + local spend; Token Plan detected from Qwen Code's settings → local requests + spend + QwenCloud dashboard link |
 | Hermes | Local ledger `%LOCALAPPDATA%\hermes\state.db` → two recent user models, routes, and catalog-priced spend, including scoped AihubMix launch-model rates |
 
 *OpenCode's meters use the official usage API that shipped in
