@@ -555,7 +555,7 @@ function emptyWindow(): SpendWindow {
 /// One card's spend block for its rows, trend and tooltips.
 function spendFor(id: string | undefined): ProviderSpend | undefined {
   const found = lastSpend.find((sp) => sp.id === id);
-  if (found || !id || !ALWAYS_SPEND_ROWS.has(id) || !lastSnapshots.some((s) => s.id === id)) return found;
+  if (found || !id || !ALWAYS_SPEND_ROWS.has(id) || !spendScanned || !lastSnapshots.some((s) => s.id === id)) return found;
   const name = lastSnapshots.find((s) => s.id === id)?.name ?? id;
   return {
     id,
@@ -570,6 +570,10 @@ function spendFor(id: string | undefined): ProviderSpend | undefined {
   };
 }
 let spendLoaded = false;
+/// True once a spend scan actually returned (even empty). Cards that keep
+/// their spend rows through a quiet month may only fill in an empty block
+/// after this — a missing entry means "no usage" solely once the scan ran.
+let spendScanned = false;
 let spendTab: SpendTab = "today";
 let customizeOpen = false;
 let revealTimer = 0;
@@ -4268,6 +4272,7 @@ async function refresh(force = false, usageOnly = false): Promise<void> {
   if (spend && myGen >= lastAppliedSpendGen) {
     lastSpend = spend;
     lastAppliedSpendGen = myGen;
+    spendScanned = true;
   }
   if (lastSnapshots.length) ensureLayout();
   if (!customizeOpen && lastSnapshots.length) renderIfVisible();
