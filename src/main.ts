@@ -236,7 +236,6 @@ export interface Config {
   configRev: number;
   appearanceBeforeSeason: string;
   locale: LocalePref;
-  stepfunPlanCredits: number | null;
   widgetMode: boolean;
   widgetCollapsed: boolean;
   widgetLocked: boolean;
@@ -279,7 +278,6 @@ const FRONTEND_CONFIG_KEYS = [
   "configRev",
   "appearanceBeforeSeason",
   "locale",
-  "stepfunPlanCredits",
   "widgetMode",
   "widgetCollapsed",
   "widgetLocked",
@@ -497,7 +495,6 @@ let config: Config = {
   configRev: 0,
   appearanceBeforeSeason: "",
   locale: "auto",
-  stepfunPlanCredits: null,
   widgetMode: false,
   widgetCollapsed: false,
   widgetLocked: false,
@@ -545,7 +542,38 @@ let lastAppliedSpendGen = 0;
 let refreshTimer: number | undefined;
 let lastSnapshots: Snapshot[] = [];
 let lastSpend: ProviderSpend[] = [];
+
+/// Cards whose spend rows stay up through a quiet month, like DeepSeek's:
+/// the scan drops providers with no 30-day usage (that keeps the Total
+/// Spend donut honest), so these cards fill in an empty block themselves.
+const ALWAYS_SPEND_ROWS = new Set(["stepfun"]);
+
+function emptyWindow(): SpendWindow {
+  return { cost: 0, tokens: 0, models: [] };
+}
+
+/// One card's spend block for its rows, trend and tooltips.
+function spendFor(id: string | undefined): ProviderSpend | undefined {
+  const found = lastSpend.find((sp) => sp.id === id);
+  if (found || !id || !ALWAYS_SPEND_ROWS.has(id) || !spendScanned || !lastSnapshots.some((s) => s.id === id)) return found;
+  const name = lastSnapshots.find((s) => s.id === id)?.name ?? id;
+  return {
+    id,
+    name,
+    today: emptyWindow(),
+    yesterday: emptyWindow(),
+    last30: emptyWindow(),
+    trend: new Array(30).fill(0),
+    unpriced: 0,
+    unpriced_models: [],
+    month_cost: 0,
+  };
+}
 let spendLoaded = false;
+/// True once a spend scan actually returned (even empty). Cards that keep
+/// their spend rows through a quiet month may only fill in an empty block
+/// after this — a missing entry means "no usage" solely once the scan ran.
+let spendScanned = false;
 let spendTab: SpendTab = "today";
 let customizeOpen = false;
 let revealTimer = 0;
@@ -967,7 +995,7 @@ function ensureLayout(): void {
       if (!kimiL) {
         kimiL = defaultProviderLayout(
           lastSnapshots.find((s) => s.id === "kimi"),
-          lastSpend.find((sp) => sp.id === "kimi"),
+          spendFor("kimi"),
           false,
         );
         layout.providers.kimi = kimiL;
@@ -992,7 +1020,7 @@ function ensureLayout(): void {
       layout.providerOrder.push(s.id);
       changed = true;
     }
-    const spend = lastSpend.find((sp) => sp.id === s.id);
+    const spend = spendFor(s.id);
     let L = layout.providers[s.id];
     if (!L) {
       // One-time migration: providers picked in the old tray-strip setting
@@ -1372,7 +1400,9 @@ function renderMetric(m: Metric, providerId: string): string {
 }
 
 function renderTrend(spend: ProviderSpend): string {
-  if (!spend.trend.some((v) => v > 0)) return "";
+  // Only cards kept through a quiet month (StepFun) arrive all-zero:
+  // they draw a flat baseline instead of dropping the row.
+  const empty = !spend.trend.some((v) => v > 0);
   const max = Math.max(...spend.trend);
   const peakIdx = spend.trend.indexOf(max);
   const dayMs = 86_400_000;
@@ -1390,12 +1420,14 @@ function renderTrend(spend: ProviderSpend): string {
       </g>`;
     })
     .join("");
-  const title = t("spend.trendTip", {
-    from: dateOf(0),
-    to: dateOf(29),
-    tokens: fmtTokens(max),
-    peak: dateOf(peakIdx),
-  });
+  const title = empty
+    ? t("spend.trend")
+    : t("spend.trendTip", {
+        from: dateOf(0),
+        to: dateOf(29),
+        tokens: fmtTokens(max),
+        peak: dateOf(peakIdx),
+      });
   return `
     <div class="metric-text trend-row">
       <span title="${escapeHtml(title)}">${escapeHtml(t("spend.trend"))}</span>
@@ -1472,7 +1504,7 @@ function minimalItemKey(s: Snapshot): string | null {
     providerFamily(s.id) === "sub2api"
       ? sub2ApiLiveLayout(s.metrics, providerLayout(s.id))
       : providerLayout(s.id);
-  const spend = lastSpend.find((sp) => sp.id === s.id);
+  const spend = spendFor(s.id);
   const visible = L.metricOrder.filter(
     (k) => !L.hidden.includes(k) && canRenderMinimal(s, spend, k),
   );
@@ -1496,7 +1528,7 @@ function renderCard(s: Snapshot): string {
   let caret = "";
   if (s.status === "ok") {
     const L = providerFamily(s.id) === "sub2api" ? sub2ApiLiveLayout(s.metrics, providerLayout(s.id)) : providerLayout(s.id);
-    const spend = lastSpend.find((sp) => sp.id === s.id);
+    const spend = spendFor(s.id);
     if (config.minimal) {
       const key = minimalItemKey(s);
       body = key
@@ -3442,7 +3474,7 @@ function updateTrailActive(): void {
 function showTrendTip(el: HTMLElement): void {
   const tip = document.querySelector<HTMLElement>("#model-tip")!;
   const [id, idxStr] = (el.dataset.trend ?? "").split("|");
-  const spend = lastSpend.find((s) => s.id === id);
+  const spend = spendFor(id);
   const i = Number(idxStr);
   if (!spend || Number.isNaN(i)) return;
   modelTipRow = null;
@@ -3474,7 +3506,7 @@ let modelTipRow: HTMLElement | null = null;
 function showModelTip(row: HTMLElement): void {
   const tip = document.querySelector<HTMLElement>("#model-tip")!;
   const [id, key] = (row.dataset.spend ?? "").split("|");
-  const spend = lastSpend.find((s) => s.id === id);
+  const spend = spendFor(id);
   const w = spend?.[key as SpendTab];
   if (!w) return;
   // Moving between children of the open row must not rerender or reset
@@ -4243,6 +4275,7 @@ async function refresh(force = false, usageOnly = false): Promise<void> {
   if (spend && myGen >= lastAppliedSpendGen) {
     lastSpend = spend;
     lastAppliedSpendGen = myGen;
+    spendScanned = true;
   }
   if (lastSnapshots.length) ensureLayout();
   if (!customizeOpen && lastSnapshots.length) renderIfVisible();
@@ -4617,7 +4650,7 @@ function handleCustomizeClick(target: HTMLElement): boolean {
   if (reset && config.layout) {
     const id = reset.dataset.reset!;
     const snapshot = lastSnapshots.find((s) => s.id === id);
-    const spend = lastSpend.find((sp) => sp.id === id);
+    const spend = spendFor(id);
     config.layout.providers[id] = defaultProviderLayout(snapshot, spend, false);
     saveLayout();
     renderAll();
@@ -5746,15 +5779,6 @@ async function initSettings(): Promise<void> {
     requestTraySync();
   });
 
-  const stepfunPlan = document.querySelector<HTMLSelectElement>("#stepfun-plan")!;
-  stepfunPlan.value =
-    config.stepfunPlanCredits == null ? "" : String(config.stepfunPlanCredits);
-  stepfunPlan.addEventListener("change", () => {
-    const v = stepfunPlan.value;
-    // Await the write: the backend reads the tier from config.json.
-    void patchConfig({ stepfunPlanCredits: v ? Number(v) : null }).then(() => refresh(true, true));
-  });
-
   const notifyToggles: [string, keyof Config][] = [
     ["#notify-reset", "notifyReset"],
     ["#notify-almost", "notifyAlmostOut"],
@@ -5933,7 +5957,6 @@ async function resetAllSettings(): Promise<void> {
     seasonShown: "",
     appearanceBeforeSeason: "",
     locale: "auto",
-    stepfunPlanCredits: null,
     widgetMode: false,
     widgetCollapsed: false,
     widgetLocked: false,
@@ -5969,10 +5992,6 @@ function syncSettingsControls(): void {
   setCheck("#pacing", config.pacingAlways);
   setSelect("#timeformat", config.timeFormat);
   setSelect("#locale", config.locale);
-  setSelect(
-    "#stepfun-plan",
-    config.stepfunPlanCredits == null ? "" : String(config.stepfunPlanCredits),
-  );
   setCheck("#notify-reset", config.notifyReset);
   setCheck("#notify-almost", config.notifyAlmostOut);
   setCheck("#notify-close", config.notifyCuttingClose);

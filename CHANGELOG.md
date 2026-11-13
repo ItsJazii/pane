@@ -12,6 +12,14 @@
   so Pane doesn't draw a quota bar. A separate Coding Plan key saved in
   Pane still shows its Coding Plan quotas, and the Token Plan key is
   never sent to Alibaba's Coding Plan console.
+- **StepFun card shows Usage Trend and spend rows** (Today / Yesterday /
+  Last 30 Days) like DeepSeek's card. They stay on the card in a month
+  with no local StepFun usage; the trend is a flat line until usage is
+  logged.
+
+### Changed
+- **Removed the Step Plan tier picker from Settings.** A plan-only
+  StepFun key still shows a "Plan Credits" estimate from your logs.
 
 ### Fixed
 - **Qwen4 Max Preview in Qwen Code is priced.** `qwen4-max-preview`
@@ -20,6 +28,9 @@
   $1.059 out per million tokens) instead of showing $0.
 - **Qwen Token Plan card no longer links to the Coding Plan console**,
   a different Alibaba product.
+- **StepFun no longer shows the same amount twice** when the whole
+  balance is vouchers.
+
 
 ## 0.5.3 — 2026-11-11
 
