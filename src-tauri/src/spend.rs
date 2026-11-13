@@ -3890,6 +3890,8 @@ fn cognition_stem(slug: &str) -> bool {
         }
     }
     matches!(stem, "swe-1.7" | "swe-1-7" | "swe-1.6" | "swe-1-6" | "penguin")
+        || stem == "swe-2"
+        || stem.starts_with("swe-2-")
 }
 
 /// One Kimi Code CLI wire.jsonl line → spend event. usage.record rows are
@@ -6176,6 +6178,8 @@ mod tests {
         assert_eq!(devin_model("swe-1-6-fast"), "swe-1-6");
         assert_eq!(devin_model("swe-1-7-medium"), "swe-1-7");
         assert_eq!(devin_model("swe-1-7-lightning"), "swe-1-7-lightning");
+        assert_eq!(devin_model("swe-2-max-lightning-fast"), "swe-2-max-lightning");
+        assert_eq!(devin_model("swe-2-flash-high"), "swe-2-flash");
     }
 
     /// Devin review regression: `devin_model` used to strip `-fast` from

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **SWE-2 models are priced.** Cognition's SWE-2 and SWE-2 Flash show
+  $0.00 (free) instead of counting tokens with no rate, and SWE-2 Max
+  Lightning prices at its promo card — $1 in / $5 out / $0.10 cached
+  input per million tokens ("83% off until 2027-01-01"). Devin's
+  `-fast` mode and effort tails stay on the same card, matching SWE-1.
+
 ## 0.5.3 — 2026-11-11
 
 ### Added
