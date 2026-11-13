@@ -183,7 +183,7 @@ error text) — see [Privacy](#privacy--security) for the full contract.
 | AihubMix | API key (Settings or auto-detected from OpenCode) → usage vs spending limit; new models are priced from AihubMix's own public price list |
 | One/New API | Add multiple compatible sites and keys in Settings; one quota card per key, with owner-only local secret storage |
 | Sub2API | Add multiple Sub2API sites and keys in Settings; one card per key from each site's `GET /v1/usage` — keys stay owner-only local and are sent only to the configured origin |
-| Qwen Code | Coding Plan key (Settings or env) → 5h/weekly/monthly request quotas + local spend |
+| Qwen Code | Coding Plan key (Settings or env) → 5h/weekly/monthly request quotas + local spend; Token Plan detected from Qwen Code's settings → local requests + spend + QwenCloud dashboard link |
 | Hermes | Local ledger `%LOCALAPPDATA%\hermes\state.db` → two recent user models, routes, and catalog-priced spend, including scoped AihubMix launch-model rates |
 
 *OpenCode's meters use the official usage API that shipped in

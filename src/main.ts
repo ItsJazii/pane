@@ -1558,7 +1558,10 @@ function renderCard(s: Snapshot): string {
   const family = providerFamily(s.id);
   const dashUrl = (s.dashboard_url ?? "").trim();
   const dashOk = /^https?:\/\//i.test(dashUrl);
-  const staticLinks = PROVIDER_LINKS[s.id] ?? PROVIDER_LINKS[family] ?? [];
+  // A Qwen Token Plan card carries QwenCloud's usage page; the static
+  // Coding Plan link points at a different product's console.
+  const staticLinks =
+    dashOk && family === "qwen" ? [] : (PROVIDER_LINKS[s.id] ?? PROVIDER_LINKS[family] ?? []);
   const linkItems = dashOk
     ? [{ label: "Dashboard", url: dashUrl }, ...staticLinks.filter((l) => l.label !== "Dashboard")]
     : staticLinks;
