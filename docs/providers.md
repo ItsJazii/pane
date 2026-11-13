@@ -223,6 +223,11 @@ guessed dollar amount.
   uses the same built-in Anthropic card as the Claude card. Gemini 4
   Argon and Carbon price at Google's rates: $2 in / $10 out / $0.10
   cache read through Nov 30, 2026 (Pacific time), then $4 / $20 / $0.20.
+  Cognition's own models use built-in cards: SWE-1.6 / SWE-1.7 / Penguin
+  $0.50 / $2.50 / $0.20 (Lightning $2.50 / $12.50 / $1.00); SWE-2 and
+  SWE-2 Flash are free ($0.00, no ⚠); SWE-2 Max Lightning $1 / $5 /
+  $0.10 cache read at its promo rate. Devin's `-fast` mode on these
+  models bills at the same card, not a 2× fast tier.
 
 ## Droid (Factory)
 

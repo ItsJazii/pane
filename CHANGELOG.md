@@ -1,9 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.5.4 — 2026-11-13
+
+0.5.4 also ships everything listed under 0.5.3, which was published
+briefly and pulled back.
 
 ### Added
-- **Qwen Token Plan card.** If Qwen Code is set up on QwenCloud's Token
+- **Qwen Token Plan card (#319).** If Qwen Code is set up on QwenCloud's Token
   Plan, Pane spots it from Qwen Code's own settings with nothing to set
   up. The card says "Token Plan", shows today's and this month's
   requests, Usage Trend and Today / Yesterday / Last 30 Days spend, and
@@ -12,32 +15,32 @@
   so Pane doesn't draw a quota bar. A separate Coding Plan key saved in
   Pane still shows its Coding Plan quotas, and the Token Plan key is
   never sent to Alibaba's Coding Plan console.
-- **StepFun card shows Usage Trend and spend rows** (Today / Yesterday /
+- **StepFun card shows Usage Trend and spend rows (#320)** (Today / Yesterday /
   Last 30 Days) like DeepSeek's card. They stay on the card in a month
   with no local StepFun usage; the trend is a flat line until usage is
   logged.
-- **SWE-2 models are priced.** Cognition's SWE-2 and SWE-2 Flash show
+- **SWE-2 models are priced (#321).** Cognition's SWE-2 and SWE-2 Flash show
   $0.00 (free) instead of counting tokens with no rate, and SWE-2 Max
   Lightning prices at its promo card — $1 in / $5 out / $0.10 cached
   input per million tokens ("83% off until 2027-01-01"). Devin's
   `-fast` mode and effort tails stay on the same card, matching SWE-1.
 
 ### Changed
-- **Removed the Step Plan tier picker from Settings.** A plan-only
+- **Removed the Step Plan tier picker from Settings (#320).** A plan-only
   StepFun key still shows a "Plan Credits" estimate from your logs.
 
 ### Fixed
-- **Qwen4 Max Preview in Qwen Code is priced.** `qwen4-max-preview`
+- **Qwen4 Max Preview in Qwen Code is priced (#319).** `qwen4-max-preview`
   (logged as `qwen4.0-max-preview`) has no published per-token price,
   so it's estimated at AIHubMix's rate for the same model ($0.353 in /
   $1.059 out per million tokens) instead of showing $0.
-- **Qwen Token Plan card no longer links to the Coding Plan console**,
+- **Qwen Token Plan card no longer links to the Coding Plan console (#319)**,
   a different Alibaba product.
-- **StepFun no longer shows the same amount twice** when the whole
+- **StepFun no longer shows the same amount twice (#320)** when the whole
   balance is vouchers.
 
 
-## 0.5.3 — 2026-11-11
+## 0.5.3 — 2026-11-11 (pulled back; shipped in 0.5.4)
 
 ### Added
 - **New AIHubMix models price themselves (#317).** When you use a model
