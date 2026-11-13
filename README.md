@@ -173,7 +173,7 @@ error text) — see [Privacy](#privacy--security) for the full contract.
 | Z.ai | API key (Settings), CLI key file, or env var |
 | Antigravity | Local language server, or Google Cloud Code API via Credential Manager; local conversation databases for spend |
 | DeepSeek | API key (Settings) → balance |
-| StepFun | API key (Settings, or Step Code's saved `platform_*` key as fallback) → balance + vouchers with credits-used meter; Step Plan tier is opt-in in Settings; `step-*` spend routed from Claude Code / Codex / OpenCode / oh-my-pi / Step Code |
+| StepFun | API key (Settings, or Step Code's saved `platform_*` key as fallback) → balance + vouchers with credits-used meter, usage trend; `step-*` spend routed from Claude Code / Codex / OpenCode / oh-my-pi / Step Code |
 | Kimi API | Platform API key (Settings) → wallet balance and credits-used meter (global + CN endpoints) |
 | Kimi Code | Official CLI login (`kimi login`) or pasted Kimi For Coding plan key → Session + Weekly bars and membership name (Moderato / Allegretto / Allegro / Vivace); optional Kimi API wallet bar; local session spend |
 | ElevenLabs | API key (Settings) → character quota with reset pacing |

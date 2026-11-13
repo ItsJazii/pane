@@ -109,7 +109,7 @@ Pane 是一款轻量的 Tauri v2 应用：Rust 核心负责数据处理，原生
 | Z.ai | API Key（设置）、CLI Key 文件或环境变量 |
 | Antigravity | 本地语言服务器，或通过凭据管理器访问 Google Cloud Code API；本地对话数据库用于统计花费 |
 | DeepSeek | API Key（设置）→ 余额 |
-| StepFun | API Key（设置，未配置时回退到 Step Code 保存的 `platform_*` Key）→ 余额、抵用券和已用额度；Step Plan 套餐档位在设置中手动选用；`step-*` 花费从 Claude Code / Codex / OpenCode / oh-my-pi / Step Code 记录归集 |
+| StepFun | API Key（设置，未配置时回退到 Step Code 保存的 `platform_*` Key）→ 余额、抵用券和已用额度，用量趋势；`step-*` 花费从 Claude Code / Codex / OpenCode / oh-my-pi / Step Code 记录归集 |
 | Kimi API | 平台 API Key（设置）→ 钱包余额和已用额度（支持国际站与中国站接口） |
 | Kimi Code | 官方 CLI 登录（`kimi login`）或粘贴 Kimi For Coding 套餐 Key → 会话及每周额度进度条、会员名称（Moderato / Allegretto / Allegro / Vivace）；可选显示 Kimi API 钱包余额；统计本地会话花费 |
 | ElevenLabs | API Key（设置）→ 字符额度及重置进度预测 |

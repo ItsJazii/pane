@@ -236,7 +236,6 @@ export interface Config {
   configRev: number;
   appearanceBeforeSeason: string;
   locale: LocalePref;
-  stepfunPlanCredits: number | null;
   widgetMode: boolean;
   widgetCollapsed: boolean;
   widgetLocked: boolean;
@@ -279,7 +278,6 @@ const FRONTEND_CONFIG_KEYS = [
   "configRev",
   "appearanceBeforeSeason",
   "locale",
-  "stepfunPlanCredits",
   "widgetMode",
   "widgetCollapsed",
   "widgetLocked",
@@ -497,7 +495,6 @@ let config: Config = {
   configRev: 0,
   appearanceBeforeSeason: "",
   locale: "auto",
-  stepfunPlanCredits: null,
   widgetMode: false,
   widgetCollapsed: false,
   widgetLocked: false,
@@ -1372,7 +1369,9 @@ function renderMetric(m: Metric, providerId: string): string {
 }
 
 function renderTrend(spend: ProviderSpend): string {
-  if (!spend.trend.some((v) => v > 0)) return "";
+  // Only cards kept through a quiet month (StepFun) arrive all-zero:
+  // they draw a flat baseline instead of dropping the row.
+  const empty = !spend.trend.some((v) => v > 0);
   const max = Math.max(...spend.trend);
   const peakIdx = spend.trend.indexOf(max);
   const dayMs = 86_400_000;
@@ -1390,12 +1389,14 @@ function renderTrend(spend: ProviderSpend): string {
       </g>`;
     })
     .join("");
-  const title = t("spend.trendTip", {
-    from: dateOf(0),
-    to: dateOf(29),
-    tokens: fmtTokens(max),
-    peak: dateOf(peakIdx),
-  });
+  const title = empty
+    ? t("spend.trend")
+    : t("spend.trendTip", {
+        from: dateOf(0),
+        to: dateOf(29),
+        tokens: fmtTokens(max),
+        peak: dateOf(peakIdx),
+      });
   return `
     <div class="metric-text trend-row">
       <span title="${escapeHtml(title)}">${escapeHtml(t("spend.trend"))}</span>
@@ -5743,15 +5744,6 @@ async function initSettings(): Promise<void> {
     requestTraySync();
   });
 
-  const stepfunPlan = document.querySelector<HTMLSelectElement>("#stepfun-plan")!;
-  stepfunPlan.value =
-    config.stepfunPlanCredits == null ? "" : String(config.stepfunPlanCredits);
-  stepfunPlan.addEventListener("change", () => {
-    const v = stepfunPlan.value;
-    // Await the write: the backend reads the tier from config.json.
-    void patchConfig({ stepfunPlanCredits: v ? Number(v) : null }).then(() => refresh(true, true));
-  });
-
   const notifyToggles: [string, keyof Config][] = [
     ["#notify-reset", "notifyReset"],
     ["#notify-almost", "notifyAlmostOut"],
@@ -5930,7 +5922,6 @@ async function resetAllSettings(): Promise<void> {
     seasonShown: "",
     appearanceBeforeSeason: "",
     locale: "auto",
-    stepfunPlanCredits: null,
     widgetMode: false,
     widgetCollapsed: false,
     widgetLocked: false,
@@ -5966,10 +5957,6 @@ function syncSettingsControls(): void {
   setCheck("#pacing", config.pacingAlways);
   setSelect("#timeformat", config.timeFormat);
   setSelect("#locale", config.locale);
-  setSelect(
-    "#stepfun-plan",
-    config.stepfunPlanCredits == null ? "" : String(config.stepfunPlanCredits),
-  );
   setCheck("#notify-reset", config.notifyReset);
   setCheck("#notify-almost", config.notifyAlmostOut);
   setCheck("#notify-close", config.notifyCuttingClose);

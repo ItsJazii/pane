@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **StepFun card shows Usage Trend and spend rows** (Today / Yesterday /
+  Last 30 Days) like DeepSeek's card. They stay on the card in a month
+  with no local StepFun usage; the trend is a flat line until usage is
+  logged.
+
+### Changed
+- **Removed the Step Plan tier picker from Settings.** A plan-only
+  StepFun key still shows a "Plan Credits" estimate from your logs.
+
+### Fixed
+- **StepFun no longer shows the same amount twice** when the whole
+  balance is vouchers.
+
 ## 0.5.3 — 2026-11-11
 
 ### Added

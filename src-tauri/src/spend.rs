@@ -4340,7 +4340,12 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
                 .collect(),
         );
     }
-    list.into_iter().filter(ProviderSpend::has_data).collect()
+    // StepFun's card is an API-key wallet card like DeepSeek's: keep its
+    // Today / Yesterday / 30-day rows (and the trend once usage lands)
+    // even through a quiet month instead of dropping the whole block.
+    list.into_iter()
+        .filter(|sp| sp.has_data() || sp.id == "stepfun")
+        .collect()
 }
 
 #[cfg(test)]
