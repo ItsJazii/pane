@@ -216,7 +216,9 @@ mod tests {
         let cli_db = dir.join("cli.db");
         let next_db = dir.join("next.db");
         // The SAME id-less row (session, ts, model, counters) imported
-        // into both stores → counted once (cli wins).
+        // into both stores → counted once (cli wins). One shared stamp
+        // inside the 32-day read window — a fixed date ages out of it.
+        let ts = now_s() - 3600;
         for (db, birth) in [
             (cli_db.clone(), "2026-05-30T00:00:00Z"),
             (next_db.clone(), "2026-10-17T17:29:51Z"),
@@ -224,7 +226,7 @@ mod tests {
             let conn = create_db(&db, birth);
             conn.execute("INSERT INTO sessions VALUES ('s1', 'model-a')", [])
                 .unwrap();
-            insert_message(&conn, "s1", &idless_msg(10, 4), 1_791_000_000);
+            insert_message(&conn, "s1", &idless_msg(10, 4), ts);
         }
         let mut states = HashMap::new();
         let stores: Vec<(&'static str, PathBuf, Option<PathBuf>)> = vec![
@@ -244,8 +246,8 @@ mod tests {
         let conn = create_db(&only, "2026-05-30T00:00:00Z");
         conn.execute("INSERT INTO sessions VALUES ('s1', 'model-a')", [])
             .unwrap();
-        insert_message(&conn, "s1", &idless_msg(10, 4), 1_791_000_000);
-        insert_message(&conn, "s1", &idless_msg(10, 4), 1_791_000_000);
+        insert_message(&conn, "s1", &idless_msg(10, 4), ts);
+        insert_message(&conn, "s1", &idless_msg(10, 4), ts);
         drop(conn);
         let mut states = HashMap::new();
         let stores: Vec<(&'static str, PathBuf, Option<PathBuf>)> = vec![("cli", only, None)];
@@ -266,15 +268,16 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let a_db = dir.join("cli.db");
         let b_db = dir.join("next.db");
+        let ts = now_s() - 3600;
         let a = create_db(&a_db, "2026-05-30T00:00:00Z");
         a.execute("INSERT INTO sessions VALUES ('s1', 'model-a')", [])
             .unwrap();
-        insert_message(&a, "s1", &idless_msg(10, 4), 1_791_000_000);
+        insert_message(&a, "s1", &idless_msg(10, 4), ts);
         let b = create_db(&b_db, "2026-10-17T17:29:51Z");
         b.execute("INSERT INTO sessions VALUES ('s1', 'model-a')", [])
             .unwrap();
-        insert_message(&b, "s1", &idless_msg(10, 4), 1_791_000_000);
-        insert_message(&b, "s1", &idless_msg(10, 4), 1_791_000_000);
+        insert_message(&b, "s1", &idless_msg(10, 4), ts);
+        insert_message(&b, "s1", &idless_msg(10, 4), ts);
         let mut states = HashMap::new();
         let stores: Vec<(&'static str, PathBuf, Option<PathBuf>)> = vec![
             ("cli", a_db, None),

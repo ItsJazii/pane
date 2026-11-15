@@ -1071,6 +1071,11 @@ struct CachedSnap {
 fn last_ok() -> &'static Mutex<HashMap<String, CachedSnap>> {
     static LAST_OK: OnceLock<Mutex<HashMap<String, CachedSnap>>> = OnceLock::new();
     LAST_OK.get_or_init(|| {
+        // Tests never read the user's real cache: cards cached on the
+        // machine running them would leak into key-change assertions.
+        if cfg!(test) {
+            return Mutex::new(HashMap::new());
+        }
         let cache_file = providers::config_dir().join("last_snapshots.json");
         let loaded = std::fs::read_to_string(&cache_file)
             .ok()
@@ -4547,16 +4552,35 @@ mod tests {
 
     struct SnapCacheGuard(String);
 
+    /// Card ids a running test currently owns. fail_state, last_ok and the
+    /// key-card generation counters are process-global, so two parallel
+    /// tests on the same id (several MiniMax key tests) would bump each
+    /// other's counters; the guard makes same-id tests take turns.
+    fn guarded_ids() -> &'static (std::sync::Mutex<std::collections::HashSet<String>>, std::sync::Condvar) {
+        static IDS: std::sync::OnceLock<(std::sync::Mutex<std::collections::HashSet<String>>, std::sync::Condvar)> =
+            std::sync::OnceLock::new();
+        IDS.get_or_init(Default::default)
+    }
+
     impl SnapCacheGuard {
         fn new(id: &str) -> Self {
+            let (ids, freed) = guarded_ids();
+            let mut held = ids.lock().unwrap_or_else(|e| e.into_inner());
+            while held.contains(id) {
+                held = freed.wait(held).unwrap_or_else(|e| e.into_inner());
+            }
+            held.insert(id.to_string());
             Self(id.to_string())
         }
     }
 
     impl Drop for SnapCacheGuard {
         fn drop(&mut self) {
-            fail_state().lock().unwrap().remove(&self.0);
-            last_ok().lock().unwrap().remove(&self.0);
+            fail_state().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+            last_ok().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+            let (ids, freed) = guarded_ids();
+            ids.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+            freed.notify_all();
         }
     }
 
