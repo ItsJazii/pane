@@ -1,14 +1,24 @@
 # Changelog
 
-## Unreleased
+## 0.5.5 — 2026-11-17
 
 ### Fixed
-- **OpenCode Go usage shows dollars again.** OpenCode writes a cost of
+- **OpenCode Go usage shows dollars again (#327).** OpenCode writes a cost of
   $0 for models its own price list doesn't know yet (Qwen 4 Max) and
   for many Go-plan messages since early November, so the OpenCode
   card counted tokens at $0.00. Pane now prices those messages from
   its price lists, like every other card. Free models and OpenCode
   Zen messages keep OpenCode's own cost.
+
+### Security
+- **Library security updates (#325).** Updated the bundled SQLite
+  (CVE-2026-119375), the QUIC networking library and the trusted root
+  certificates, and replaced a few withdrawn library versions. No
+  changes to how Pane behaves.
+
+### Maintenance
+- Release builds now run on Node 24 (#324), and the test suite no
+  longer fails on dates or on data cached on the build machine (#323).
 
 ## 0.5.4 — 2026-11-13
 
