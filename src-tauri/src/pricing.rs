@@ -576,6 +576,18 @@ pub fn seed_aihubmix_for_test(id: &str, price: Price) {
     s.memo.clear();
 }
 
+/// Test hook: give `id` a price in the shared supplement (checked first).
+/// Same rule as above — ids no real source carries.
+#[cfg(test)]
+pub fn seed_price_for_test(id: &str, price: Price) {
+    let mut s = store().lock().unwrap();
+    if !s.loaded_from_disk {
+        load_from_disk(&mut s);
+    }
+    s.supplement.insert(id.to_string(), price);
+    s.memo.clear();
+}
+
 pub fn generation() -> u64 {
     GENERATION.load(std::sync::atomic::Ordering::Relaxed)
 }

@@ -3471,14 +3471,56 @@ fn grok_line(model_by_pid: &mut HashMap<i64, String>, line: &str, data: &mut Fil
 /// Codex) before building each card's spend. StepFun rows arrive either
 /// under a `stepfun` provider id or as `step-*` model slugs logged while
 /// pointed at the Step Plan base URL.
+/// OpenCode writes `cost: 0` when its own price table doesn't know the
+/// model — brand-new models (qwen4-max on Go) and, since early Nov 2026,
+/// most Go-plan rows — so the tokens show at $0. Price those through
+/// Pane's chain like every other card. Kept at OpenCode's $0: rows with no
+/// tokens, `-free` / `:free` SKUs, Zen (`opencode`) rows — Zen bills real
+/// money and records it, so a $0 there is a free model — and models no
+/// source prices (no ⚠: OpenCode said $0, which may well be right).
+fn opencode_zero_cost_price(
+    model: &str,
+    provider: &str,
+    split: &providers::opencode::TokenSplit,
+    ts: DateTime<Utc>,
+) -> Option<f64> {
+    if provider == "opencode"
+        || split.input + split.output + split.cache_read + split.cache_write <= 0.0
+    {
+        return None;
+    }
+    let bare = model.rsplit('/').next().unwrap_or(model).to_ascii_lowercase();
+    if bare.ends_with("-free") || bare.ends_with(":free") || bare.contains("-free-") {
+        return None;
+    }
+    let scoped = (provider == "aihubmix").then(|| pricing::aihubmix_gateway_slug(model));
+    let slug = scoped.as_deref().unwrap_or(model);
+    let (cost_model, p) = probe_lookup(slug)
+        .map(|p| (slug.to_string(), p))
+        .or_else(|| (provider == "aihubmix").then(|| probe_aihubmix_catalog(model)).flatten())?;
+    let u = pricing::Usage {
+        input: split.input,
+        output: split.output,
+        cache_read: split.cache_read,
+        cache_write_5m: split.cache_write,
+        cache_write_1h: 0.0,
+    };
+    Some(cost_for(&cost_model, &p, &u, 200_000.0, ts))
+}
+
 fn fold_opencode_data(
-    events: impl IntoIterator<Item = (f64, f64, f64, String, String)>,
+    events: impl IntoIterator<Item = providers::opencode::CostEvent>,
 ) -> (FileData, FileData, FileData) {
     let mut oc = FileData::default();
     let mut aihubmix = FileData::default();
     let mut stepfun = FileData::default();
-    for (ts_ms, cost, tokens, model, provider) in events {
+    for (ts_ms, cost, tokens, model, provider, split) in events {
         if let Some(ts) = DateTime::from_timestamp_millis(ts_ms as i64) {
+            let cost = if cost > 0.0 {
+                cost
+            } else {
+                opencode_zero_cost_price(&model, &provider, &split, ts).unwrap_or(0.0)
+            };
             let target = if provider == "aihubmix" {
                 &mut aihubmix
             } else if provider == "stepfun" || is_stepfun_model(&model) {
@@ -7267,12 +7309,37 @@ mod tests {
     }
 
     #[test]
+    fn opencode_zero_cost_rows_price_through_the_chain() {
+        use providers::opencode::TokenSplit;
+        pricing::seed_price_for_test("pane-test-oc-model", pricing::Price::flat(1.0, 4.0, 0.1, 1.25));
+        let split = TokenSplit { input: 1e6, output: 1e6, cache_read: 1e6, cache_write: 1e6 };
+        let row = |cost: f64, model: &str, provider: &str| {
+            (1_794_857_000_000.0, cost, 2e6, model.to_string(), provider.to_string(), split)
+        };
+        let (oc, _, _) = fold_opencode_data([
+            // Go row OpenCode left at $0 → $1 + $4 + $0.10 + $1.25.
+            row(0.0, "pane-test-oc-model", "opencode-go"),
+            // A recorded cost always wins.
+            row(0.5, "pane-test-oc-model", "opencode-go"),
+            // Free SKUs, Zen, and unknown models keep OpenCode's $0.
+            row(0.0, "pane-test-oc-model-free", "opencode-go"),
+            row(0.0, "pane-test-oc-model", "opencode"),
+            row(0.0, "pane-test-oc-unknown", "opencode-go"),
+        ]);
+        assert!((cost_sum(&oc) - (6.35 + 0.5)).abs() < 1e-9, "{}", cost_sum(&oc));
+        // Every row still counts its tokens, and nothing is flagged ⚠.
+        assert_eq!(oc.days.values().map(|v| v.1).sum::<f64>(), 10e6);
+        assert!(oc.unpriced.is_empty());
+    }
+
+    #[test]
     fn opencode_provider_wins_over_stepfun_prefixed_model() {
         // An aihubmix-routed row keeps its card even when the model slug
         // itself would match StepFun — provider overrides stay.
+        let none = providers::opencode::TokenSplit::default();
         let (_oc, aihubmix, stepfun) = fold_opencode_data([
-            (1000.0, 1.0, 10.0, "aihubmix/step-3.7-flash".into(), "aihubmix".into()),
-            (1000.0, 2.0, 20.0, "stepfun/step-3.7-flash".into(), "openrouter".into()),
+            (1000.0, 1.0, 10.0, "aihubmix/step-3.7-flash".into(), "aihubmix".into(), none),
+            (1000.0, 2.0, 20.0, "stepfun/step-3.7-flash".into(), "openrouter".into(), none),
         ]);
         assert_eq!(cost_sum(&aihubmix), 1.0);
         assert_eq!(cost_sum(&stepfun), 2.0);
