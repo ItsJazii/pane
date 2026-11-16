@@ -751,15 +751,27 @@ fn utc_date(year: i32, month: u32, day: u32, h: u32, m: u32, s: u32, ms: u32) ->
         .unwrap_or(0.0)
 }
 
-/// (timestamp ms, cost $, tokens, model, provider) of every priced
-/// message, any provider — this is money spent through OpenCode, used by
-/// Total Spend. The provider id lets the spend engine split gateway
-/// providers (AihubMix) into their own slice.
-pub fn collect_cost_events() -> Vec<(f64, f64, f64, String, String)> {
+/// Per-bucket token counts of one message, for pricing a row OpenCode
+/// wrote with `cost: 0`. Reasoning tokens bill as output.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TokenSplit {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+}
+
+/// (timestamp ms, cost $, tokens, model, provider, token split).
+pub type CostEvent = (f64, f64, f64, String, String, TokenSplit);
+
+/// Every message with cost or tokens, any provider — this is money spent
+/// through OpenCode, used by Total Spend. The provider id lets the spend
+/// engine split gateway providers (AihubMix) into their own slice.
+pub fn collect_cost_events() -> Vec<CostEvent> {
     collect_cost_events_in(&data_dir())
 }
 
-pub fn collect_cost_events_in(dir: &Path) -> Vec<(f64, f64, f64, String, String)> {
+pub fn collect_cost_events_in(dir: &Path) -> Vec<CostEvent> {
     let mut rows: Vec<CostRow> = Vec::new();
     for db in opencode_dbs(dir) {
         rows.extend(collect_db_cost_events(&db));
@@ -773,19 +785,19 @@ pub fn collect_cost_events_in(dir: &Path) -> Vec<(f64, f64, f64, String, String)
     let (v2, v1): (Vec<CostRow>, Vec<CostRow>) = rows.into_iter().partition(|r| r.6);
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::new();
-    for (ts, cost, tokens, model, provider, id, _v2) in v2.into_iter().chain(v1) {
+    for (ts, cost, tokens, model, provider, id, _v2, split) in v2.into_iter().chain(v1) {
         if !id.is_empty() && !seen.insert(id) {
             continue;
         }
-        out.push((ts, cost, tokens, model, provider));
+        out.push((ts, cost, tokens, model, provider, split));
     }
     out
 }
 
-/// (ts, cost, tokens, model, provider, id, from session_message) — the id
-/// and source flag ride along so callers can dedupe OpenCode 2's copied
-/// rows across tables and DBs, v2 winning.
-type CostRow = (f64, f64, f64, String, String, String, bool);
+/// (ts, cost, tokens, model, provider, id, from session_message, split) —
+/// the id and source flag ride along so callers can dedupe OpenCode 2's
+/// copied rows across tables and DBs, v2 winning.
+type CostRow = (f64, f64, f64, String, String, String, bool, TokenSplit);
 
 /// (mtime, length) — a change means new writes landed. Full SystemTime
 /// precision: truncating to millis would alias writes that land inside
@@ -930,7 +942,7 @@ fn scan_incremental(
             .and_then(|d| ledger_row(shape, tc, d))
             .and_then(|m| {
                 (m.cost > 0.0 || m.tokens > 0.0)
-                    .then_some((m.ts, m.cost, m.tokens, m.model, m.provider, id.clone(), v2))
+                    .then_some((m.ts, m.cost, m.tokens, m.model, m.provider, id.clone(), v2, m.split))
             });
         // An empty id still counts (dedupe skips empty ids downstream),
         // but the map needs a unique key — the rowid provides one.
@@ -1137,7 +1149,14 @@ fn ledger_row(shape: RowShape, time_created: i64, data: &str) -> Option<MessageR
     if matches!(shape, RowShape::V2Compaction) && cost <= 0.0 && tokens <= 0.0 {
         return None;
     }
-    Some(MessageRow { ts, cost, tokens, provider, model })
+    let num = |p: &str| msg.pointer(p).and_then(Value::as_f64).unwrap_or(0.0);
+    let split = TokenSplit {
+        input: num("/tokens/input"),
+        output: num("/tokens/output") + num("/tokens/reasoning"),
+        cache_read: num("/tokens/cache/read"),
+        cache_write: num("/tokens/cache/write"),
+    };
+    Some(MessageRow { ts, cost, tokens, provider, model, split })
 }
 
 /// Scan one ledger table into `sink` as (id, parsed row) pairs. `sql`
@@ -1201,6 +1220,7 @@ pub struct MessageRow {
     pub tokens: f64,
     pub provider: String,
     pub model: String,
+    pub split: TokenSplit,
 }
 
 /// Assistant/compaction rows across the channel DBs that hold THIS Go
@@ -1382,11 +1402,11 @@ mod tests {
         let mut c = DbCache::default();
         c.v2.rows.insert(
             "a".into(),
-            (old, Some((old as f64, 1.0, 10.0, "m".into(), "p".into(), "a".into(), true))),
+            (old, Some((old as f64, 1.0, 10.0, "m".into(), "p".into(), "a".into(), true, TokenSplit::default()))),
         );
         c.v2.rows.insert(
             "b".into(),
-            (fresh, Some((fresh as f64, 2.0, 20.0, "m".into(), "p".into(), "b".into(), true))),
+            (fresh, Some((fresh as f64, 2.0, 20.0, "m".into(), "p".into(), "b".into(), true, TokenSplit::default()))),
         );
         let kept = cached_spend_rows(&c);
         assert_eq!(kept.len(), 1);
@@ -1766,6 +1786,22 @@ mod tests {
             "tokens": {"input": 10, "output": 5, "reasoning": 0}
         })
         .to_string()
+    }
+
+    #[test]
+    fn token_split_bills_reasoning_as_output() {
+        let data = serde_json::json!({
+            "model": {"id": "qwen4-max", "providerID": "opencode-go"},
+            "cost": 0, "time": {"created": 1, "completed": 2},
+            "tokens": {"input": 7, "output": 8007, "reasoning": 3,
+                       "cache": {"read": 98950, "write": 921}}
+        })
+        .to_string();
+        let m = ledger_row(RowShape::V2Assistant, 1, &data).unwrap();
+        assert_eq!(
+            m.split,
+            TokenSplit { input: 7.0, output: 8010.0, cache_read: 98950.0, cache_write: 921.0 }
+        );
     }
 
     #[test]
@@ -2303,7 +2339,7 @@ mod tests {
             conn.execute_batch("PRAGMA user_version=7;").unwrap();
         }
         let second = collect_cost_events_in(&dir);
-        let key = |v: Vec<(f64, f64, f64, String, String)>| -> Vec<(i64, i64, String)> {
+        let key = |v: Vec<CostEvent>| -> Vec<(i64, i64, String)> {
             let mut k: Vec<_> = v
                 .into_iter()
                 .map(|r| ((r.1 * 1e9) as i64, (r.2 * 1e9) as i64, r.4))

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **OpenCode Go usage shows dollars again.** OpenCode writes a cost of
+  $0 for models its own price list doesn't know yet (Qwen 4 Max) and
+  for many Go-plan messages since early November, so the OpenCode
+  card counted tokens at $0.00. Pane now prices those messages from
+  its price lists, like every other card. Free models and OpenCode
+  Zen messages keep OpenCode's own cost.
+
 ## 0.5.4 — 2026-11-13
 
 0.5.4 also ships everything listed under 0.5.3, which was published

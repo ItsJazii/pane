@@ -184,7 +184,12 @@ guessed dollar amount.
   is unreachable, meters fall back to the old local computation from
   `opencode*.db` (rolling 5-hour session, UTC Monday-start week, monthly
   cycle anchored to your first-ever Go usage) — the fallback counts
-  this PC only. Dollar spend rows are always computed locally.
+  this PC only. Dollar spend rows are always computed locally, from
+  the cost OpenCode records per message. When OpenCode records `$0`
+  with real tokens (its own price table doesn't know the model, e.g.
+  brand-new `qwen4-max` on Go), Pane prices the tokens through its own
+  price chain instead. `-free` / `:free` models, Zen (`opencode`)
+  rows, and models no source prices stay at OpenCode's `$0`.
 
 ## GitHub Copilot
 
