@@ -255,6 +255,27 @@ mod tests {
         addr
     }
 
+    /// A working site: answers the quota and plan requests by path. The
+    /// two run concurrently, so serving bodies in arrival order would
+    /// hand the quota body to whichever request landed first.
+    fn serve_ok() -> String {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = format!("http://{}", server.server_addr());
+        std::thread::spawn(move || {
+            for _ in 0..2 {
+                let request = server.recv().unwrap();
+                let body = if request.url().contains("/quota/") {
+                    quota_body()
+                } else {
+                    json!({"data": []}).to_string()
+                };
+                let _ = request.respond(tiny_http::Response::from_string(body));
+            }
+            std::thread::park();
+        });
+        addr
+    }
+
     fn quota_body() -> String {
         json!({
             "data": { "limits": [
@@ -277,10 +298,7 @@ mod tests {
     #[tokio::test]
     async fn mainland_key_falls_through_to_the_second_site() {
         let zai = serve(vec![(401, rejected()), (401, rejected())]);
-        let bigmodel = serve(vec![
-            (200, quota_body()),
-            (200, json!({"data": []}).to_string()),
-        ]);
+        let bigmodel = serve_ok();
         let snap = fetch_with_key(&[zai.as_str(), bigmodel.as_str()], "k")
             .await
             .unwrap();
@@ -292,10 +310,7 @@ mod tests {
 
     #[tokio::test]
     async fn international_key_succeeds_without_touching_the_second_site() {
-        let zai = serve(vec![
-            (200, quota_body()),
-            (200, json!({"data": []}).to_string()),
-        ]);
+        let zai = serve_ok();
         let bigmodel_server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let bigmodel = format!("http://{}", bigmodel_server.server_addr());
         let snap = fetch_with_key(&[zai.as_str(), bigmodel.as_str()], "k")
@@ -342,10 +357,7 @@ mod tests {
     async fn down_international_site_falls_through_to_mainland() {
         // A 503 on api.z.ai must not strand a valid mainland key.
         let zai = serve(vec![(503, "down".into()), (503, "down".into())]);
-        let bigmodel = serve(vec![
-            (200, quota_body()),
-            (200, json!({"data": []}).to_string()),
-        ]);
+        let bigmodel = serve_ok();
         let snap = fetch_with_key(&[zai.as_str(), bigmodel.as_str()], "k")
             .await
             .unwrap();
@@ -366,10 +378,7 @@ mod tests {
 
     #[tokio::test]
     async fn unreachable_first_site_falls_through() {
-        let bigmodel = serve(vec![
-            (200, quota_body()),
-            (200, json!({"data": []}).to_string()),
-        ]);
+        let bigmodel = serve_ok();
         let snap = fetch_with_key(&["http://127.0.0.1:1", bigmodel.as_str()], "k")
             .await
             .unwrap();
