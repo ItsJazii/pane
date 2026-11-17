@@ -588,6 +588,20 @@ pub fn seed_price_for_test(id: &str, price: Price) {
     s.memo.clear();
 }
 
+/// Test hook: a lookup over the checked-in supplement (alias rules,
+/// cards) plus `catalog` rows, independent of this machine's cached
+/// downloads — for tests of callers that must not depend on what the
+/// live catalogs happen to hold.
+#[cfg(test)]
+pub fn shipped_feed_lookup_for_test(catalog: &[(&str, Price)]) -> impl Fn(&str) -> Option<Price> {
+    let doc: Value = serde_json::from_str(include_str!("../../pricing/supplement.json")).unwrap();
+    let mut s = Store::default();
+    apply_supplement(&mut s, &doc);
+    s.litellm = catalog.iter().map(|(id, p)| (id.to_string(), *p)).collect();
+    s.loaded_from_disk = true;
+    move |model| resolve(&s, model, 0)
+}
+
 pub fn generation() -> u64 {
     GENERATION.load(std::sync::atomic::Ordering::Relaxed)
 }

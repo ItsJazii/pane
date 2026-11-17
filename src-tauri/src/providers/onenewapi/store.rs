@@ -766,8 +766,11 @@ mod tests {
             let Ok(sid) = super::current_user_sid() else {
                 return false;
             };
+            let Ok(user) = sddl_trustee(&sid) else {
+                return false;
+            };
             sddl.contains("D:P")
-                && sddl.contains(&sid)
+                && sddl.contains(&format!(";;;{user})"))
                 && sddl.contains(";SY)")
                 && !sddl.contains(";WD)")
                 && !sddl.contains(";BU)")
@@ -782,6 +785,46 @@ mod tests {
         {
             let _ = path;
             true
+        }
+    }
+
+    /// How SDDL spells `sid` as an ACE trustee: well-known accounts
+    /// print as aliases (the built-in Administrator, RID 500, is `LA`),
+    /// so a raw SID string never appears in their DACLs.
+    #[cfg(windows)]
+    fn sddl_trustee(sid: &str) -> Result<String, String> {
+        use windows::core::{PCWSTR, PWSTR};
+        use windows::Win32::Security::Authorization::{
+            ConvertSecurityDescriptorToStringSecurityDescriptorW,
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        };
+        use windows::Win32::Security::{OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
+
+        let owner: Vec<u16> = format!("O:{sid}").encode_utf16().chain(Some(0)).collect();
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                PCWSTR(owner.as_ptr()),
+                SDDL_REVISION_1,
+                &mut sd,
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+            let _free_sd = super::LocalAlloc(sd.0);
+            let mut out = PWSTR::null();
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                sd,
+                SDDL_REVISION_1,
+                OWNER_SECURITY_INFORMATION,
+                &mut out,
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+            let _free_out = super::LocalAlloc(out.0.cast());
+            let text = out.to_string().map_err(|e| e.to_string())?;
+            text.strip_prefix("O:")
+                .map(str::to_string)
+                .ok_or_else(|| format!("unexpected owner SDDL: {text}"))
         }
     }
 

@@ -3806,16 +3806,23 @@ fn agy_base(slug: &str) -> &str {
 /// picker-default `gemini-pro-*` ids name no model — the catalog aliases
 /// them to the 3.1 Pro card, so probe and display that name.
 fn agy_priced(candidate: &str) -> Option<(pricing::Price, String)> {
+    agy_priced_with(candidate, pricing::lookup)
+}
+
+fn agy_priced_with(
+    candidate: &str,
+    lookup: impl Fn(&str) -> Option<pricing::Price>,
+) -> Option<(pricing::Price, String)> {
     let probe = match candidate {
         "gemini-pro-default" | "gemini-pro-agent" => "gemini-3.1-pro",
         _ => candidate,
     };
-    if let Some(p) = pricing::lookup(probe) {
+    if let Some(p) = lookup(probe) {
         return Some((p, agy_base(probe).to_string()));
     }
     let base = agy_base(candidate);
     if base != candidate {
-        if let Some(p) = pricing::lookup(base) {
+        if let Some(p) = lookup(base) {
             return Some((p, base.to_string()));
         }
     }
@@ -6287,12 +6294,20 @@ mod tests {
 
     #[test]
     fn agy_pricing_retries_the_base_slug_and_groups_display() {
+        // The checked-in feed's alias rules over catalog rows named as
+        // LiteLLM lists them — not whatever this machine last downloaded.
+        let lookup = pricing::shipped_feed_lookup_for_test(&[
+            ("gemini-3.1-pro-preview", pricing::Price::flat(2.0, 12.0, 0.2, 2.0)),
+            ("gemini-3-flash-preview", pricing::Price::flat(0.5, 3.0, 0.05, 0.5)),
+        ]);
+        let agy_priced = |c: &str| agy_priced_with(c, &lookup);
         // Effort-suffixed ids price at the base card and display under it.
         let (_p, display) = agy_priced("gemini-3.8-flash-high").expect("effort base prices");
         assert_eq!(display, "gemini-3.8-flash");
         // The picker default with no usable label is the Pro card.
-        let (_p, display) = agy_priced("gemini-pro-default").expect("pro default prices");
+        let (p, display) = agy_priced("gemini-pro-default").expect("pro default prices");
         assert_eq!(display, "gemini-3.1-pro");
+        assert_eq!((p.input, p.output), (2.0, 12.0));
         // Variant letters resolve through catalog aliases to the family.
         assert!(agy_priced("gemini-3-flash-b").is_some());
         // An unknown slug stays unpriced — never a guessed rate.
