@@ -1422,34 +1422,6 @@ fn file_days_inner(
     data
 }
 
-#[allow(dead_code)]
-fn file_days_full(
-    path: &Path,
-    parse: &mut dyn FnMut(&str, &mut FileData),
-    mtime: SystemTime,
-    _size: u64,
-    gen: u64,
-) -> FileData {
-    let mut data = FileData::default();
-    PROBES.with(|p| *p.borrow_mut() = Some(Vec::new()));
-    let Ok(file) = fs::File::open(path) else {
-        PROBES.with(|p| {
-            p.borrow_mut().take();
-        });
-        note_scan_gap();
-        return FileData::default();
-    };
-    let mut reader = BufReader::new(file);
-    let (read_ok, last_complete) = parse_jsonl_reader(&mut reader, parse, &mut data, 0, None);
-    let probes = PROBES.with(|p| p.borrow_mut().take()).unwrap_or_default();
-    if !read_ok {
-        note_scan_gap();
-        return data;
-    }
-    remember_file(path, mtime, last_complete, gen, probes, data.clone());
-    data
-}
-
 /// If `from` is mid-line, walk back at most 64 KB to the previous
 /// newline. Already-aligned offsets cost one byte. A cache that ended
 /// on a complete no-newline JSON value stays put when growth starts
