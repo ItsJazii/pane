@@ -144,9 +144,10 @@ Yesterday / 30-day donut with a per-model breakdown. Click the ring to
 flip between dollars and tokens. On a flat-rate plan this shows what
 your usage *would* cost at API prices — the best ad for your
 subscription you'll ever see. Requests on models with no public
-pricing keep their measured tokens in the counts, but no dollars are
-ever guessed for them — a ⚠ on the provider's spend row says the real
-cost runs a little higher than shown.
+pricing still count their measured tokens. A ⚠ on the provider's spend
+row means some requests couldn't be priced. For OpenCode messages that
+Pane cannot price, Pane keeps OpenCode's recorded cost, even if it's $0,
+without showing a warning for those messages.
 
 **5. Staying local.** All of the above happens on your machine. There is
 no account, and your quotas, spend, and provider data never leave your
