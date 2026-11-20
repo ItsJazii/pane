@@ -490,6 +490,7 @@ pub fn delete_site(path: &Path, id: &str) -> Result<(), String> {
     save(path, &doc)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn configured_key_count_at(path: &Path) -> usize {
     load(path)
         .map(|doc| doc.sites.iter().map(|s| s.keys.len()).sum())
