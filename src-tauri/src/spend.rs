@@ -366,12 +366,9 @@ struct PersistEntry {
     mtime_nanos: u32,
     size: u64,
     days: Vec<(i32, String, f64, f64)>,
-    /// Hourly buckets — (hour index, model key, cost, tokens). `None` =
-    /// written by a version that predates hours; that distinction drives
-    /// the backfill rule in load_persisted_cache (recent files re-parse
-    /// once, old files just stay empty). New writes always emit Some.
+    /// Hourly buckets — (hour index, model key, cost, tokens).
     #[serde(default)]
-    hours: Option<Vec<(i64, String, f64, f64)>>,
+    hours: Vec<(i64, String, f64, f64)>,
     unpriced: Vec<(String, u64)>,
     /// Pricing questions this file's parse asked (see `PriceProbe`).
     /// Older caches without the field deserialize as empty — safe, because
@@ -433,19 +430,12 @@ fn load_persisted_cache() {
         for e in doc.entries {
             let mtime = SystemTime::UNIX_EPOCH
                 + std::time::Duration::new(e.mtime_secs, e.mtime_nanos);
-            if needs_hours_backfill(e.hours.is_none(), mtime) {
-                // Cached before hourly buckets existed but still inside
-                // the window: re-parse once so window_totals sees it.
-                continue;
-            }
             let mut data = FileData::default();
             for (day, model, cost, tokens) in e.days {
                 data.days.insert((day, model), (cost, tokens));
             }
-            if let Some(hours) = e.hours {
-                for (hour, model, cost, tokens) in hours {
-                    data.hours.insert((hour, model), (cost, tokens));
-                }
+            for (hour, model, cost, tokens) in e.hours {
+                data.hours.insert((hour, model), (cost, tokens));
             }
             data.unpriced = e.unpriced.into_iter().collect();
             if !stamp_matches && !probes_still_vouch(&e.probes, &data) {
@@ -469,15 +459,6 @@ fn load_persisted_cache() {
             );
         }
     });
-}
-
-/// Backfill rule for caches written before hourly buckets: an entry with
-/// no `hours` whose file was modified inside the window is re-parsed once
-/// (the next save stores its hours). An older file can't hold in-window
-/// events — logs are append-only — so it keeps empty hours rather than
-/// re-reading gigabytes at launch.
-fn needs_hours_backfill(hours_absent: bool, mtime: SystemTime) -> bool {
-    hours_absent && mtime >= SystemTime::now() - Duration::from_secs(8 * 86_400)
 }
 
 /// Writes the cache back to disk (atomically, via temp + rename) when this
@@ -516,19 +497,15 @@ fn save_persisted_cache() {
                     .iter()
                     .map(|((day, model), (cost, tokens))| (*day, model.clone(), *cost, *tokens))
                     .collect(),
-                // Drop buckets the window has already rolled past; Some
-                // even when empty so the load side never re-parses an
-                // entry it already trusts.
-                hours: Some(
-                    e.data
-                        .hours
-                        .iter()
-                        .filter(|((hour, _), _)| *hour >= cutoff_hour)
-                        .map(|((hour, model), (cost, tokens))| {
-                            (*hour, model.clone(), *cost, *tokens)
-                        })
-                        .collect(),
-                ),
+                // Drop buckets the window has already rolled past.
+                hours: e.data
+                    .hours
+                    .iter()
+                    .filter(|((hour, _), _)| *hour >= cutoff_hour)
+                    .map(|((hour, model), (cost, tokens))| {
+                        (*hour, model.clone(), *cost, *tokens)
+                    })
+                    .collect(),
                 unpriced: e.data.unpriced.iter().map(|(m, c)| (m.clone(), *c)).collect(),
                 probes: e.probes.clone(),
                 prefix_head: e.prefix_head.clone(),
@@ -4449,6 +4426,16 @@ mod tests {
     // ---- Persistent cache: serialization roundtrip -----------------------
 
     #[test]
+    fn persisted_hours_keep_the_same_json_array_format() {
+        for hours in [vec![], vec![(495_123i64, "claude-fable-5".to_string(), 0.75, 24_000.0)]] {
+            let old = serde_json::to_string(&Some(&hours)).unwrap();
+            assert_eq!(old, serde_json::to_string(&hours).unwrap());
+            let back: Vec<(i64, String, f64, f64)> = serde_json::from_str(&old).unwrap();
+            assert_eq!(back, hours);
+        }
+    }
+
+    #[test]
     fn persist_file_roundtrips_losslessly() {
         let doc = PersistFile {
             version: PERSIST_VERSION,
@@ -4460,7 +4447,7 @@ mod tests {
                 mtime_nanos: 123_456_700, // NTFS 100ns precision must survive
                 size: 4096,
                 days: vec![(739_000, "claude-fable-5".into(), 1.25, 40_000.0)],
-                hours: Some(vec![(495_123, "claude-fable-5".into(), 0.75, 24_000.0)]),
+                hours: vec![(495_123, "claude-fable-5".into(), 0.75, 24_000.0)],
                 unpriced: vec![("mystery-model".into(), 3)],
                 probes: vec![
                     PriceProbe::Lookup {
@@ -7413,14 +7400,6 @@ mod tests {
         let kimi = split_kimi_routed(&mut k);
         assert_eq!(kimi.hours.get(&(hour, "k3".into())), Some(&(2.0, 200.0)));
         assert!(k.hours.is_empty());
-    }
-
-    #[test]
-    fn needs_hours_backfill_only_for_recent_unbucketed_files() {
-        let now = SystemTime::now();
-        assert!(needs_hours_backfill(true, now - Duration::from_secs(86_400)));
-        assert!(!needs_hours_backfill(true, now - Duration::from_secs(10 * 86_400)));
-        assert!(!needs_hours_backfill(false, now - Duration::from_secs(86_400)));
     }
 
     /// window_totals: None before the first completed scan, then sums the
