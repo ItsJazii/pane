@@ -253,11 +253,6 @@ body {
   flex: 1;
 }
 
-.titlebar-buttons {
-  display: flex;
-  gap: 2px;
-}
-
 #refresh,
 #settings-btn,
 #customize-btn,
@@ -469,12 +464,6 @@ select:focus-visible {
 
 .toggle input[type="checkbox"]:focus-visible {
   box-shadow: 0 0 0 3px rgb(212 212 216 / 0.2);
-}
-
-.toggles-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 7px 12px;
 }
 
 .key-row {
@@ -1113,10 +1102,6 @@ body.row-dragging #resets-pop {
   margin: 0;
   color: var(--muted-foreground);
   font-size: 12px;
-}
-
-.placeholder.loading {
-  padding: 8px;
 }
 
 .provider.muted {
@@ -2158,38 +2143,6 @@ body.party .trail-tick.active {
 
 /* --------------------------------------------- customize dock + accordion */
 
-/* Floating liquid-glass dock: appears when the Customize panel is scrolled,
-   keeping "← Done" reachable from anywhere in the list. */
-.cust-dock {
-  position: fixed;
-  top: 10px;
-  left: 50%;
-  transform: translate(-50%, -16px) scale(0.96);
-  z-index: 70;
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  padding: 4px;
-  border-radius: 999px;
-  background: rgba(24, 24, 27, 0.55);
-  backdrop-filter: blur(20px) saturate(1.4) brightness(1.02);
-  -webkit-backdrop-filter: blur(20px) saturate(1.4) brightness(1.02);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  box-shadow:
-    0 8px 32px -8px rgba(0, 0, 0, 0.45),
-    inset 0 1px 1.5px rgba(255, 255, 255, 0.35),
-    inset 0 -0.5px 1px rgba(255, 255, 255, 0.08);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.22s ease, transform 0.28s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.cust-dock.visible {
-  opacity: 1;
-  pointer-events: auto;
-  transform: translate(-50%, 0) scale(1);
-}
-
 .dock-btn {
   background: none;
   border: none;
@@ -2217,21 +2170,6 @@ body.party .trail-tick.active {
   color: #fecaca;
 }
 
-.dock-sep {
-  width: 1px;
-  height: 16px;
-  flex: none;
-  background: rgba(255, 255, 255, 0.14);
-}
-
-:root[data-theme="light"] .cust-dock {
-  background: rgba(255, 255, 255, 0.65);
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  box-shadow:
-    0 8px 32px -8px rgba(0, 0, 0, 0.14),
-    inset 0 1px 1.5px rgba(255, 255, 255, 0.6);
-}
-
 :root[data-theme="light"] .dock-btn:hover {
   background: rgba(0, 0, 0, 0.06);
 }
@@ -2242,10 +2180,6 @@ body.party .trail-tick.active {
 
 :root[data-theme="light"] .dock-btn.danger:hover {
   background: rgba(239, 68, 68, 0.12);
-}
-
-:root[data-theme="light"] .dock-sep {
-  background: rgba(0, 0, 0, 0.12);
 }
 
 /* Collapsed provider blocks: name + chevron; rows unfold on demand. */
@@ -2397,7 +2331,6 @@ body.party .trail-tick.active {
 body.no-glass .sidebar,
 body.no-glass .main-col footer,
 body.no-glass .glass-bar,
-body.no-glass .cust-dock,
 body.no-glass #widget-bar {
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
@@ -2405,7 +2338,6 @@ body.no-glass #widget-bar {
 body.no-glass .sidebar,
 body.no-glass .main-col footer,
 body.no-glass .glass-bar,
-body.no-glass .cust-dock,
 body.no-glass #widget-bar {
   background: var(--background) !important;
 }
