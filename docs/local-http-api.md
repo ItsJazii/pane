@@ -33,12 +33,17 @@ GET http://127.0.0.1:6736/v1/usage/:id      # one provider (e.g. /claude, /onene
 
 Wire format (compatible with the macOS OpenUsage API):
 
+For Claude, `plan` is `"ultra"` for Ultra (formerly Max 20x) as of Pane
+0.5.6. Max (formerly Max 5x) still reports `"max"`. Scripts matching
+Claude's `"max"` plan should also match `"ultra"` if they intend to cover
+both tiers.
+
 ```json
 [{
   "providerId": "claude",
   "displayName": "Claude",
-  "plan": "Max",
-  "fetchedAt": "2026-07-08T01:30:00Z",
+  "plan": "ultra",
+  "fetchedAt": "2026-11-23T01:30:00Z",
   "status": "ok",
   "stale": false,
   "lines": [{
@@ -47,7 +52,7 @@ Wire format (compatible with the macOS OpenUsage API):
     "used": 22.0,
     "limit": 100,
     "format": { "kind": "percent" },
-    "resetsAt": "2026-07-08T04:39:59Z",
+    "resetsAt": "2026-11-23T04:39:59Z",
     "periodDurationMs": 18000000
   }]
 }]
