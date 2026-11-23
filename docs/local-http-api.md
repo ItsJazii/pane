@@ -34,9 +34,10 @@ GET http://127.0.0.1:6736/v1/usage/:id      # one provider (e.g. /claude, /onene
 Wire format (compatible with the macOS OpenUsage API):
 
 For Claude, `plan` is `"ultra"` for Ultra (formerly Max 20x) as of Pane
-0.5.6. Max (formerly Max 5x) still reports `"max"`. Scripts matching
-Claude's `"max"` plan should also match `"ultra"` if they intend to cover
-both tiers.
+0.5.6. Max (formerly Max 5x) still reports `"max"`, as does a 20x account
+whose rate-limit tier is missing or unrecognized, so `"max"` alone does not
+prove the 5x tier. Scripts matching Claude's `"max"` plan should also match
+`"ultra"` if they intend to cover both tiers.
 
 ```json
 [{
