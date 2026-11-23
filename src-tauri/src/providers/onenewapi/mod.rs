@@ -246,14 +246,6 @@ where
     )
 }
 
-#[allow(dead_code)]
-pub fn configured_key_count() -> usize {
-    let Ok(_lock) = lock_store_mutation() else {
-        return 0;
-    };
-    store::configured_key_count_at(&store_path())
-}
-
 pub use snapshot::{refresh_clients, snapshot_key_with_client, KeyCard};
 
 pub fn key_cards() -> Result<Vec<KeyCard>, String> {
