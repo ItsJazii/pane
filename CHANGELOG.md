@@ -1,12 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.5.6 — 2026-11-23
 
 ### Fixed
-- **Claude Ultra accounts show "Ultra" (#332).** Anthropic renamed Max
-  20x to Ultra, but Claude Code still saves both plans as "max", so the
-  card showed "Max". Pane now reads the plan's rate-limit tier to tell
-  them apart.
+- **Claude Ultra accounts show "Ultra" (#332, #337).** Anthropic renamed
+  Max 20x to Ultra, but Claude Code still saves both plans as "max", so
+  the card showed "Max". Pane now reads the plan's rate-limit tier to
+  tell them apart. Thanks @SayDing for the report.
+
+### Maintenance
+- Removed unused code, styles and a JavaScript package, and an old
+  spend-cache upgrade step that no supported version needs anymore
+  (#326, #333, #334, #335, #336). No changes to how Pane behaves.
+- Tests now run automatically on every pull request (#331), and four
+  Windows-only test failures are fixed (#330).
 
 ## 0.5.5 — 2026-11-17
 
