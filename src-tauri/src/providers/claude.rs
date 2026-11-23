@@ -332,16 +332,16 @@ const ROTATED_MSG: &str =
 /// Refresh rotates the CLI's tokens, so the new pair is staged and
 /// written back BEFORE it can be used; a pair that can't replace the
 /// live file is never returned (that would sign the CLI out).
-/// The card's plan label. Anthropic renamed Max 20x to **Ultra** and Max
-/// 5x to **Max** on 2026-10-30, but Claude Code still writes
-/// `subscriptionType: "max"` for both — only `rateLimitTier`
-/// (`…_max_20x` / `…_max_5x`) tells them apart. Anything else, including
-/// a future `"ultra"`, passes through unchanged.
+/// The card's plan label, in Claude Code's own lowercase spelling (the
+/// card capitalizes it; the local API passes it through). Anthropic
+/// renamed Max 20x to Ultra on 2026-10-30, but Claude Code still writes
+/// `subscriptionType: "max"` for both Max plans — only a `rateLimitTier`
+/// ending in `_max_20x` marks Ultra, so that alone becomes `"ultra"`, the
+/// value Claude Code will write once it learns the name. Everything else
+/// passes through unchanged.
 fn plan_label(subscription: Option<&str>, tier: Option<&str>) -> Option<String> {
-    let tier = tier.unwrap_or_default();
     match subscription {
-        Some("max") if tier.ends_with("_max_20x") => Some("Ultra".into()),
-        Some("max") if tier.ends_with("_max_5x") => Some("Max".into()),
+        Some("max") if tier.is_some_and(|t| t.ends_with("_max_20x")) => Some("ultra".into()),
         other => other.map(str::to_string),
     }
 }
@@ -865,8 +865,8 @@ mod tests {
     #[test]
     fn max_20x_tier_is_labelled_ultra() {
         // Issue #332: an Ultra account still writes subscriptionType "max".
-        assert_eq!(plan_label(Some("max"), Some("default_claude_max_20x")).as_deref(), Some("Ultra"));
-        assert_eq!(plan_label(Some("max"), Some("default_claude_max_5x")).as_deref(), Some("Max"));
+        assert_eq!(plan_label(Some("max"), Some("default_claude_max_20x")).as_deref(), Some("ultra"));
+        assert_eq!(plan_label(Some("max"), Some("default_claude_max_5x")).as_deref(), Some("max"));
         // No or unknown tier, other plans and a future "ultra" pass through.
         assert_eq!(plan_label(Some("max"), None).as_deref(), Some("max"));
         assert_eq!(plan_label(Some("max"), Some("default_claude_ai")).as_deref(), Some("max"));
