@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Claude Ultra accounts show "Ultra" (#332).** Anthropic renamed Max
+  20x to Ultra, but Claude Code still saves both plans as "max", so the
+  card showed "Max". Pane now reads the plan's rate-limit tier to tell
+  them apart.
+
 ## 0.5.5 — 2026-11-17
 
 ### Fixed

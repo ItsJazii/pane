@@ -52,6 +52,10 @@ guessed dollar amount.
   `api.anthropic.com/api/organizations/<org>/reset_rate_limits`
   (spending a banked reset);
   `platform.claude.com/v1/oauth/token` (refresh, written back).
+- **Plan label:** `subscriptionType` from the credentials file; a `max`
+  account whose `rateLimitTier` ends in `_max_20x` reports `ultra`
+  (shown as **Ultra**; Anthropic's 2026-10-30 rename of Max 20x — Claude
+  Code still writes `max` for both). Max 5x stays `max`.
 - **Shows:** Session + Weekly windows, per-model weeklies, Extra Usage
   overage, and the Cloud session credits bar (`iguana_necktie`) — the
   included dollar credit for Claude Code cloud sessions, counting down

@@ -332,7 +332,21 @@ const ROTATED_MSG: &str =
 /// Refresh rotates the CLI's tokens, so the new pair is staged and
 /// written back BEFORE it can be used; a pair that can't replace the
 /// live file is never returned (that would sign the CLI out).
-/// Returns (access token, subscriptionType).
+/// The card's plan label, in Claude Code's own lowercase spelling (the
+/// card capitalizes it; the local API passes it through). Anthropic
+/// renamed Max 20x to Ultra on 2026-10-30, but Claude Code still writes
+/// `subscriptionType: "max"` for both Max plans — only a `rateLimitTier`
+/// ending in `_max_20x` marks Ultra, so that alone becomes `"ultra"`, the
+/// value Claude Code will write once it learns the name. Everything else
+/// passes through unchanged.
+fn plan_label(subscription: Option<&str>, tier: Option<&str>) -> Option<String> {
+    match subscription {
+        Some("max") if tier.is_some_and(|t| t.ends_with("_max_20x")) => Some("ultra".into()),
+        other => other.map(str::to_string),
+    }
+}
+
+/// Returns (access token, plan label).
 async fn oauth_access(dir: &std::path::Path) -> Result<(String, Option<String>), String> {
     let path = dir.join(".credentials.json");
     // Two attempts: a refresh raced with Claude Code can fail with
@@ -368,10 +382,10 @@ async fn oauth_access_once(
         .unwrap_or_default()
         .to_string();
     let expires_at = oauth.get("expiresAt").and_then(Value::as_i64).unwrap_or(0);
-    let plan = oauth
-        .get("subscriptionType")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    let plan = plan_label(
+        oauth.get("subscriptionType").and_then(Value::as_str),
+        oauth.get("rateLimitTier").and_then(Value::as_str),
+    );
 
     // Tokens go stale; swap the refresh token for a fresh access token when needed.
     let now_ms = Utc::now().timestamp_millis();
@@ -843,10 +857,23 @@ fn backup_credentials(path: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::{
-        banked_resets, cloud_credits, identity_from, parse_reset_credit_id, push_weekly_scoped,
-        rotated_since, scoped_id_charset, usage_error,
+        banked_resets, cloud_credits, identity_from, parse_reset_credit_id, plan_label,
+        push_weekly_scoped, rotated_since, scoped_id_charset, usage_error,
     };
     use serde_json::json;
+
+    #[test]
+    fn max_20x_tier_is_labelled_ultra() {
+        // Issue #332: an Ultra account still writes subscriptionType "max".
+        assert_eq!(plan_label(Some("max"), Some("default_claude_max_20x")).as_deref(), Some("ultra"));
+        assert_eq!(plan_label(Some("max"), Some("default_claude_max_5x")).as_deref(), Some("max"));
+        // No or unknown tier, other plans and a future "ultra" pass through.
+        assert_eq!(plan_label(Some("max"), None).as_deref(), Some("max"));
+        assert_eq!(plan_label(Some("max"), Some("default_claude_ai")).as_deref(), Some("max"));
+        assert_eq!(plan_label(Some("pro"), Some("default_claude_max_20x")).as_deref(), Some("pro"));
+        assert_eq!(plan_label(Some("ultra"), None).as_deref(), Some("ultra"));
+        assert_eq!(plan_label(None, Some("default_claude_max_20x")), None);
+    }
 
     #[test]
     fn rotated_since_flags_only_a_changed_disk_refresh_token() {
