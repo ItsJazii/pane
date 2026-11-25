@@ -6,7 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { t } from "./i18n";
 import type { Config } from "./main";
 
-export interface WidgetDeps {
+interface WidgetDeps {
   getConfig: () => Config;
   patchConfig: (patch: Partial<Config>) => Promise<void>;
   brandColor: (providerId: string) => string;
