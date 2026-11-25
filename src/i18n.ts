@@ -1308,7 +1308,7 @@ let active: Locale = "en";
 /// Filled from Rust `system_ui_locale` so Auto matches tray/toasts.
 let systemLocale: Locale | null = null;
 
-export function detectSystemLocale(): Locale {
+function detectSystemLocale(): Locale {
   const lang = (navigator.language || "").toLowerCase();
   if (lang.startsWith("zh")) return "zh";
   if (lang.startsWith("ru")) return "ru";
@@ -1332,7 +1332,7 @@ export function setActiveLocale(locale: Locale): void {
   active = locale;
 }
 
-export function getLocale(): Locale {
+function getLocale(): Locale {
   return active;
 }
 
