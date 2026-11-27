@@ -73,7 +73,6 @@ impl Metric {
         }
     }
 
-    #[allow(dead_code)]
     pub fn text(label: &str, value: String) -> Self {
         Self {
             label: label.into(),
