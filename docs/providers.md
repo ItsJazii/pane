@@ -351,7 +351,7 @@ guessed dollar amount.
   read-only (the .pb transcripts carry no token data). Dollars are a
   catalog-rate estimate, not a charge.
 
-## DeepSeek / Kimi API / ElevenLabs / Venice-class key providers
+## DeepSeek / Kimi API / ElevenLabs key providers
 
 - **Reads:** pasted key or env var only (`DEEPSEEK_API_KEY`,
   `MOONSHOT_API_KEY`/`KIMI_API_KEY`, `ELEVENLABS_API_KEY`).
